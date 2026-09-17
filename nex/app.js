@@ -571,13 +571,79 @@
         } else {
           anim.setState({ state: 'SPEAKING', params: {} });
         }
-      }</old_text> else if (evt.type === 'emotion') {
+      } else if (evt.type === 'emotion') {
         // Optional explicit emotion event from the backend.
         if (evt.state) anim.setState({ state: evt.state, params: {} });
+      } else if (evt.type === 'plan.submitted') {
+        // A model reply contained a JSON plan. Show a confirm banner
+        // so the user can approve / cancel destructive steps.
+        showPlanBanner(evt.plan);
       } else if (evt.type === 'hello') {
         // no-op; backend announces its config here.
       }
     };
+
+  function showPlanBanner(plan) {
+    // Minimal in-page banner. Built on top of the existing #bubble
+    // element so we don't need a stylesheet change. Reusing the
+    // bubble keeps the visual style consistent with the rest of
+    // the chat surface.
+    if (!plan || !plan.id) return;
+    const confirmed = !plan.needs_confirmation;
+    const stepCount = plan.step_count || 0;
+    const destructive = (plan.classifications || []).filter(
+        c => c === 'destructive').length;
+    const summary = (plan.title || 'plan') + " · "
+                  + stepCount + " step" + (stepCount === 1 ? '' : 's')
+                  + (destructive
+                     ? " · " + destructive + " destructive"
+                     : "")
+                  + (confirmed
+                     ? " (safe — auto-running)"
+                     : " (confirm to run)");
+    const bubble = document.getElementById('bubble');
+    if (!bubble) return;
+    bubble.textContent = "";
+    const line = document.createElement('div');
+    line.textContent = summary;
+    bubble.appendChild(line);
+    if (!confirmed) {
+      const btnRow = document.createElement('div');
+      btnRow.style.marginTop = '6px';
+      const approve = document.createElement('button');
+      approve.textContent = 'Approve + run';
+      approve.onclick = async () => {
+        await fetch('/api/plan/' + plan.id + '/confirm',
+                    { method: 'POST' });
+        await fetch('/api/plan/' + plan.id + '/execute',
+                    { method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ stop_on_error: false }) });
+        bubble.hidden = true;
+      };
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      cancel.style.marginLeft = '6px';
+      cancel.onclick = async () => {
+        await fetch('/api/plan/' + plan.id + '/cancel',
+                    { method: 'POST' });
+        bubble.hidden = true;
+      };
+      btnRow.appendChild(approve);
+      btnRow.appendChild(cancel);
+      bubble.appendChild(btnRow);
+    } else {
+      // All-safe plan — kick off immediately so the user doesn't have
+      // to click. The model has been told not to include destructive
+      // steps in a no-confirm plan, so this is safe.
+      fetch('/api/plan/' + plan.id + '/execute',
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ stop_on_error: false }) });
+      setTimeout(() => { bubble.hidden = true; }, 4000);
+    }
+    bubble.hidden = false;
+  }
     es.onerror = () => {
       // Will auto-retry; do nothing.
     };
