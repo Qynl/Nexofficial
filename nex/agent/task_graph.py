@@ -68,9 +68,13 @@ class TaskGraph:
         for t in self._tasks.values():
             if t.status != PENDING:
                 continue
-            if all(self._tasks[d].status == SUCCESS for d in t.deps):
+            if self.deps_met(t):
                 out.append(t)
         return out
+
+    def deps_met(self, task: Task) -> bool:
+        """Are all of `task`'s dependencies currently SUCCESS?"""
+        return all(self._tasks[d].status == SUCCESS for d in task.deps)
 
     def dependents(self, tid: str) -> List[str]:
         return list(self._dependents.get(tid, []))

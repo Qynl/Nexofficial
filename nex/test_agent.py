@@ -205,4 +205,25 @@ def _is_empty(r):
     return r is None or (isinstance(r, dict) and len(r) == 0)
 
 
+# ---------------------------------------------------------------------------
+# 8. Multi-pass recovery: a failed task that can succeed on a later attempt
+#    is revived and retried rather than left BLOCKED after one pass.
+# ---------------------------------------------------------------------------
+rec_mock = mock_mcp.MockMCPServer(
+    "qa2", [{"name": "make_thing", "description": "x", "inputSchema": {}}],
+    # Fails the first 3 calls globally, then succeeds (simulates a flaky /
+    # eventually-ready upstream). max_attempts(3) exhausts within pass 1,
+    # so only the recovery pass can get it through.
+    fail={"make_thing": {"count": 3, "error": "transient blip"}})
+reg_rec = agent_loop.CapabilityRegistry([mock_mcp.server_view("qa2", rec_mock)])
+g_rec = task_graph.TaskGraph()
+g_rec.add(task_graph.Task(id="rec", name="make", stage="make",
+                          server="qa2", tool="make_thing", args={}))
+rep_rec = agent_loop.AutonomousAgent(reg_rec, recovery_passes=1).run(
+    "make a thing", graph=g_rec)
+_expect("make" in rep_rec.completed,
+        "recovery pass revives + retries a flaky task: %s" % rep_rec.status)
+_expect(g_rec.get("rec").result is not None, "recovered task produced a result")
+
+
 print("\nAll agent tests passed.")

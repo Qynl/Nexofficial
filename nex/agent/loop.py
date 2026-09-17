@@ -108,7 +108,8 @@ class AutonomousAgent:
                  approver: Optional[Callable[[Any], bool]] = None,
                  max_iterations: int = 400,
                  backoff_base: float = 0.1,
-                 max_backoff: float = 2.0) -> None:
+                 max_backoff: float = 2.0,
+                 recovery_passes: int = 1) -> None:
         self.registry = registry
         self.planner = planner or default_planner
         self.policy = policy or current_policy()
@@ -118,6 +119,11 @@ class AutonomousAgent:
         self.max_iterations = max_iterations
         self.backoff_base = backoff_base
         self.max_backoff = max_backoff
+        # Extra recovery passes: after the first pass, revive skipped/failed
+        # tasks (re-running repair + same-tool-on-another-server recovery)
+        # before declaring the run blocked. This is what keeps the agent from
+        # "always stopping" at the first failure.
+        self.recovery_passes = max(0, recovery_passes)
 
     # ----- event helper ---------------------------------------------------
     def _emit(self, agent_state=None, event_type=None, **payload) -> None:
@@ -145,16 +151,47 @@ class AutonomousAgent:
 
         state.pending = [t.name for t in graph.all() if t.status == PENDING]
 
-        iterations = 0
-        while not graph.is_terminal() and iterations < self.max_iterations:
-            iterations += 1
+        # --- Execution with multi-pass recovery ------------------------------
+        # Pass 1 executes everything that's ready. If failures leave the graph
+        # non-terminal (skipped dependents / failed leaves), we REVIVE and try
+        # again (up to `recovery_passes` extra times) instead of stopping.
+        # This is what keeps Nex from "always stopping" at the first failure:
+        # it re-runs repair + same-tool-on-another-server recovery before it
+        # ever reports a task as truly blocked.
+        passes = 0
+        max_passes = 1 + self.recovery_passes
+        while passes < max_passes:
+            passes += 1
+            # Drain every ready wave within this pass (traverse the DAG).
+            while True:
+                ready = graph.ready()
+                if not ready:
+                    break
+                for task in ready:
+                    self._execute_task(task, state, graph)
+            # Either everything is terminal, or some tasks are blocked
+            # (failed / skipped). If terminal, we're done.
+            if graph.is_terminal():
+                # Only failed/skipped remain. Try to revive them for another
+                # pass before declaring the run blocked.
+                if not self._revive(graph):
+                    break
+                continue
+            if not self._revive(graph):
+                break
+
+        # Guaranteed final drain: a recovery pass may have just re-PENDINGed a
+        # previously-failed task right as the pass budget ran out. Give it one
+        # execution so its outcome (success or genuine failure) is reported
+        # instead of being left dangling as PENDING.
+        while True:
             ready = graph.ready()
             if not ready:
                 break
             for task in ready:
                 self._execute_task(task, state, graph)
-                if graph.is_terminal():
-                    break
+            if graph.is_terminal():
+                break
 
         succeeded = [t.name for t in graph.completed()]
         failed = [t.name for t in graph.failed()]
@@ -185,6 +222,36 @@ class AutonomousAgent:
 
         return CompletionReport(status=status, goal=goal, completed=succeeded,
                                failed=failed, skipped=skipped, reasons=reasons)
+
+    def _revive(self, graph: TaskGraph) -> bool:
+        """Prepare the graph for another recovery pass.
+
+        Returns True if anything changed (so the caller knows to loop again).
+        Revives:
+          * SKIPPED tasks whose dependencies are now SUCCESS (a previously
+            failed dependency may have been recovered).
+          * FAILED tasks -> reset to PENDING with a fresh attempt budget so the
+            full repair + alt-server path runs once more.
+        Authorization/confirmation failures are NOT revived (they won't fix
+        themselves) — they stay FAILED.
+        """
+        changed = False
+        for t in graph.all():
+            if t.status == SKIPPED and graph.deps_met(t):
+                t.status = PENDING
+                t.notes = ""
+                changed = True
+            elif t.status == FAILED:
+                # If it was denied by policy, leave it failed.
+                if t.error and "never authorized" in (t.error or ""):
+                    continue
+                t.status = PENDING
+                t.attempts = 0
+                t.error = None
+                t.error_signature = None
+                t.tried_alts = []
+                changed = True
+        return changed
 
     # ----- per-task execution with retry/repair ---------------------------
     def _find_alternative(self, task: Any) -> Optional[Any]:
@@ -288,11 +355,15 @@ class AutonomousAgent:
                     time.sleep(min(self.backoff_base, self.max_backoff))
                     continue
 
-                # E) cannot repair -> stop and propagate
+                # D) no repair available -> naive retry. The per-task attempt
+                # budget (max_attempts) and the repeated-error guard above
+                # decide when to give up; this lets flaky/transient failures
+                # self-heal instead of failing on the first try, and lets a
+                # recovery pass get a fresh attempt at a now-healthy upstream.
                 task.error = err
-                graph.mark_failed(task.id, err, sig)
-                state.record_failure(task.name, err)
-                return
+                time.sleep(min(self.backoff_base * (2 ** (task.attempts - 1)),
+                               self.max_backoff))
+                continue
 
             # Success path -> VERIFY.
             result = resp.get("result") if isinstance(resp, dict) else resp
