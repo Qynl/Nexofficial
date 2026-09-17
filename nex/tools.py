@@ -76,15 +76,18 @@ def _resolve(path: str) -> str:
     """Resolve `path` to an absolute path within TOOLS_ROOT. Raises on escape.
 
     An empty string resolves to TOOLS_ROOT itself (the workspace root).
+    Symlinks are resolved (realpath) so a symlinked path can't be used to
+    escape the sandbox via a parent that points outside TOOLS_ROOT.
     """
     # Reject absolute paths and parent traversal BEFORE resolving.
     if os.path.isabs(path):
         raise PermissionError("absolute paths are not allowed: " + path)
     if not path:
         return TOOLS_ROOT
-    candidate = os.path.normpath(os.path.join(TOOLS_ROOT, path))
-    # After join + normpath, ensure the result is still under TOOLS_ROOT.
-    if not (candidate == TOOLS_ROOT or candidate.startswith(TOOLS_ROOT + os.sep)):
+    root = os.path.realpath(TOOLS_ROOT)
+    candidate = os.path.realpath(os.path.abspath(os.path.join(TOOLS_ROOT, path)))
+    # After join + normpath + realpath, ensure the result is still rooted.
+    if not (candidate == root or candidate.startswith(root + os.sep)):
         raise PermissionError("path escapes TOOLS_ROOT: " + path)
     return candidate
 

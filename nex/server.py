@@ -2234,6 +2234,11 @@ class NexHandler(BaseHTTPRequestHandler):
         else:
             messages_for_model = history_snapshot
 
+        # Nudge the model to emit a plan (instead of free-form chat) when
+        # the user's turn looks like substantial work. This wires up the
+        # previously-dead looks_like_work_request / PLAN_HINT logic.
+        messages_for_model = _mc.append_AAA_workflow(messages_for_model)
+
         try:
             for token in model_chat_stream(messages_for_model):
                 full_raw += token

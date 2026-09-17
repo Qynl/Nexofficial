@@ -61,6 +61,7 @@ class Observer:
         self._log_path = os.path.join(self._tools_root, ".nex_log.jsonl")
         self._last_offset = 0          # bytes already consumed
         self._last_speak_t = 0.0       # last time we emitted an autonomous speak
+        self._last_activity_t = 0.0     # last chat/log activity (drives idle timer)
         self._recent_summarised = []   # entries already summarised
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -93,7 +94,7 @@ class Observer:
     def force_speak(self, text: str, emotion: Optional[str] = None) -> None:
         """Bypass the cooldown and speak immediately. Used by tests and
         by other tools that want to inject autonomous speech."""
-        self._emit_speak(text, emotion)
+        self._emit_speak(text, emotion, force=True)
 
     # ----- internals ------------------------------------------------------
 
@@ -101,27 +102,30 @@ class Observer:
         # Wait briefly for the server thread to finish booting so the
         # first emit doesn't race the WAKE→IDLE transition.
         time.sleep(0.5)
-        last_user_msg_t = time.monotonic()
+        self._last_activity_t = time.monotonic()
         while not self._stop.is_set():
             try:
-                self._tick(last_user_msg_t)
+                self._tick()
             except Exception as exc:  # noqa: BLE001
                 # Never let the observer die silently.
                 import sys
                 sys.stderr.write("observer error: %s\n" % exc)
             self._stop.wait(LOG_POLL_MS / 1000.0)
 
-    def _tick(self, last_user_msg_t: float) -> None:
+    def _tick(self) -> None:
         # 1) Read any new log entries since last offset.
         new_entries = self._read_new_entries()
         if new_entries:
-            last_user_msg_t = time.monotonic()
+            # New activity resets the idle clock, so an idle summary
+            # never fires while the user is actively working.
+            self._last_activity_t = time.monotonic()
             self._maybe_summarise(new_entries)
 
         # 2) Idle trigger: no chat activity for IDLE_TRIGGER_S AND we
         #    have fresh, unsummarised entries.
         now = time.monotonic()
-        if (now - last_user_msg_t) >= IDLE_TRIGGER_S and self._recent_summarised:
+        if (now - self._last_activity_t) >= IDLE_TRIGGER_S \
+                and self._recent_summarised:
             self._idle_summary()
 
     def _read_new_entries(self) -> List[Dict[str, Any]]:
@@ -181,10 +185,12 @@ class Observer:
                " [FOCUSED]"
         self._emit_speak(text, emotion="FOCUSED")
 
-    def _emit_speak(self, text: str, emotion: Optional[str] = None) -> None:
+    def _emit_speak(self, text: str, emotion: Optional[str] = None,
+                    force: bool = False) -> None:
         now = time.monotonic()
-        # Honour cooldown (unless caller is forcing).
-        if now - self._last_speak_t < COOLDOWN_S:
+        # Honour cooldown unless the caller explicitly bypasses it
+        # (force_speak does — used by tools/tests that must emit now).
+        if not force and (now - self._last_speak_t) < COOLDOWN_S:
             return
         self._last_speak_t = now
         # Strip any inline tags from the text and extract the first state.

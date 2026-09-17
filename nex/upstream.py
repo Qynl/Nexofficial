@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -77,6 +78,10 @@ class Upstream:
         self._stdio_lock: Any = None
         self._stdio_writer = None
         self._stdio_reader = None
+        # Re-entrant lock: connect() -> _fetch_tools() -> _rpc() can
+        # recurse, and concurrent tool calls must serialize on one
+        # upstream so we never double-initialize or clobber state.
+        self._lock = threading.RLock()
 
     # ---------- introspection ------------------------------------------------
 
@@ -404,12 +409,25 @@ class Upstream:
         Returns the InitializeResult. Caches `serverInfo` and the
         session id for future calls. Idempotent: re-calling resets the
         session if the upstream has forgotten us.
+
+        Raises UpstreamError on any failure (probe, handshake, or a
+        circuit breaker that is open) so callers can report it uniformly;
+        the previous "return a dict with an 'error' key" shortcut for the
+        circuit breaker was inconsistent with every other failure path.
         """
+        with self._lock:
+            return self._connect_locked()
+
+    def _connect_locked(self) -> Dict[str, Any]:
+        # Reset any stale state FIRST so a previously-cached-but-now-dead
+        # upstream is fully re-probed, and a failed connect never leaves
+        # half-initialized state behind for the next caller.
+        self._initialized = False
+        self._server_info = {}
+        self._tools_cache = []
         if self._circuit_open():
-            return {
-                "error": "circuit breaker open: " +
-                (self._last_error or "upstream down"),
-            }
+            raise UpstreamError(
+                "circuit breaker open: " + (self._last_error or "upstream down"))
         # stdio children don't need a TCP probe — we'll spawn on first
         # send. is_reachable() returns False for unknown schemes, so
         # special-case the stdio URL.
@@ -455,6 +473,8 @@ class Upstream:
             self._tools_cache = self._fetch_tools()
             self._tools_fetched_at = time.monotonic()
         except UpstreamError:
+            # Handshake succeeded but tools/list failed — stay
+            # initialized and let tools() retry on demand.
             pass
         return result
 
@@ -476,34 +496,36 @@ class Upstream:
 
     def tools(self) -> List[Dict[str, Any]]:
         """Cached tool list, refreshed every `_tools_cache_ttl_s`."""
-        if (not self._tools_cache
-                or time.monotonic() - self._tools_fetched_at
-                > self._tools_cache_ttl_s):
-            try:
-                self._tools_cache = self._fetch_tools()
-                self._tools_fetched_at = time.monotonic()
-            except UpstreamError as exc:
-                # Keep last good cache; record the failure so the
-                # gateway can report stale but usable.
-                if not self._tools_cache:
-                    self._last_error = str(exc)
-                raise
-        return list(self._tools_cache)
+        with self._lock:
+            if (not self._tools_cache
+                    or time.monotonic() - self._tools_fetched_at
+                    > self._tools_cache_ttl_s):
+                try:
+                    self._tools_cache = self._fetch_tools()
+                    self._tools_fetched_at = time.monotonic()
+                except UpstreamError as exc:
+                    # Keep last good cache; record the failure so the
+                    # gateway can report stale but usable.
+                    if not self._tools_cache:
+                        self._last_error = str(exc)
+                    raise
+            return list(self._tools_cache)
 
     def call(self, tool_name: str,
              arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Invoke a tool on this upstream. Returns the raw JSON-RPC reply."""
-        if not self._initialized:
-            self.connect()
-        resp = self._rpc("tools/call",
-                         {"name": tool_name, "arguments": arguments or {}})
-        if "error" in resp:
-            # Surface a small, LLM-readable message.
-            err = resp["error"]
-            raise UpstreamError(
-                "tool error: " + err.get("message", "unknown")
-                + " (code " + str(err.get("code", -1)) + ")")
-        return resp
+        with self._lock:
+            if not self._initialized:
+                self.connect()
+            resp = self._rpc("tools/call",
+                             {"name": tool_name, "arguments": arguments or {}})
+            if "error" in resp:
+                # Surface a small, LLM-readable message.
+                err = resp["error"]
+                raise UpstreamError(
+                    "tool error: " + err.get("message", "unknown")
+                    + " (code " + str(err.get("code", -1)) + ")")
+            return resp
 
 
 # ----------------------------------------------------------------------------

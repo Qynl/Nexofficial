@@ -267,6 +267,23 @@ finally:
         os.environ.pop("LOCALAPPDATA", None)
 
 
+# ---------- 5c. mc.append_AAA_workflow / looks_like_work_request --------
+from mc import append_AAA_workflow, looks_like_work_request
+_expect(looks_like_work_request("Build me a level with a boss fight") is True,
+        "looks_like_work_request true for a build request")
+_expect(looks_like_work_request("hi there") is False,
+        "looks_like_work_request false for small chat")
+_full = append_AAA_workflow(
+    [{"role": "user", "content": "Build me a level with a boss fight"}])
+_expect(any(m.get("role") == "system" and "plan" in m.get("content", "")
+              for m in _full),
+        "append_AAA_workflow adds the plan hint on a work request")
+_chat = append_AAA_workflow([{"role": "user", "content": "hi there"}])
+_expect(not any(m.get("role") == "system" and "plan" in m.get("content", "")
+                 for m in _chat),
+        "append_AAA_workflow omits the hint for small chat")
+_expect(len(append_AAA_workflow([])) == 0,
+        "append_AAA_workflow([]) returns an empty list")
 # ---------- 6. mc_tools.py: compile_check -----------------------------
 
 # Real Python — should pass.

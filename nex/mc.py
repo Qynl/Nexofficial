@@ -601,3 +601,29 @@ PLAN_HINT = (
     "plan JSON {\"plan\":{...}} and the harness will validate + run "
     "it. Keep the plan focused on what's actually needed.]"
 )
+
+
+def append_AAA_workflow(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Inject the "use a plan" reminder when the latest user turn looks
+    like substantial work.
+
+    This is what actually wires `looks_like_work_request` + `PLAN_HINT`
+    into the chat pipeline (previously both existed but were never
+    called). Returns a (possibly new) list; the caller's list is never
+    mutated in place. If the last user message is a small chat ("hi",
+    "thanks"), nothing is added and the model just converses.
+    """
+    if not messages:
+        return messages
+    last_user: str = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = m.get("content", "") or ""
+            break
+    if not last_user:
+        return messages
+    if looks_like_work_request(last_user):
+        out = list(messages)
+        out.append({"role": "system", "content": PLAN_HINT})
+        return out
+    return messages

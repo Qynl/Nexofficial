@@ -302,10 +302,11 @@ def engine_info(engine: str) -> Dict[str, Any]:
 
 def _resolve_sandbox(path: str) -> Optional[str]:
     """Return the absolute path under WORKSPACE_ROOT if it stays inside,
-    or None if it escapes."""
-    root = os.path.abspath(WORKSPACE_ROOT)
-    candidate = os.path.abspath(os.path.join(root, path))
-    if not (candidate + os.sep).startswith(root + os.sep) and candidate != root:
+    or None if it escapes. Symlinks are resolved so a symlinked parent
+    can't be used to escape the sandbox."""
+    root = os.path.realpath(WORKSPACE_ROOT)
+    candidate = os.path.realpath(os.path.abspath(os.path.join(WORKSPACE_ROOT, path)))
+    if not (candidate == root or candidate.startswith(root + os.sep)):
         return None
     return candidate
 

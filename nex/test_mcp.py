@@ -305,6 +305,19 @@ _expect("speak.end" in _types, "force_speak produced speak.end")
 _expect(o._last_speak_t > 0, "force_speak updated last_speak_t (cooldown anchor)")
 
 
+# 12c. force_speak must BYPASS the speaking cooldown (regression: it used
+# to fall through to the cooldown check and swallow the second speak).
+_fake2 = _FakeObserver()
+o2 = observer.Observer(_fake2.publish)
+before = len(_fake2._events)
+o2.force_speak("first", emotion="HAPPY")
+mid = len(_fake2._events)
+o2.force_speak("second", emotion="HAPPY")  # immediately, within cooldown
+after = len(_fake2._events)
+_expect(mid > before, "force_speak emits the first autonomous speak")
+_expect(after > mid, "force_speak bypasses cooldown and emits again immediately")
+
+
 # ---------------------------------------------------------------------
 # 13. Sandbox: search_files constrained to workspace
 # ---------------------------------------------------------------------
