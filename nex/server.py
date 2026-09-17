@@ -1059,6 +1059,11 @@ class NexHandler(BaseHTTPRequestHandler):
             # REST list of available tools (handy for the dev panel).
             # Includes namespaced upstream tools when tunnels are up.
             self._send_json(200, {"tools": self._mcp_tools_list().get("tools", [])})
+        elif path == "/api/agent/capabilities":
+            # Live MCP capability registry (server view) — what the agent
+            # actually sees, not a curated doc.
+            from agent.server_run import agent_capabilities
+            self._send_json(200, agent_capabilities())
         elif path == "/api/tunnels":
             from tunnels import get_tunnels
             summary = get_tunnels().summary()
@@ -1106,6 +1111,9 @@ class NexHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat":
             self._handle_chat()
+            return
+        if path == "/api/agent/run":
+            self._handle_agent_run()
             return
         if path == "/api/reset":
             with HISTORY_LOCK:
@@ -1773,6 +1781,34 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def _mcp_tools_call(self, name: str,
                         arguments: Dict[str, Any]) -> Dict[str, Any]:
+        # ---- MCP-only enforcement (architecture boundary) -------------------
+        # Active only when NEX_MCP_ONLY=1. Any external action that is NOT a
+        # connected MCP tool (or an explicitly allowed internal tool) is
+        # rejected here — this is a real gate, not a prompt instruction.
+        if os.environ.get("NEX_MCP_ONLY") == "1":
+            from mcp.policy import authorize, current_policy
+            from mcp.capability import ToolCapability
+            server = name.split(".", 1)[0] if "." in name else None
+            cap = None
+            for t in self._mcp_tools_list().get("tools", []):
+                if t.get("name") == name:
+                    cd = t.get("_capability") or {}
+                    cap = ToolCapability(
+                        category=cd.get("category", "unknown"),
+                        read_only=cd.get("read_only", False),
+                        reversible=cd.get("reversible", False),
+                        destructive=cd.get("destructive", False),
+                        network=cd.get("network", False),
+                        requires_confirmation=cd.get("requires_confirmation", True),
+                        source=cd.get("source", "conservative"),
+                    )
+                    break
+            decision = authorize(server, name, cap, current_policy())
+            if not decision.allowed:
+                return {"content": [{"type": "text",
+                                     "text": "blocked by MCP-only policy: "
+                                     + decision.reason}],
+                        "isError": True}
         # Local-prefix tools below are handled without the registry.
         if name in ("who_am_i", "list_platforms", "call_upstream",
                     "tunnel_status", "tunnel_probe"):
@@ -2179,6 +2215,36 @@ class NexHandler(BaseHTTPRequestHandler):
             raise
 
     # ----- chat ------------------------------------------------------------
+
+    def _handle_agent_run(self) -> None:
+        """Kick off an autonomous agent run for a goal.
+
+        Runs in a background thread and streams semantic agent events to the
+        SSE bus (so the front-end animates PLANNING/EXECUTING/… without
+        knowing MCP internals). The HTTP call returns immediately.
+        """
+        body = self._read_json_body() or {}
+        goal = (body.get("goal") or "").strip()
+        if not goal:
+            self._send_json(400, {"ok": False, "error": "missing 'goal'"})
+            return
+
+        def _runner() -> None:
+            try:
+                from agent.server_run import run_agent_goal
+                report = run_agent_goal(goal, bus=BUS)
+                try:
+                    payload = report.to_dict()
+                except Exception:  # noqa: BLE001
+                    payload = dict(report) if isinstance(report, dict) else {}
+                BUS.publish({"type": "agent.report", "report": payload,
+                             "ts": time.time()})
+            except Exception as exc:  # noqa: BLE001
+                BUS.publish({"type": "agent.error", "error": repr(exc),
+                             "ts": time.time()})
+
+        threading.Thread(target=_runner, daemon=True).start()
+        self._send_json(200, {"ok": True, "queued": True, "goal": goal})
 
     def _handle_chat(self) -> None:
         body = self._read_json_body()

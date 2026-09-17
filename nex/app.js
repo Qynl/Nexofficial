@@ -574,6 +574,25 @@
       } else if (evt.type === 'emotion') {
         // Optional explicit emotion event from the backend.
         if (evt.state) anim.setState({ state: evt.state, params: {} });
+      } else if (evt.type === 'agent' || evt.type === 'agent.report' || evt.type === 'agent.error') {
+        // Semantic autonomous-agent events (STAGE 20/21). The frontend does
+        // NOT need MCP internals — it only maps the coarse agent lifecycle
+        // state onto an existing face state. Calm idle is preserved; the
+        // agent's activity is shown as a RICH EVENT, not a new idle loop.
+        if (evt.agentState) {
+          var AGENT_FACE = {
+            PLANNING: 'THINKING', OBSERVING: 'LISTENING',
+            EXECUTING: 'FOCUSED', VERIFYING: 'CURIOUS',
+            REPAIRING: 'CONFUSED', WAITING: 'CALM',
+            COMPLETED: 'PROUD', BLOCKED: 'SUSPICIOUS', ERROR: 'ERROR'
+          };
+          var face = AGENT_FACE[evt.agentState];
+          if (face) anim.setState({ state: face, params: { source: 'agent' } });
+        }
+        // Surface a short status line in the debug panel when available.
+        if (dev && !dev.hidden && evt.agentState) {
+          devState.textContent = 'AGENT:' + evt.agentState;
+        }
       } else if (evt.type === 'plan.submitted') {
         // A model reply contained a JSON plan. Show a confirm banner
         // so the user can approve / cancel destructive steps.

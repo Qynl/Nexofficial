@@ -82,6 +82,14 @@ class Upstream:
         # recurse, and concurrent tool calls must serialize on one
         # upstream so we never double-initialize or clobber state.
         self._lock = threading.RLock()
+        # --- live registry stats (STAGE 3/4) ---
+        self._resources_cache: List[Dict[str, Any]] = []
+        self._prompts_cache: List[Dict[str, Any]] = []
+        self._last_success_ts: float = 0.0
+        self._last_error: Optional[str] = None
+        self._latency_ms: Optional[float] = None
+        self._health: str = "unknown"   # unknown | ok | degraded | down
+        self._protocol_version: Optional[str] = None
 
     # ---------- introspection ------------------------------------------------
 
@@ -93,7 +101,13 @@ class Upstream:
             "url": self.url,
             "initialized": self._initialized,
             "session_id": self._session_id,
+            "protocol_version": self._protocol_version,
+            "health": self._health,
+            "latency_ms": self._latency_ms,
+            "last_success_ts": self._last_success_ts,
             "tools_count": len(self._tools_cache),
+            "resources_count": len(self._resources_cache),
+            "prompts_count": len(self._prompts_cache),
             "server_info": self._server_info,
             "last_error": self._last_error,
             "failures": self._consecutive_failures,
@@ -460,6 +474,7 @@ class Upstream:
             )
         result = resp.get("result", {})
         self._server_info = result.get("serverInfo", {})
+        self._protocol_version = result.get("protocolVersion")
         # Send notifications/initialized — required for the session to
         # begin accepting tools/call per the MCP spec.
         try:
@@ -503,11 +518,13 @@ class Upstream:
                 try:
                     self._tools_cache = self._fetch_tools()
                     self._tools_fetched_at = time.monotonic()
+                    self._record_success()
                 except UpstreamError as exc:
                     # Keep last good cache; record the failure so the
                     # gateway can report stale but usable.
                     if not self._tools_cache:
                         self._last_error = str(exc)
+                        self._health = "down"
                     raise
             return list(self._tools_cache)
 
@@ -517,15 +534,61 @@ class Upstream:
         with self._lock:
             if not self._initialized:
                 self.connect()
-            resp = self._rpc("tools/call",
-                             {"name": tool_name, "arguments": arguments or {}})
+            t0 = time.monotonic()
+            try:
+                resp = self._rpc("tools/call",
+                                 {"name": tool_name,
+                                  "arguments": arguments or {}})
+            except UpstreamError as exc:
+                self._record_failure(exc)
+                raise
+            self._latency_ms = round((time.monotonic() - t0) * 1000, 1)
             if "error" in resp:
                 # Surface a small, LLM-readable message.
                 err = resp["error"]
+                self._last_error = err.get("message", "unknown")
+                self._health = "degraded"
                 raise UpstreamError(
                     "tool error: " + err.get("message", "unknown")
                     + " (code " + str(err.get("code", -1)) + ")")
+            self._record_success()
             return resp
+
+    def _record_success(self) -> None:
+        self._last_success_ts = time.time()
+        self._last_error = None
+        if self._health in ("down", "unknown"):
+            self._health = "ok"
+
+    def _record_failure(self, exc: Exception) -> None:
+        self._last_error = (type(exc).__name__ + ": " + str(exc))[:300]
+        self._health = "down"
+
+    def resources(self) -> List[Dict[str, Any]]:
+        """List MCP resources exposed by this server (cached)."""
+        with self._lock:
+            if not self._initialized:
+                self.connect()
+            try:
+                resp = self._rpc("resources/list")
+            except UpstreamError:
+                return []
+            if "error" in resp:
+                return []
+            return list(resp.get("result", {}).get("resources", []))
+
+    def prompts(self) -> List[Dict[str, Any]]:
+        """List MCP prompts exposed by this server (cached)."""
+        with self._lock:
+            if not self._initialized:
+                self.connect()
+            try:
+                resp = self._rpc("prompts/list")
+            except UpstreamError:
+                return []
+            if "error" in resp:
+                return []
+            return list(resp.get("result", {}).get("prompts", []))
 
 
 # ----------------------------------------------------------------------------

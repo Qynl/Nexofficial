@@ -76,6 +76,14 @@ class TunnelRegistry:
     def list_upstreams(self) -> List[Dict[str, Any]]:
         return [u.status() for u in self._upstreams]
 
+    def raw_upstreams(self) -> List[Upstream]:
+        """Return the live ``Upstream`` objects (not status summaries).
+
+        The agent layer uses this to build a capability registry straight
+        from the connected servers rather than from cached status dicts.
+        """
+        return list(self._upstreams)
+
     def summary(self) -> Dict[str, Any]:
         statuses = self.list_upstreams()
         online = sum(1 for s in statuses if not s["last_error"]
@@ -110,9 +118,17 @@ class TunnelRegistry:
         except Exception:  # noqa: BLE001
             _enrich = None
         out: List[Dict[str, Any]] = []
+        try:
+            from mcp.capability import capability_for_tool
+            _cap = capability_for_tool
+        except Exception:  # noqa: BLE001
+            _cap = None
         if self._local_tools_fn is not None:
             for t in self._local_tools_fn() or []:
-                out.append(dict(t))
+                e = dict(t)
+                if _cap is not None:
+                    e["_capability"] = _cap(t).to_dict()
+                out.append(e)
         for u in self._upstreams:
             try:
                 tools = u.tools()
@@ -134,13 +150,64 @@ class TunnelRegistry:
                 desc = (t.get("description") or "").strip()
                 if len(desc) > _DESC_CAP:
                     desc = desc[:_DESC_CAP] + "…"
-                out.append({
+                entry = {
                     "name": u.name + "." + (t.get("name") or "tool"),
                     "description": ("[" + label + "] " + desc
                                     if desc
                                     else "[" + label + "] tool"),
                     "inputSchema": schema,
-                })
+                }
+                if _cap is not None:
+                    entry["_capability"] = _cap(t).to_dict()
+                out.append(entry)
+        return out
+
+    # ----- live discovery (STAGE 3/4/26) --------------------------------
+
+    def discover_all(self) -> List[Dict[str, Any]]:
+        """Discover tools/resources/prompts for every upstream (live truth).
+
+        Each entry is the actual server response — we never pretend a tool
+        exists that the live server did not expose. Failures are reported
+        per-server rather than aborting the whole sweep.
+        """
+        try:
+            from mcp.discovery import discover_server
+        except Exception:  # noqa: BLE001
+            discover_server = None
+        out: List[Dict[str, Any]] = []
+        for u in self._upstreams:
+            if discover_server is not None:
+                snap = discover_server(u)
+            else:
+                try:
+                    snap = {"connected": True, "tools": u.tools(),
+                            "resources": [], "prompts": []}
+                except Exception:  # noqa: BLE001
+                    snap = {"connected": False, "tools": []}
+            snap["name"] = u.name
+            snap["label"] = u.label or u.name
+            out.append(snap)
+        return out
+
+    def server_snapshot(self) -> List[Dict[str, Any]]:
+        """Compact per-server health + capability summary for the registry."""
+        out: List[Dict[str, Any]] = []
+        for u in self._upstreams:
+            st = u.status()
+            out.append({
+                "name": st.get("name"),
+                "label": st.get("label"),
+                "health": st.get("health"),
+                "connected": st.get("initialized"),
+                "protocol_version": st.get("protocol_version"),
+                "latency_ms": st.get("latency_ms"),
+                "tools_count": st.get("tools_count"),
+                "resources_count": st.get("resources_count"),
+                "prompts_count": st.get("prompts_count"),
+                "last_error": st.get("last_error"),
+                "circuit_open_seconds": st.get("circuit_open_seconds"),
+            })
         return out
 
     # ----- routing --------------------------------------------------------
