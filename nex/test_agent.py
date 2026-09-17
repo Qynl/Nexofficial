@@ -226,4 +226,13 @@ _expect("make" in rep_rec.completed,
 _expect(g_rec.get("rec").result is not None, "recovered task produced a result")
 
 
+# ---------------------------------------------------------------------------
+# 9. Transparency: a failed/skipped task is reported in `missing` so the user
+#    knows exactly which capability/engine to connect (no silent partial).
+# ---------------------------------------------------------------------------
+assert "missing" in report2.to_dict(), "report exposes missing-capability list"
+assert any(m["task"] == "animation" for m in report2.missing), \
+    "missing list names the failed animation stage: %s" % report2.missing
+
+
 print("\nAll agent tests passed.")

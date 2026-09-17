@@ -46,12 +46,14 @@ class CompletionReport:
     failed: List[str] = field(default_factory=list)
     skipped: List[str] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
+    missing: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status, "goal": self.goal,
             "completed": self.completed, "failed": self.failed,
             "skipped": self.skipped, "reasons": self.reasons,
+            "missing": self.missing,
         }
 
 
@@ -212,16 +214,31 @@ class AutonomousAgent:
         for t in graph.skipped():
             reasons.append("%s: %s" % (t.name, t.notes or "skipped"))
 
+        # Transparency: list the exact capabilities that were needed but could
+        # not be delivered, so the user knows precisely what to connect (no
+        # silent low-quality partial).
+        missing = []
+        for t in list(graph.failed()) + list(graph.skipped()):
+            missing.append({
+                "task": t.name,
+                "stage": t.stage,
+                "server": t.server,
+                "tool": t.tool,
+                "reason": t.error or t.notes or "unavailable",
+            })
+
         state.completed = succeeded
         state.failed = [{"task": n, "reason": r.split(": ", 1)[-1]}
                         for n, r in zip(failed, reasons)]
         self._emit("COMPLETED" if status == STATUS_COMPLETED else "BLOCKED",
                    "agent.project_completed" if status == STATUS_COMPLETED
                    else "agent.project_blocked",
-                   status=status, completed=succeeded, failed=failed)
+                   status=status, completed=succeeded, failed=failed,
+                   missing=missing)
 
         return CompletionReport(status=status, goal=goal, completed=succeeded,
-                               failed=failed, skipped=skipped, reasons=reasons)
+                               failed=failed, skipped=skipped, reasons=reasons,
+                               missing=missing)
 
     def _revive(self, graph: TaskGraph) -> bool:
         """Prepare the graph for another recovery pass.
