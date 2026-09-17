@@ -95,9 +95,20 @@ class TunnelRegistry:
 
         Local tools are unprefixed. Upstream tools are prefixed with
         `<upstream_name>.`. The upstream's own description is
-        preserved (truncated to 8KB) and we annotate every entry
-        with the platform it belongs to.
+        preserved (truncated to 8KB) and — for the engines Nex curates
+        (Roblox Studio, Unreal Engine) — enriched with a curated,
+        model-friendly explanation from ``mcp_engines`` so the AI
+        assistant can actually use the tool well. Every entry is
+        annotated with the platform it belongs to.
         """
+        # Lazily import the MCP-only engine adapter so tunnels.py stays
+        # usable even if that module is absent, and to avoid a top-level
+        # import cycle.
+        try:
+            from mcp_engines import enrich_upstream_tools
+            _enrich = enrich_upstream_tools
+        except Exception:  # noqa: BLE001
+            _enrich = None
         out: List[Dict[str, Any]] = []
         if self._local_tools_fn is not None:
             for t in self._local_tools_fn() or []:
@@ -112,13 +123,19 @@ class TunnelRegistry:
                 continue
             label = u.label or u.name
             for t in tools:
+                # Enrich (curated explanation) before prefixing + capping.
+                if _enrich is not None:
+                    try:
+                        t = _enrich(u.name, t)
+                    except Exception:  # noqa: BLE001
+                        t = dict(t)
                 schema = t.get("inputSchema") or {"type": "object",
                                                   "properties": {}}
                 desc = (t.get("description") or "").strip()
                 if len(desc) > _DESC_CAP:
                     desc = desc[:_DESC_CAP] + "…"
                 out.append({
-                    "name": u.name + "." + t["name"],
+                    "name": u.name + "." + (t.get("name") or "tool"),
                     "description": ("[" + label + "] " + desc
                                     if desc
                                     else "[" + label + "] tool"),

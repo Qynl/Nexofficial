@@ -1667,7 +1667,14 @@ class NexHandler(BaseHTTPRequestHandler):
                     "from connected editors are namespaced — e.g. "
                     "roblox-studio.execute_luau or "
                     "unreal-engine.spawn_actor. Use list_platforms to "
-                    "see what's reachable."
+                    "see what's reachable. For Roblox Studio / Unreal "
+                    "Engine, read the 'mcp://roblox-studio/guide' and "
+                    "'mcp://unreal-engine/guide' resources (or call the "
+                    "'roblox_explain_tools' / 'unreal_explain_tools' "
+                    "prompts) to get a full, explained catalog of every "
+                    "engine tool before you call one. Prefer read tools "
+                    "(get_*/list_*) before write tools, and confirm "
+                    "destructive steps with the user."
                 ),
             }
             if is_notification:
@@ -1842,6 +1849,26 @@ class NexHandler(BaseHTTPRequestHandler):
              "description": "Current Nex state + active behavior.",
              "mimeType": "application/json"},
         ]
+        # Curated, engine-specific tool guides — the MCP-only explanation
+        # surface for Roblox Studio and Unreal Engine. These are meaningful
+        # even when the editor is offline (the guide is curated, not live).
+        try:
+            from mcp_engines import SUPPORTED, platform_guide_resource
+            for plat in SUPPORTED:
+                body = platform_guide_resource(plat)
+                if body:
+                    out.append({
+                        "uri": "mcp://" + plat + "/guide",
+                        "name": plat + " tool guide",
+                        "description": ("Curated guide to every MCP tool "
+                                        + plat + " exposes (what it does, "
+                                        "when to use it, params, examples, "
+                                        "caveats) plus how to connect."),
+                        "mimeType": "text/markdown",
+                        "_meta": {"platform": plat, "kind": "tool-guide"},
+                    })
+        except Exception:  # noqa: BLE001
+            pass
         for u in get_tunnels().list_upstreams():
             label = (u.get("label") or u["name"]).lower().replace(" ", "-")
             out.append({
@@ -1873,6 +1900,15 @@ class NexHandler(BaseHTTPRequestHandler):
             payload = {"state": _LAST_NEX_STATE or {"state": "IDLE"},
                        "time": time.time()}
             text = json.dumps(payload, ensure_ascii=False, indent=2)
+        elif uri.endswith("/guide") and uri.startswith("mcp://"):
+            # Curated engine tool guide (mcp://<platform>/guide).
+            plat = uri[len("mcp://"):-len("/guide")]
+            try:
+                from mcp_engines import platform_guide_resource
+                text = platform_guide_resource(plat) or json.dumps(
+                    {"error": "unknown platform", "uri": uri})
+            except Exception as exc:  # noqa: BLE001
+                text = json.dumps({"error": repr(exc), "uri": uri})
         elif uri.startswith("tunnel://") and uri.endswith("/info"):
             name = uri[len("tunnel://"):-len("/info")]
             for s in get_tunnels().list_upstreams():
@@ -1883,7 +1919,9 @@ class NexHandler(BaseHTTPRequestHandler):
                 text = json.dumps({"error": "unknown tunnel", "uri": uri})
         else:
             text = json.dumps({"error": "unknown resource", "uri": uri})
-        return {"contents": [{"uri": uri, "mimeType": "application/json",
+        mime = ("text/markdown" if uri.endswith("/guide")
+                else "application/json")
+        return {"contents": [{"uri": uri, "mimeType": mime,
                               "text": text[:1_000_000]}]}
 
     def _mcp_prompts_list(self) -> Dict[str, Any]:
@@ -1905,6 +1943,41 @@ class NexHandler(BaseHTTPRequestHandler):
                                  "description": "Short English description of "
                                                 "what you want the tool to do",
                                  "required": True}]},
+                # --- Engine tool-explanation prompts (MCP-only). -----------
+                {"name": "roblox_explain_tools",
+                 "description": "Explain the Roblox Studio MCP tools — what "
+                                "they do, when to use them, their parameters, "
+                                "examples, and caveats. Optionally focus on "
+                                "one tool.",
+                 "arguments": [{"name": "tool",
+                                 "description": "Optional tool name to focus "
+                                                "on (e.g. execute_luau). "
+                                                "Empty = all Roblox tools.",
+                                 "required": False}]},
+                {"name": "unreal_explain_tools",
+                 "description": "Explain the Unreal Engine MCP tools — what "
+                                "they do, when to use them, their parameters, "
+                                "examples, and caveats. Optionally focus on "
+                                "one tool.",
+                 "arguments": [{"name": "tool",
+                                 "description": "Optional tool name to focus "
+                                                "on (e.g. spawn_actor). "
+                                                "Empty = all Unreal tools.",
+                                 "required": False}]},
+                {"name": "roblox_build_recipe",
+                 "description": "Turn a plain-English intent into a concrete "
+                                "Roblox Studio MCP tool call plan.",
+                 "arguments": [{"name": "intent",
+                                 "description": "What you want to build/do, "
+                                                "in plain English.",
+                                 "required": True}]},
+                {"name": "unreal_build_recipe",
+                 "description": "Turn a plain-English intent into a concrete "
+                                "Unreal Engine MCP tool call plan.",
+                 "arguments": [{"name": "intent",
+                                 "description": "What you want to build/do, "
+                                                "in plain English.",
+                                 "required": True}]},
             ],
         }
 
@@ -1919,7 +1992,10 @@ class NexHandler(BaseHTTPRequestHandler):
                                  "'tunnel://" + plat + "/info', and "
                                  "ask the user to enable the corresponding "
                                  "plugin in the target editor if it's "
-                                 "offline."),
+                                 "offline. If the editor is Roblox Studio or "
+                                 "Unreal Engine, read the 'mcp://" + plat
+                                 + "/guide' resource for the full tool catalog "
+                                 "and connection steps."),
                 }],
             }
         if name == "tool_call_recipe":
@@ -1934,6 +2010,41 @@ class NexHandler(BaseHTTPRequestHandler):
                                  "for '" + tool + "', then issue a "
                                  "tools/call with arguments shaped to "
                                  "achieve: '" + intent + "'."),
+                }],
+            }
+        # --- Engine tool-explanation prompts (MCP-only). -------------------
+        if name in ("roblox_explain_tools", "unreal_explain_tools"):
+            plat = ("roblox-studio" if name == "roblox_explain_tools"
+                    else "unreal-engine")
+            tool = (args or {}).get("tool", "")
+            try:
+                from mcp_engines import explain_tool, platform_guide_resource
+                if tool:
+                    expl = explain_tool(plat, tool)
+                    content = expl.get("markdown", "")
+                else:
+                    content = platform_guide_resource(plat) or ""
+            except Exception as exc:  # noqa: BLE001
+                content = "guide unavailable: " + repr(exc)
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": (content or "No guide available for " + plat),
+                }],
+            }
+        if name in ("roblox_build_recipe", "unreal_build_recipe"):
+            plat = ("roblox-studio" if name == "roblox_build_recipe"
+                    else "unreal-engine")
+            intent = (args or {}).get("intent", "")
+            try:
+                from mcp_engines import build_recipe_prompt
+                content = build_recipe_prompt(plat, intent)
+            except Exception as exc:  # noqa: BLE001
+                content = "recipe helper unavailable: " + repr(exc)
+            return {
+                "messages": [{
+                    "role": "user",
+                    "content": content,
                 }],
             }
         return {"messages": []}

@@ -25,6 +25,12 @@ Requires only the Python standard library.
 
 - `server.py` — Python stdlib HTTP server, SSE stream, REST API, Ollama
   client (via `urllib`). No third-party Python packages.
+- `mcp_engines.py` — **MCP-only** curated guide adapter for the Roblox
+  Studio and Unreal Engine MCP tools. Enriches the live `tools/list`
+  with rich explanations (what/when/params/examples/caveats), and
+  powers the `mcp://<platform>/guide` resources + the
+  `*_explain_tools` / `*_build_recipe` prompts. Does not touch the chat
+  persona or sandbox tools.
 - `index.html` — minimal markup, canvas + hidden debug panel.
 - `style.css` — black background + minimal UI affordances.
 - `webgl.js` — WebGL2 renderer. SDF-based rounded rectangles; no images,
