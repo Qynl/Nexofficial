@@ -203,6 +203,70 @@ _expect("roblox" in out and "unity" in out,
         "detect_engines inspects Roblox + Unity")
 
 
+# ---------- 5b. mc_tools.py: _detect_roblox cross-platform --------------
+
+# Windows-style: Studio under %LOCALAPPDATA%\Roblox with an mcp.bat.
+_rb_tmp = tempfile.mkdtemp()
+_rb_roblox = os.path.join(_rb_tmp, "Roblox")
+os.makedirs(_rb_roblox)
+open(os.path.join(_rb_roblox, "mcp.bat"), "w").close()
+_old_local = os.environ.get("LOCALAPPDATA")
+os.environ["LOCALAPPDATA"] = _rb_tmp
+try:
+    _rb = mc_tools._detect_roblox()
+    _expect(_rb.get("installed") is True,
+            "_detect_roblox finds Studio via LOCALAPPDATA")
+    _expect(_rb.get("mcp") is True,
+            "_detect_roblox detects the official MCP server (mcp.bat)")
+    _expect(_rb.get("mcp_transport") == "stdio",
+            "_detect_roblox reports stdio transport")
+    _expect(isinstance(_rb.get("mcp_command"), list)
+            and _rb["mcp_command"][-1].endswith("mcp.bat"),
+            "_detect_roblox reports the mcp.bat command")
+finally:
+    if _old_local is None:
+        os.environ.pop("LOCALAPPDATA", None)
+    else:
+        os.environ["LOCALAPPDATA"] = _old_local
+
+# macOS-style: ~/Applications/RobloxStudio.app/.../StudioMCP, no Windows dir.
+_rb_tmp2 = tempfile.mkdtemp()
+_rb_app = os.path.join(_rb_tmp2, "Applications", "RobloxStudio.app",
+                       "Contents", "MacOS")
+os.makedirs(_rb_app)
+open(os.path.join(_rb_app, "StudioMCP"), "w").close()
+_old_home = os.environ.get("HOME")
+_old_local2 = os.environ.get("LOCALAPPDATA")
+os.environ["HOME"] = _rb_tmp2
+os.environ["LOCALAPPDATA"] = os.path.join(_rb_tmp2, "no-roblox-here")
+try:
+    _rb2 = mc_tools._detect_roblox()
+    _expect(_rb2.get("installed") is True,
+            "_detect_roblox finds macOS .app StudioMCP")
+    _expect(_rb2.get("mcp_command") == [os.path.join(_rb_app, "StudioMCP")],
+            "_detect_roblox reports the StudioMCP binary on macOS")
+finally:
+    os.environ["HOME"] = _old_home or ""
+    if _old_home is None:
+        os.environ.pop("HOME", None)
+    os.environ["LOCALAPPDATA"] = _old_local2 or ""
+    if _old_local2 is None:
+        os.environ.pop("LOCALAPPDATA", None)
+
+# Nothing installed -> not installed, still a dict.
+_old_local3 = os.environ.get("LOCALAPPDATA")
+os.environ["LOCALAPPDATA"] = os.path.join(_rb_tmp2, "definitely-missing")
+try:
+    _rb3 = mc_tools._detect_roblox()
+    _expect(_rb3.get("installed") is False,
+            "_detect_roblox returns not-installed when absent")
+    _expect(isinstance(_rb3, dict), "_detect_roblox always returns a dict")
+finally:
+    os.environ["LOCALAPPDATA"] = _old_local3 or ""
+    if _old_local3 is None:
+        os.environ.pop("LOCALAPPDATA", None)
+
+
 # ---------- 6. mc_tools.py: compile_check -----------------------------
 
 # Real Python — should pass.

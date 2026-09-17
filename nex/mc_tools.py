@@ -71,6 +71,94 @@ def _read_first(paths: List[str]) -> Optional[str]:
     return None
 
 
+def _detect_roblox() -> Dict[str, Any]:
+    """Cross-platform detection of Roblox Studio + its official MCP server.
+
+    Roblox Studio installs differently per OS and the official MCP server
+    ships with it:
+      * Windows  — Studio lives under %LOCALAPPDATA%\\Roblox; the MCP
+                   entrypoint is `mcp.bat` (stdio) and/or `StudioMCP.exe`.
+      * macOS    — /Applications/RobloxStudio.app, MCP entrypoint is
+                   Contents/MacOS/StudioMCP (stdio).
+      * Linux    — not officially supported; best-effort via Wine's
+                   AppData layout, plus the `rojo`/`rbx`/`roblox` CLIs.
+
+    Returns a structured dict the model can branch on, always containing
+    `installed`, and (when relevant) `studio_mcp`, `mcp_bat`, `cli`,
+    `mcp`, `mcp_transport`, `mcp_command`, and a `mcp_note`.
+    """
+    result: Dict[str, Any] = {"installed": False}
+
+    home = os.path.expanduser("~")
+    localapp = os.environ.get("LOCALAPPDATA")
+    appdata = os.environ.get("APPDATA")
+    wine_user = os.environ.get("USER", "")
+
+    # Candidate Studio roots, most-to-least likely, per platform.
+    roots: List[str] = []
+    if localapp:
+        roots.append(os.path.join(localapp, "Roblox"))          # Win
+    roots.append("/Applications/RobloxStudio.app")              # macOS .app
+    roots.append(os.path.join(home, "Applications",
+                              "RobloxStudio.app"))               # macOS user
+    if appdata:
+        roots.append(os.path.join(appdata, "Roblox"))           # Win (roaming)
+    # Wine best-effort.
+    roots.append(os.path.join(home, ".wine", "drive_c", "users",
+                              wine_user, "AppData", "Local", "Roblox"))
+
+    studio_dir: Optional[str] = None
+    for r in roots:
+        if r and os.path.exists(r):
+            studio_dir = r
+            break
+
+    studio_mcp: Optional[str] = None
+    mcp_bat: Optional[str] = None
+    if studio_dir:
+        # The macOS .app keeps StudioMCP inside Contents/MacOS; everything
+        # else (Windows) keeps the binaries directly under the root.
+        candidates = [
+            os.path.join(studio_dir, "Contents", "MacOS", "StudioMCP"),
+            os.path.join(studio_dir, "StudioMCP.exe"),
+            os.path.join(studio_dir, "mcp.bat"),
+            os.path.join(studio_dir, "RobloxStudioBeta.exe"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                if p.endswith(("StudioMCP", "StudioMCP.exe")):
+                    studio_mcp = p
+                elif p.endswith("mcp.bat"):
+                    mcp_bat = p
+
+    cli = _which("roblox") or _which("rbx") or _which("rojo")
+    installed = bool(studio_dir or cli)
+    if not installed:
+        return result
+
+    result["installed"] = True
+    result["studio_dir"] = studio_dir
+    result["studio_mcp"] = studio_mcp
+    result["mcp_bat"] = mcp_bat
+    result["cli"] = cli
+
+    if studio_mcp or mcp_bat:
+        result["mcp"] = True
+        result["mcp_transport"] = "stdio"
+        if mcp_bat:
+            result["mcp_command"] = ["cmd", "/c", mcp_bat]
+        elif studio_mcp:
+            result["mcp_command"] = [studio_mcp]
+    else:
+        result["mcp"] = False
+        result["mcp_note"] = (
+            "Studio found but the official MCP server (StudioMCP / mcp.bat) "
+            "was not located. Enable the MCP Server beta in Studio > File > "
+            "Beta Features, then reconnect.")
+    return result
+
+
+
 def detect_engines() -> Dict[str, Any]:
     """Return a dict of {engine: {installed, version?, paths?, project?}}.
 
@@ -133,6 +221,18 @@ def detect_engines() -> Dict[str, Any]:
             "installed": True,
             "version": ver,
             "bins": ue_engine_bins[:3],
+            # UE 5.8 ships an experimental MCP plugin (Project Settings ->
+            # MCP) that listens on this Streamable-HTTP endpoint; older
+            # engine versions need an external stdio bridge instead.
+            "mcp_transport": "http",
+            "mcp_endpoint": "http://127.0.0.1:3000/mcp",
+            "mcp_note": (
+                "UE 5.8's experimental MCP plugin listens here once enabled "
+                "in Project Settings -> MCP and the editor is restarted. "
+                "UE 5.6 and below need a stdio bridge (e.g. "
+                "npx unreal-engine-mcp-server). See the "
+                "'mcp://unreal-engine/guide' resource for the tool catalog."
+            ),
         }
     # --- Blender ---------------------------------------------------------
     bl = _which("blender")
@@ -167,28 +267,8 @@ def detect_engines() -> Dict[str, Any]:
         found["godot"] = {"installed": True, "binary": godot,
                           "version": ver}
 
-    # --- Roblox CLI / Studio --------------------------------------------
-    rb_studio = None
-    for root, _dirs, files in [
-        ("/Applications", None, None),
-        ("C:\\Program Files\\Roblox", None, None),
-    ]:
-        try:
-            for entry in os.listdir(root) if root and os.path.exists(root) else []:
-                if "RobloxStudio" in entry:
-                    p = os.path.join(root, entry, "Contents", "MacOS",
-                                     "StudioMCP")
-                    if os.path.exists(p):
-                        rb_studio = p; break
-        except OSError:
-            continue
-    rb_cli = _which("roblox") or _which("rbx") or _which("rojo")
-    if rb_studio or rb_cli:
-        found["roblox"] = {
-            "installed": True,
-            "studio_mcp": rb_studio,
-            "cli": rb_cli,
-        }
+    # --- Roblox Studio + official MCP server (cross-platform) ------------
+    found["roblox"] = _detect_roblox()
 
     # --- Unity -----------------------------------------------------------
     unity = _which("Unity") or _which("unity") or _which("unityhub")
