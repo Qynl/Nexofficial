@@ -272,22 +272,41 @@
       // the eyes. The smin around the eyes themselves stays for look states.
       float merged = min(dEyes, dProp);
 
-      // Anti-aliased coverage in pixels.
+      // Anti-aliased coverage.
       float aa = aaScale();
       float cover = 1.0 - smoothstep(-aa, aa, merged);
 
-      // Tiny vignette so the face doesn't feel pasted onto the background.
-      float vig = smoothstep(1.25, 0.45, length(p));
-      cover *= mix(0.96, 1.0, vig);
+      // --- Soft inner shading (gives the flat pills dimensional life) ---
+      // depth: 0 at the very edge, ~1 deep inside the shape.
+      float depth = clamp(-merged / 0.05, 0.0, 1.0);
+      // Vertical gradient: very slightly brighter toward the top edge.
+      float vgrad = 0.90 + 0.10 * clamp(p.y * 0.5 + 0.5, 0.0, 1.0);
+      // Soft gel falloff from the edge inward (so the center reads brightest).
+      float gel = mix(0.88, 1.0, smoothstep(0.0, 1.0, depth));
+      // Faint top-left key light highlight for a porcelain/glass feel.
+      float hl = 0.05 * smoothstep(0.55, 0.0, length(p - vec2(-0.16, 0.16)));
+      // Breathing subtly modulates brightness so idle "feels" alive.
+      float shade = gel * vgrad + hl;
+      shade *= 1.0 + u_breath * 0.05;
 
-      // Glitch: occasional offset on the alpha (rare, transient).
+      vec3 col = vec3(cover * shade);
+
+      // --- Outer aura / glow: a soft halo hugging the shapes. ---
+      float halo = exp(-max(merged, 0.0) * 22.0);  // tight falloff outside
+      col += vec3(0.09 * halo * u_visibility);
+
+      // Tiny vignette so the face doesn't feel pasted onto the background.
+      float vig = smoothstep(1.30, 0.42, length(p));
+      col *= mix(0.93, 1.0, vig);
+
+      // Glitch: rare transient alpha shimmer.
       float g = step(0.985, fract(sin(u_time * 11.3 + dot(v_uv, vec2(12.9898,78.233))) * 43758.5453));
       cover = mix(cover, cover * (1.0 - 0.4 * u_glitch), g * u_glitch);
+      col *= mix(1.0, 1.0 - 0.4 * u_glitch, g * u_glitch);
 
-      // WAKE: visibility scales the alpha in.
-      cover *= u_visibility;
+      // WAKE: visibility scales everything in.
+      col *= u_visibility;
 
-      vec3 col = vec3(cover);
       gl_FragColor = vec4(col, 1.0);
     }
   `;

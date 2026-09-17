@@ -151,13 +151,66 @@
     };
 
     // 3. SLOW BLINK — a softer, slower blink (~320ms).
-
+    B.slowBlink = {
+      name: 'slowBlink',
+      category: 'BLINK',
+      tier: 'COMMON',
+      cooldown: 6.0,
+      weight: 4,
+      duration: 0.32,
+      run(ctx) {
+        const t = ctx.t;
+        let k;
+        if (t < 0.40) k = t / 0.40;
+        else if (t < 0.55) k = 1;
+        else k = 1 - (t - 0.55) / 0.45;
+        const v = Easing.outCubic(clamp(k, 0, 1));
+        const scaleY = 1 - v * 0.92;
+        const scaleX = 1 + v * 0.05;
+        ctx.emit({ eyeLeft: { scaleY, scaleX }, eyeRight: { scaleY, scaleX }, distortion: v * 0.08 });
+      },
+    };
 
     // 4. DOUBLE BLINK — blink, pause, blink again (~720ms total).
-
+    B.doubleBlink = {
+      name: 'doubleBlink',
+      category: 'BLINK',
+      tier: 'UNCOMMON',
+      cooldown: 12.0,
+      weight: 1.5,
+      duration: 0.72,
+      run(ctx) {
+        const t = ctx.t;
+        const b1 = Math.max(0, 1 - Math.abs(t - 0.22) / 0.14);
+        const b2 = Math.max(0, 1 - Math.abs(t - 0.60) / 0.14);
+        const v = Easing.outCubic(clamp(Math.max(b1, b2), 0, 1));
+        const scaleY = 1 - v * 0.94;
+        const scaleX = 1 + v * 0.05;
+        ctx.emit({ eyeLeft: { scaleY, scaleX }, eyeRight: { scaleY, scaleX } });
+      },
+    };
 
     // 5. ASYNCHRONOUS BLINK — wider timing gap so the asymmetry is visible.
-
+    B.asyncBlink = {
+      name: 'asyncBlink',
+      category: 'BLINK',
+      tier: 'UNCOMMON',
+      cooldown: 14.0,
+      weight: 1.2,
+      duration: 0.34,
+      run(ctx) {
+        const off = (ctx.params.offset || 0.12);
+        const t = ctx.t;
+        const l = Math.max(0, 1 - Math.abs(t - (0.30 - off)) / 0.16);
+        const r = Math.max(0, 1 - Math.abs(t - (0.30 + off)) / 0.16);
+        const vl = Easing.outCubic(clamp(l, 0, 1));
+        const vr = Easing.outCubic(clamp(r, 0, 1));
+        ctx.emit({
+          eyeLeft:  { scaleY: 1 - vl * 0.94, scaleX: 1 + vl * 0.05 },
+          eyeRight: { scaleY: 1 - vr * 0.94, scaleX: 1 + vr * 0.05 },
+        });
+      },
+    };
 
     // 6. LOOK LEFT — small, short horizontal gaze. Fires RARELY so the
     // face sits mostly still and a glance actually reads as a glance.
@@ -245,48 +298,262 @@
     };
 
     // 10. STRETCH — small horizontal widening, then back.
-
+    B.stretch = {
+      name: 'stretch',
+      category: 'MOVEMENT',
+      tier: 'COMMON',
+      cooldown: 14.0,
+      weight: 1.2,
+      duration: 0.9,
+      run(ctx) {
+        const v = Easing.outQuad(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          eyeLeft:  { scaleX: 1 + v * 0.06, scaleY: 1 - v * 0.02 },
+          eyeRight: { scaleX: 1 + v * 0.06, scaleY: 1 - v * 0.02 },
+        });
+      },
+    };
 
     // 11. SQUISH — small vertical compression.
-
+    B.squish = {
+      name: 'squish',
+      category: 'MOVEMENT',
+      tier: 'COMMON',
+      cooldown: 14.0,
+      weight: 1.2,
+      duration: 0.9,
+      run(ctx) {
+        const v = Easing.outQuad(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          eyeLeft:  { scaleY: 1 - v * 0.07, scaleX: 1 + v * 0.02 },
+          eyeRight: { scaleY: 1 - v * 0.07, scaleX: 1 + v * 0.02 },
+        });
+      },
+    };
 
     // 12. MICRO MOVEMENT — extremely small positional drift.
-
+    B.microMove = {
+      name: 'microMove',
+      category: 'MOVEMENT',
+      tier: 'COMMON',
+      cooldown: 10.0,
+      weight: 1.0,
+      duration: 1.2,
+      run(ctx) {
+        const dx = ctx.params.dx || 0;
+        const dy = ctx.params.dy || 0;
+        const v = Math.sin(ctx.t * Math.PI);
+        ctx.emit({ faceShiftX: dx * 0.006 * v, faceShiftY: dy * 0.006 * v,
+                  motionIntensity: v * 0.06 });
+      },
+    };
 
     // 13. FACE TILT — very subtle tilt.
-
+    B.faceTilt = {
+      name: 'faceTilt',
+      category: 'TILT',
+      tier: 'UNCOMMON',
+      cooldown: 12.0,
+      weight: 0.7,
+      duration: 1.0,
+      run(ctx) {
+        const s = ctx.params.sign || 1;
+        const v = Math.sin(ctx.t * Math.PI);
+        ctx.emit({ faceTilt: s * 0.022 * v, asymmetry: 0.2 * v * s });
+      },
+    };
 
     // 14. ASYMMETRIC MOVEMENT — opposite motion between eyes.
-
+    B.asymmetric = {
+      name: 'asymmetric',
+      category: 'ASYMMETRY',
+      tier: 'UNCOMMON',
+      cooldown: 14.0,
+      weight: 0.6,
+      duration: 1.1,
+      run(ctx) {
+        const dx = ctx.params.dx || 0.5;
+        const dy = ctx.params.dy || 0;
+        const v = Math.sin(ctx.t * Math.PI);
+        ctx.emit({
+          eyeLeft:  { offsetX:  dx * 0.012 * v, offsetY:  dy * 0.006 * v },
+          eyeRight: { offsetX: -dx * 0.012 * v, offsetY: -dy * 0.006 * v },
+          asymmetry: v,
+        });
+      },
+    };
 
     // 15. SYNCHRONIZED PULSE — both eyes briefly expand.
-
+    B.syncPulse = {
+      name: 'syncPulse',
+      category: 'MOVEMENT',
+      tier: 'COMMON',
+      cooldown: 8.0,
+      weight: 1.0,
+      duration: 0.7,
+      run(ctx) {
+        const v = Easing.outQuad(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          eyeLeft:  { scaleX: 1 + v * 0.05, scaleY: 1 + v * 0.04 },
+          eyeRight: { scaleX: 1 + v * 0.05, scaleY: 1 + v * 0.04 },
+          pulse: v * 0.5,
+        });
+      },
+    };
 
     // 16. STILLNESS — explicit quiet period. Counts as a behavior that
     // visibly does nothing.
+    B.stillness = {
+      name: 'stillness',
+      category: 'FREEZE',
+      tier: 'COMMON',
+      cooldown: 6.0,
+      weight: 0,
+      duration: 1.6,
+      run() { /* deliberately does nothing — a visible pause */ },
+    };
 
+    // ---- Secondary "personality" behaviors (calm variety) ----
 
-    // RARE BEHAVIORS — uncommon, longer cooldowns.
+    B.rarePulse = {
+      name: 'rarePulse',
+      category: 'RARE',
+      tier: 'VERY_RARE',
+      cooldown: 20.0,
+      weight: 0.15,
+      duration: 0.6,
+      run(ctx) {
+        const v = Easing.outCubic(Math.sin(ctx.t * Math.PI));
+        ctx.emit({ pulse: v * 0.5, motionIntensity: v * 0.2 });
+      },
+    };
 
+    B.slowLook = {
+      name: 'slowLook',
+      category: 'LOOK',
+      direction: 'left',
+      tier: 'UNCOMMON',
+      cooldown: 30.0,
+      weight: 0.4,
+      duration: 1.0,
+      run(ctx) {
+        const target = -0.055;
+        const t = ctx.t;
+        const v = t < 0.35 ? Easing.outCubic(t / 0.35)
+                            : t < 0.6 ? 1
+                            : 1 - Easing.inOutCubic((t - 0.6) / 0.4);
+        ctx.emit({ lookX: target * v, motionIntensity: v * 0.08 });
+      },
+    };
 
+    B.briefWiden = {
+      name: 'briefWiden',
+      category: 'MOVEMENT',
+      tier: 'UNCOMMON',
+      cooldown: 12.0,
+      weight: 0.7,
+      duration: 0.5,
+      run(ctx) {
+        const v = Easing.outQuad(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          eyeLeft:  { scaleX: 1 + v * 0.05 },
+          eyeRight: { scaleX: 1 + v * 0.05 },
+        });
+      },
+    };
 
+    B.tinyTilt = {
+      name: 'tinyTilt',
+      category: 'TILT',
+      tier: 'UNCOMMON',
+      cooldown: 12.0,
+      weight: 0.6,
+      duration: 0.8,
+      run(ctx) {
+        const v = Math.sin(ctx.t * Math.PI);
+        ctx.emit({ faceTilt: 0.02 * v * Math.sin(ctx.t * 3.0),
+                  asymmetry: 0.15 * v });
+      },
+    };
 
+    B.oneEyeReact = {
+      name: 'oneEyeReact',
+      category: 'ASYMMETRY',
+      tier: 'UNCOMMON',
+      cooldown: 14.0,
+      weight: 0.5,
+      duration: 0.8,
+      run(ctx) {
+        const which = ctx.params.which || 'left';
+        const v = Math.sin(ctx.t * Math.PI);
+        const patch = which === 'left'
+          ? { eyeLeft:  { offsetY: -0.010 * v, scaleY: 1 - 0.05 * v } }
+          : { eyeRight: { offsetY: -0.010 * v, scaleY: 1 - 0.05 * v } };
+        ctx.emit(patch);
+        ctx.emit({ asymmetry: v });
+      },
+    };
 
+    B.freeze = {
+      name: 'freeze',
+      category: 'FREEZE',
+      tier: 'COMMON',
+      cooldown: 8.0,
+      weight: 0,
+      duration: 2.2,
+      run() { /* explicit hold */ },
+    };
 
+    B.subtleShift = {
+      name: 'subtleShift',
+      category: 'MOVEMENT',
+      tier: 'COMMON',
+      cooldown: 10.0,
+      weight: 0.8,
+      duration: 1.0,
+      run(ctx) {
+        const dir = ctx.params.dir || 1;
+        const v = Math.sin(ctx.t * Math.PI);
+        ctx.emit({ faceShiftX: dir * 0.01 * v, motionIntensity: v * 0.05 });
+      },
+    };
 
+    B.unusualStretch = {
+      name: 'unusualStretch',
+      category: 'MOVEMENT',
+      tier: 'RARE',
+      cooldown: 18.0,
+      weight: 0.3,
+      duration: 1.2,
+      run(ctx) {
+        const v = Easing.inOutSine(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          eyeLeft:  { scaleX: 1 + v * 0.08, scaleY: 1 - v * 0.03 },
+          eyeRight: { scaleX: 1 + v * 0.08, scaleY: 1 - v * 0.03 },
+          pulse: v * 0.4,
+        });
+      },
+    };
 
-
-
-
-
-
-
-
-
-
-
+    B.syncEvent = {
+      name: 'syncEvent',
+      category: 'MOVEMENT',
+      tier: 'UNCOMMON',
+      cooldown: 12.0,
+      weight: 0.6,
+      duration: 0.6,
+      run(ctx) {
+        const v = Easing.outBack(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          pulse: v * 0.6,
+          eyeLeft:  { scaleX: 1 + v * 0.03 },
+          eyeRight: { scaleX: 1 + v * 0.03 },
+        });
+      },
+    };
 
     return B;
+
   }
 
   // -------- The engine ----------------------------------------------------
