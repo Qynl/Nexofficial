@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Standalone launcher: `nex-stdio`.
+
+This is the entry point that goes in a client's MCP config, e.g.
+
+  - Claude Desktop  (claude_desktop_config.json) →
+      "nex": {"command": "/path/to/nex/nex-stdio"}
+  - Claude Code     (~/.claude/settings.json or .mcp.json) →
+      "mcpServers": {"nex": {"command": "/path/to/nex/nex-stdio"}}
+  - Cursor          (mcp.json under .cursor/) → same `mcpServers` shape.
+  - VS Code Copilot (.vscode/mcp.json) →
+      "servers": {"nex": {"type": "stdio",
+                           "command": "/path/to/nex/nex-stdio"}}
+  - Codex CLI       (~/.codex/config.toml) →
+      [mcp_servers.nex]
+      command = "/path/to/nex/nex-stdio"
+      start = "always"
+
+(`/api/tunnels/stdio-config` returns ready-to-paste JSON snippets.)
+
+What it does
+------------
+Spawns the stdio MCP server in front of the in-process registry
+configured by server.py. The server speaks LSP-style Content-Length
+framing (the canonical MCP stdio transport) and additionally accepts
+newline-delimited JSON for clients that use it. Errors go to stderr.
+"""
+import os
+import sys
+
+# Make sure the script works whether it's invoked directly via shebang
+# (`nex-stdio …`) or via `python -m nex.stdio_server …`. Adjust sys.path
+# so `import stdio_server` works from this file's directory.
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+
+def main(argv=None):
+    """Forward into the stdio_server module."""
+    from stdio_server import main as _stdio_main
+    return _stdio_main(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

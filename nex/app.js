@@ -1,0 +1,601 @@
+/*
+ * NEX — application glue.
+ *
+ * Owns:
+ *   - Audio capture (getUserMedia + AudioContext + AnalyserNode).
+ *   - Music mode (an <audio> element plays a procedurally generated loop
+ *     so music mode is testable without any external file).
+ *   - Server-Sent Events connection to the backend.
+ *   - Debug panel + keyboard shortcuts.
+ *   - Speech bubble UI.
+ *
+ * Talks to:
+ *   - window.NexGL    (renderer)
+ *   - window.NexAnim  (behavior engine)
+ */
+(function () {
+  'use strict';
+
+  // ------- DOM -----------------------------------------------------------
+
+  const canvas = document.getElementById('nex');
+  const dev    = document.getElementById('dev');
+  const devStates = document.getElementById('dev-states');
+  const devIdle   = document.getElementById('dev-idle');
+  const devInput  = document.getElementById('dev-input');
+  const devState    = document.getElementById('dev-state');
+  const devActivity = document.getElementById('dev-activity');
+  const devBehavior = document.getElementById('dev-behavior');
+  const devLast     = document.getElementById('dev-last');
+  const devNext     = document.getElementById('dev-next');
+  const devRecent   = document.getElementById('dev-recent');
+  const bubble = document.getElementById('bubble');
+
+  // ------- core ----------------------------------------------------------
+
+  // Safety net: even if a tag leaks through, hide it from the bubble.
+  // Matches the same set the backend uses.
+  const CLIENT_TAG_RE = new RegExp(
+    '\\[\\s*(?:' + [
+      'IDLE','LISTENING','THINKING','SPEAKING',
+      'HAPPY','EXCITED','CALM','CONFUSED','FOCUSED',
+      'FRUSTRATED','SURPRISED',
+      'CURIOUS','AMUSED','SLEEPY','PROUD','SUSPICIOUS',
+      'MUSIC','ERROR','RECOVERY','WAKE',
+    ].join('|') + ')\\s*\\]', 'ig'
+  );
+  function stripTagsClient(s) {
+    if (!s) return '';
+    return s.replace(CLIENT_TAG_RE, '').replace(/\s{2,}/g, ' ').trim();
+  }
+
+  let gl, anim, es;
+
+  function boot() {
+    try {
+      gl = new NexGL(canvas);
+    } catch (err) {
+      console.error(err);
+      return;
+    }
+    anim = new NexAnim();
+    anim.start();
+
+    buildDevPanel();
+    bindKeyboard();
+    bindMouse();
+    bindNetwork();
+
+    // Speech bubble fade handling.
+    anim._origSetSpeech = anim.setSpeechText.bind(anim);
+    anim.setSpeechText = (t) => {
+      anim._origSetSpeech(t);
+      if (t) {
+        bubble.textContent = t;
+        bubble.hidden = false;
+        requestAnimationFrame(() => bubble.classList.add('show'));
+      } else {
+        bubble.classList.remove('show');
+        setTimeout(() => { if (!bubble.classList.contains('show')) bubble.hidden = true; }, 250);
+      }
+    };
+
+    // ------- TTS (Web Speech API) ----------------------------------------
+    //
+    // The backend streams sentences via SSE. We feed each sentence into
+    // speechSynthesis the moment it arrives so the audio starts within
+    // ~150ms of the first chunk. This avoids waiting for the full reply
+    // and keeps the spoken audio locked to the bubble text — no
+    // stutter, no restart, no gap mid-sentence (because the flusher
+    // only emits at safe boundaries: a complete sentence).
+    //
+    // The user can mute via window.NEX_TTS_MUTE = true or by clicking
+    // the dev panel "TTS" button (we add that below).
+    let ttsMute = false;
+    let ttsVoice = null;
+    function pickTtsVoice() {
+      if (!('speechSynthesis' in window)) return null;
+      const voices = window.speechSynthesis.getVoices();
+      // Prefer a calm, low-pitch voice if available.
+      const prefs = [
+        /Google UK English Female/i,
+        /Samantha/i, /Microsoft.*Zira/i, /Karen/i, /Moira/i,
+        /en-?GB.*Female/i, /en-?US.*Female/i,
+      ];
+      for (const re of prefs) {
+        const v = voices.find(x => re.test(x.name));
+        if (v) return v;
+      }
+      return voices.find(v => /en/i.test(v.lang)) || voices[0] || null;
+    }
+    if ('speechSynthesis' in window) {
+      // Voices load asynchronously on some browsers.
+      window.speechSynthesis.onvoiceschanged = () => { ttsVoice = pickTtsVoice(); };
+      ttsVoice = pickTtsVoice();
+    }
+
+    function speakChunk(text) {
+      if (!text || ttsMute || !('speechSynthesis' in window)) return;
+      const u = new SpeechSynthesisUtterance(text);
+      if (ttsVoice) u.voice = ttsVoice;
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.volume = 1.0;
+      // The browser queues utterances — they play in submission order
+      // and we never interrupt in flight, so the spoken audio stays
+      // smooth across delta boundaries.
+      window.speechSynthesis.speak(u);
+    }
+
+    function cancelTts() {
+      if ('speechSynthesis' in window) {
+        try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+      }
+    }
+
+    // Expose for the dev panel.
+    window.__nexTts = {
+      speak: speakChunk,
+      cancel: cancelTts,
+      isMuted: () => ttsMute,
+      toggleMute: () => { ttsMute = !ttsMute; if (ttsMute) cancelTts(); return ttsMute; },
+      supported: () => 'speechSynthesis' in window,
+    };
+
+    startAudio();
+    requestAnimationFrame(loop);
+  }
+
+  // ------- audio: mic + music -------------------------------------------
+
+  let audioCtx = null;
+  let micStream = null;
+  let micNode = null;
+  let analyser = null;
+  let freqArr = null;
+  let micEnabled = false;
+
+  let musicEl = null;
+  let musicAnalyser = null;
+  let musicFreqArr = null;
+  let musicEnabled = false;
+
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) { audioCtx = null; }
+    }
+    return audioCtx;
+  }
+
+  async function startMic() {
+    if (micEnabled) return;
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (e) {
+      console.warn('microphone denied / unavailable', e);
+      return;
+    }
+    micNode = ctx.createMediaStreamSource(micStream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.65;
+    micNode.connect(analyser);
+    freqArr = new Uint8Array(analyser.frequencyBinCount);
+    micEnabled = true;
+  }
+
+  function stopMic() {
+    if (!micEnabled) return;
+    try {
+      if (micStream) micStream.getTracks().forEach(t => t.stop());
+    } catch (e) { /* ignore */ }
+    micStream = null;
+    micNode = null;
+    analyser = null;
+    freqArr = null;
+    micEnabled = false;
+  }
+
+  function toggleMic() {
+    if (micEnabled) { stopMic(); markButton('mic', false); }
+    else            { startMic().then(() => markButton('mic', micEnabled)); }
+  }
+
+  // Music: a procedural loop generated with WebAudio. Lets music mode be
+  // exercised offline without any audio file.
+  let musicNodes = null;
+  function startMusic() {
+    if (musicEnabled) return;
+    const ctx = ensureAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    // Beat pattern: kick on 1, hat on 2/4, soft pad.
+    const tempo = 96; // BPM
+    const beatSec = 60 / tempo;
+    const master = ctx.createGain();
+    master.gain.value = 0.5;
+
+    musicAnalyser = ctx.createAnalyser();
+    musicAnalyser.fftSize = 512;
+    musicAnalyser.smoothingTimeConstant = 0.7;
+    master.connect(musicAnalyser);
+    musicAnalyser.connect(ctx.destination);
+
+    // Pad: low-pass filtered noise + a soft sine drone.
+    const padBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const data = padBuf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.6;
+    const pad = ctx.createBufferSource();
+    pad.buffer = padBuf;
+    pad.loop = true;
+    const padFilter = ctx.createBiquadFilter();
+    padFilter.type = 'lowpass';
+    padFilter.frequency.value = 700;
+    pad.connect(padFilter); padFilter.connect(master);
+
+    const drone = ctx.createOscillator();
+    drone.type = 'sine';
+    drone.frequency.value = 110;
+    const droneGain = ctx.createGain();
+    droneGain.gain.value = 0.15;
+    drone.connect(droneGain); droneGain.connect(master);
+
+    pad.start();
+    drone.start();
+
+    function scheduleLoop() {
+      if (!musicEnabled) return;
+      let t0 = ctx.currentTime + 0.05;
+      for (let i = 0; i < 16; i++) {
+        const when = t0 + i * (beatSec / 2);
+        // Kick on 1, 3
+        if (i % 4 === 0) {
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.frequency.setValueAtTime(120, when);
+          o.frequency.exponentialRampToValueAtTime(40, when + 0.12);
+          g.gain.setValueAtTime(0.7, when);
+          g.gain.exponentialRampToValueAtTime(0.001, when + 0.18);
+          o.connect(g); g.connect(master);
+          o.start(when); o.stop(when + 0.2);
+        }
+        // Hat on 2, 4
+        if (i % 4 === 2) {
+          const nbuf = ctx.createBuffer(1, ctx.sampleRate * 0.05, ctx.sampleRate);
+          const nd = nbuf.getChannelData(0);
+          for (let k = 0; k < nd.length; k++) nd[k] = (Math.random() * 2 - 1) * (1 - k / nd.length);
+          const ns = ctx.createBufferSource(); ns.buffer = nbuf;
+          const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 6000;
+          const g  = ctx.createGain(); g.gain.value = 0.18;
+          ns.connect(hp); hp.connect(g); g.connect(master);
+          ns.start(when);
+        }
+      }
+      musicLoopTimer = setTimeout(scheduleLoop, beatSec * 8 * 1000);
+    }
+    scheduleLoop();
+
+    musicNodes = { master, pad, drone, padFilter, droneGain };
+    musicFreqArr = new Uint8Array(musicAnalyser.frequencyBinCount);
+    musicEnabled = true;
+
+    // Notify backend so a Music state event can flow back too (optional).
+    try { fetch('/api/state', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ state: 'MUSIC' }) }); } catch (e) {}
+  }
+
+  let musicLoopTimer = null;
+  function stopMusic() {
+    if (!musicEnabled) return;
+    musicEnabled = false;
+    if (musicLoopTimer) { clearTimeout(musicLoopTimer); musicLoopTimer = null; }
+    try {
+      if (musicNodes) {
+        musicNodes.drone.stop();
+        musicNodes.pad.stop();
+        musicNodes.master.disconnect();
+      }
+    } catch (e) { /* ignore */ }
+    musicNodes = null;
+    musicAnalyser = null;
+    musicFreqArr = null;
+    try { fetch('/api/state', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ state: 'IDLE' }) }); } catch (e) {}
+  }
+
+  function toggleMusic() {
+    if (musicEnabled) { stopMusic(); markButton('music', false); }
+    else              { startMusic();  markButton('music', musicEnabled); }
+  }
+
+  function readBands(arr) {
+    // arr is Uint8Array. Split into low/mid/high by bin and normalize to 0..1.
+    if (!arr) return { low: 0, mid: 0, high: 0 };
+    const n = arr.length;
+    const loEnd = Math.floor(n * 0.15);
+    const midEnd = Math.floor(n * 0.5);
+    let lo = 0, mi = 0, hi = 0;
+    for (let i = 0; i < loEnd; i++) lo += arr[i];
+    for (let i = loEnd; i < midEnd; i++) mi += arr[i];
+    for (let i = midEnd; i < n; i++) hi += arr[i];
+    return {
+      low:  lo / (loEnd * 255),
+      mid:  mi / ((midEnd - loEnd) * 255),
+      high: hi / ((n - midEnd) * 255),
+    };
+  }
+
+  // ------- main loop -----------------------------------------------------
+
+  let lastT = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - lastT) / 1000); // clamp huge gaps
+    lastT = now;
+
+    let audio = { low: 0, mid: 0, high: 0 };
+    if (musicEnabled && musicAnalyser) {
+      musicAnalyser.getByteFrequencyData(musicFreqArr);
+      audio = readBands(musicFreqArr);
+    } else if (micEnabled && analyser) {
+      analyser.getByteFrequencyData(freqArr);
+      audio = readBands(freqArr);
+    }
+    anim.setAudio(audio);
+
+    const params = anim.tick(dt);
+
+    // Mouse attention: only during calm states. Apply on top of the
+    // engine's output so we don't fight any active behavior.
+    const mt = window.__nexMouseTarget && window.__nexMouseTarget();
+    if (mt !== undefined && (anim.state === 'IDLE' || anim.state === 'LISTENING')) {
+      const cur = params.lookX || 0;
+      params.lookX = cur * 0.85 + mt * 0.15;
+    }
+
+    gl.render(params, audio);
+
+    // Dev HUD
+    if (dev && !dev.hidden) {
+      const info = anim.debugInfo;
+      if (devState.textContent !== info.state) devState.textContent = info.state;
+      if (devActivity.textContent !== info.activityLevel) devActivity.textContent = info.activityLevel;
+      devBehavior.textContent = info.behavior + '  ' + info.behaviorT + '/' + info.behaviorDur;
+      devLast.textContent = info.lastBehavior + ' (' + info.lastBehaviorAge + 's)';
+      devNext.textContent = info.nextEvalIn + 's';
+      devRecent.textContent = info.recentBehaviors;
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // ------- dev panel -----------------------------------------------------
+
+  const STATES = [
+    'IDLE','LISTENING','THINKING','SPEAKING','HAPPY','EXCITED','CALM',
+    'CONFUSED','FOCUSED','FRUSTRATED','SURPRISED','CURIOUS','AMUSED',
+    'SLEEPY','PROUD','SUSPICIOUS','MUSIC','ERROR','RECOVERY','WAKE'
+  ];
+
+  function buildDevPanel() {
+    devStates.innerHTML = '';
+    for (const s of STATES) {
+      const b = document.createElement('button');
+      b.textContent = s;
+      b.dataset.state = s;
+      b.addEventListener('click', () => sendState(s));
+      devStates.appendChild(b);
+    }
+
+    devIdle.innerHTML = '';
+    const idleBehaviors = [
+      'breathing','blink','microMove','asyncBlink','lookLeft','lookRight',
+      'stretch','squish','faceTilt','asymmetric','syncPulse','stillness',
+      'rarePulse','slowLook','briefWiden','tinyTilt','oneEyeReact',
+      'freeze','subtleShift','unusualStretch','syncEvent','doubleBlink','slowBlink',
+    ];
+    for (const name of idleBehaviors) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.title = 'force idle, then play this behavior';
+      b.addEventListener('click', () => {
+        sendState('IDLE');
+        // Schedule it on the next idle tick.
+        setTimeout(() => {
+          const bh = anim.behaviors[name];
+          if (!bh) return;
+          anim.currentBehavior = bh;
+          anim.behaviorT = 0;
+          anim.behaviorDur = bh.duration;
+          anim.behaviorParams = anim._randomParams(bh);
+        }, 30);
+      });
+      devIdle.appendChild(b);
+    }
+
+    dev.querySelectorAll('button[data-action]').forEach(b => {
+      b.addEventListener('click', () => {
+        const a = b.dataset.action;
+        if (a === 'mic')        toggleMic();
+        else if (a === 'music') toggleMusic();
+        else if (a === 'tts') {
+          const muted = window.__nexTts && window.__nexTts.toggleMute();
+          markButton('tts', !!muted);
+        }
+        else if (a === 'reset') sendState('IDLE');
+        else if (a === 'wake')  sendState('WAKE');
+        else if (a === 'error') sendState('ERROR');
+        else if (a === 'send')  doSend();
+        else if (a === 'settings') window.open('/settings.html', '_blank');
+      });
+    });
+
+    devInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doSend();
+    });
+  }
+
+  function sendState(name) {
+    try {
+      fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: name }),
+      }).catch(() => {});
+    } catch (e) {}
+    anim.setState({ state: name });
+  }
+
+  function doSend() {
+    const text = (devInput.value || '').trim();
+    if (!text) return;
+    devInput.value = '';
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    }).catch(() => {});
+    anim.setState({ state: 'LISTENING' });
+  }
+
+  function markButton(name, on) {
+    dev.querySelectorAll(`button[data-action="${name}"]`).forEach(b => {
+      b.classList.toggle('active', !!on);
+    });
+  }
+
+  function bindKeyboard() {
+    window.addEventListener('keydown', (e) => {
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+      if (e.key === '`' || e.key === '~') {
+        dev.hidden = !dev.hidden;
+        return;
+      }
+      if (e.key === 'Escape') {
+        dev.hidden = true;
+        return;
+      }
+      // Number keys 1..9 jump to states.
+      const map = ['IDLE','LISTENING','THINKING','SPEAKING','HAPPY','EXCITED','CONFUSED','FOCUSED','FRUSTRATED'];
+      const idx = parseInt(e.key, 10) - 1;
+      if (idx >= 0 && idx < map.length) sendState(map[idx]);
+      if (e.key.toLowerCase() === 'm') toggleMusic();
+      if (e.key.toLowerCase() === 'r') sendState('IDLE');
+      if (e.key.toLowerCase() === 'e') sendState('ERROR');
+      if (e.key.toLowerCase() === 'w') sendState('WAKE');
+      if (e.key.toLowerCase() === 's') sendState('SURPRISED');
+    });
+  }
+
+  function bindMouse() {
+    // Subtle reaction to mouse position: a tiny horizontal attention.
+    let targetX = 0;
+    window.addEventListener('mousemove', (e) => {
+      const nx = (e.clientX / window.innerWidth) * 2 - 1;
+      targetX = nx * 0.25; // small
+    });
+    // We don't need a separate timer — apply the mouse nudge inside the
+    // main rAF loop after the animation engine ticks. (Done in loop().)
+    window.__nexMouseTarget = () => targetX;
+  }
+
+  function bindNetwork() {
+    if (!('EventSource' in window)) return;
+    es = new EventSource('/api/events');
+    es.onmessage = (m) => {
+      let evt;
+      try { evt = JSON.parse(m.data); } catch (e) { return; }
+      if (!evt || !evt.type) return;
+      if (evt.type === 'state') {
+        anim.setState({ state: evt.state, params: evt.params || {} });
+        // Cancel any in-flight TTS when we leave SPEAKING — keeps a
+        // previous reply's last word from bleeding into the next turn.
+        if (evt.state !== 'SPEAKING' && evt.state !== 'THINKING' &&
+            window.__nexTts) {
+          window.__nexTts.cancel();
+        }
+      } else if (evt.type === 'speak') {
+        // Legacy non-streaming speak event. The backend strips
+        // [STATE] tags before sending. We accept either `tts_text`
+        // (preferred, fully cleaned) or `text` (legacy / direct POST).
+        anim.setState({ state: 'SPEAKING', params: {} });
+        const shown = (evt.tts_text != null ? evt.tts_text : evt.text) || '';
+        anim.setSpeechText(stripTagsClient(shown));
+      } else if (evt.type === 'speak.delta') {
+        // Streaming: the bubble updates with each safe-boundary chunk.
+        // The backend sends a complete, tag-stripped chunk. `text` is
+        // the cumulative cleaned text; we use it directly so we never
+        // have to track local accumulation state.
+        anim.setSpeechText(stripTagsClient(evt.text || ''));
+        // If this delta carries an emotion tag (parsed at the same
+        // boundary as this text), apply it IN THE SAME FRAME so the
+        // face animates synchronously with the bubble, not "before"
+        // (visible as a head-start) or "after" (visible as a tail-flick).
+        if (evt.state) {
+          anim.setState({
+            state: evt.state,
+            params: { source: evt.stateSource || 'tag' },
+          });
+        }
+        // Speak this delta the moment it arrives so TTS starts within
+        // ~150ms of the first chunk instead of waiting for the full
+        // reply. The flusher only emits at safe boundaries so each
+        // delta is a coherent chunk of speech — no mid-word cut.
+        // Skip empty deltas (state-only carryovers) so we don't queue
+        // silent TTS utterances.
+        if (evt.delta && window.__nexTts) {
+          window.__nexTts.speak(stripTagsClient(evt.delta));
+        }
+      } else if (evt.type === 'speak.end') {
+        // Final event for the stream. The last delta already populated
+        // the bubble. We apply the emotion here ONLY if a delta didn't
+        // already carry one — so a trailing emotion that arrived with
+        // an empty text chunk still gets delivered.
+        if (evt.state) {
+          anim.setState({
+            state: evt.state,
+            params: { source: evt.stateSource || 'fallback' },
+          });
+        } else if (evt.tags && evt.tags.length > 0) {
+          // A trailing tag arrived with no preceding text (model wrote
+          // `[PROUD]` as the very last thing before stream end).
+          // Apply it now so the face catches up.
+          anim.setState({
+            state: evt.tags[evt.tags.length - 1],
+            params: { source: 'tag' },
+          });
+        } else {
+          anim.setState({ state: 'SPEAKING', params: {} });
+        }
+      }</old_text> else if (evt.type === 'emotion') {
+        // Optional explicit emotion event from the backend.
+        if (evt.state) anim.setState({ state: evt.state, params: {} });
+      } else if (evt.type === 'hello') {
+        // no-op; backend announces its config here.
+      }
+    };
+    es.onerror = () => {
+      // Will auto-retry; do nothing.
+    };
+  }
+
+  // ------- audio auto-start hint -----------------------------------------
+
+  function startAudio() {
+    // We do NOT auto-request mic — privacy. Instead, watch for first
+    // user gesture, and if music mode is requested, that starts audio.
+    // The mic is started only on user action (toggleMic).
+  }
+
+  // ------- go ------------------------------------------------------------
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();

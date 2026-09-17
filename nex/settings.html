@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Nex · settings</title>
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    /* Settings page is a separate document — minimal chrome. */
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #000;
+      color: #fff;
+      font: 14px/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      padding: 32px 24px;
+      box-sizing: border-box;
+    }
+    h1 { font-weight: 500; font-size: 18px; margin: 0 0 24px 0; }
+    h1 a { color: #888; text-decoration: none; margin-left: 12px; font-size: 12px; }
+    h1 a:hover { color: #fff; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      max-width: 920px;
+    }
+    .card {
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px;
+      padding: 16px;
+      background: rgba(255,255,255,0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card .row { display: flex; align-items: center; gap: 8px; }
+    .card h2 { font-size: 14px; font-weight: 600; margin: 0; flex: 1; }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #555;
+      transition: background 0.2s ease;
+      flex-shrink: 0;
+    }
+    .status-dot.probing { background: #ff9f43; animation: pulse 1s infinite; }
+    .status-dot.online { background: #4ec9b0; }
+    .status-dot.offline { background: #c45a5a; }
+    @keyframes pulse {
+      0%,100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .meta {
+      font-size: 12px;
+      color: #888;
+      line-height: 1.5;
+    }
+    .meta code {
+      background: rgba(255,255,255,0.05);
+      padding: 1px 4px;
+      border-radius: 2px;
+      color: #ccc;
+    }
+    .actions { margin-top: 4px; }
+    .actions button {
+      background: rgba(255,255,255,0.06);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.12);
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font: inherit;
+      margin-right: 4px;
+    }
+    .actions button:hover { background: rgba(255,255,255,0.12); }
+    .actions button[disabled] { opacity: 0.4; cursor: wait; }
+    .actions button.primary {
+      background: #4ec9b0;
+      color: #000;
+      border-color: #4ec9b0;
+    }
+    .actions button.primary:hover { background: #5fdac1; }
+    details {
+      margin-top: 4px;
+      font-size: 12px;
+    }
+    details summary {
+      cursor: pointer;
+      color: #888;
+      user-select: none;
+    }
+    details summary:hover { color: #fff; }
+    details ul {
+      margin: 4px 0 0 0;
+      padding-left: 16px;
+      max-height: 120px;
+      overflow-y: auto;
+      color: #aaa;
+    }
+    .tool-list { font-size: 12px; color: #aaa; }
+    .tool-list::before { content: "▸ "; color: #666; }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #4ec9b0;
+      color: #000;
+      padding: 8px 16px;
+      border-radius: 4px;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+    .toast.error { background: #c45a5a; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>NEX · MCP tunnels <a href="/">← back to Nex</a></h1>
+
+  <p class="meta" style="max-width: 720px; margin-top: -16px; margin-bottom: 24px;">
+    Click <strong>Connect</strong> on an editor below to make Nex open
+    a tunnel to it. The editor's tools become reachable from the front-end
+    (via tools/call) and from the AI itself (it gets a live list of which
+    tunnels are online + which tools they expose).
+  </p>
+
+  <div class="grid" id="grid">
+    <div class="meta" id="loading">Loading tunnel catalog…</div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+  /* Settings page — talks to /api/settings/tunnels and /api/settings/connect.
+     Designed so each card is independent: connecting one tunnel never
+     touches the others' state, and the catalog query updates both the
+     status-dot color and the button label on the same render. */
+
+  const grid = document.getElementById('grid');
+  const toast = document.getElementById('toast');
+  let platform = null;  // 'win32' | 'darwin' | 'linux'
+
+  function showToast(msg, isError) {
+    toast.textContent = msg;
+    toast.classList.toggle('error', !!isError);
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 2200);
+  }
+
+  function dot(state) {
+    const c = document.createElement('span');
+    c.className = 'status-dot ' + state;
+    c.dataset.state = state;
+    return c;
+  }
+
+  async function refresh() {
+    let res;
+    try {
+      res = await fetch('/api/settings/tunnels').then(r => r.json());
+    } catch (e) {
+      grid.innerHTML = '<div class="meta">Could not load: ' + e + '</div>';
+      return;
+    }
+    platform = res.platform || null;
+    const registered = {};  // name → row
+    for (const r of (res.registered || [])) registered[r.name] = r;
+    grid.innerHTML = '';
+    for (const c of (res.catalog || [])) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.dataset.name = c.name;
+      const head = document.createElement('div');
+      head.className = 'row';
+      const h2 = document.createElement('h2');
+      h2.textContent = c.label;
+      const d = dot('offline');
+      head.appendChild(h2);
+      head.appendChild(d);
+      card.appendChild(head);
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = c.description || '';
+      card.appendChild(meta);
+      // transport line
+      const transport = document.createElement('div');
+      transport.className = 'meta';
+      if (c.kind === 'stdio' && c.command) {
+        const argStr = (c.args || []).join(' ');
+        transport.innerHTML = 'transport: <code>stdio</code> · '
+              + '<code>' + c.command + (argStr ? ' ' + argStr : '') + '</code>';
+      } else if (c.url) {
+        transport.innerHTML = 'transport: <code>http</code> · '
+              + '<code>' + c.url + '</code>';
+      }
+      card.appendChild(transport);
+      // tools + button
+      const tools = document.createElement('div');
+      tools.className = 'meta tool-list';
+      card.appendChild(tools);
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const btn = document.createElement('button');
+      btn.textContent = 'Connect';
+      btn.dataset.action = 'connect';
+      actions.appendChild(btn);
+      const probe = document.createElement('button');
+      probe.textContent = 'Probe';
+      probe.dataset.action = 'probe';
+      actions.appendChild(probe);
+      card.appendChild(actions);
+      grid.appendChild(card);
+      // Wire up
+      btn.addEventListener('click', () => doConnect(c.name, btn, d, tools, card));
+      probe.addEventListener('click', () => doProbe(c.name, btn, d, tools, card));
+      // Render initial state
+      applyStatus(card, d, tools, btn, registered[c.name]);
+    }
+  }
+
+  function applyStatus(card, d, tools, btn, reg) {
+    if (reg && reg.online) {
+      d.className = 'status-dot online';
+      d.title = 'Connected';
+      btn.textContent = 'Reconnect';
+      const server = (reg.server_info || {}).name || '?';
+      const ver = (reg.server_info || {}).version || '?';
+      tools.textContent = reg.tools_count + ' tools · server=' + server
+                          + ' v' + ver;
+      if ((reg.tools_sample || []).length) {
+        const det = document.createElement('details');
+        const sum = document.createElement('summary');
+        sum.textContent = 'Tool names';
+        det.appendChild(sum);
+        const ul = document.createElement('ul');
+        for (const n of reg.tools_sample) {
+          const li = document.createElement('li');
+          li.textContent = n;
+          ul.appendChild(li);
+        }
+        det.appendChild(ul);
+        tools.appendChild(document.createTextNode(' '));
+        tools.appendChild(det);
+      }
+    } else if (reg) {
+      d.className = 'status-dot offline';
+      d.title = (reg.last_error && 'errored: ' + reg.last_error) || 'registered but offline';
+      btn.textContent = 'Connect';
+      tools.textContent = '0 tools · '
+                          + ((reg.last_error && reg.last_error.length > 40)
+                             ? reg.last_error.slice(0, 40) + '…'
+                             : (reg.last_error || 'not reachable'));
+    } else {
+      d.className = 'status-dot offline';
+      d.title = 'not registered yet';
+      btn.textContent = 'Connect';
+      tools.textContent = 'not registered';
+    }
+  }
+
+  async function doConnect(name, btn, d, tools, card) {
+    btn.disabled = true;
+    btn.textContent = 'Connecting…';
+    d.className = 'status-dot probing';
+    let r;
+    try {
+      r = await fetch('/api/settings/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }).then(r => r.json());
+    } catch (e) {
+      showToast('Network error: ' + e, true);
+      btn.disabled = false;
+      btn.textContent = 'Connect';
+      d.className = 'status-dot offline';
+      return;
+    }
+    btn.disabled = false;
+    if (!r.ok) {
+      showToast('Could not connect ' + name + ': ' + (r.error || 'unknown'), true);
+      d.className = 'status-dot offline';
+      btn.textContent = 'Connect';
+      tools.textContent = r.error || 'failed';
+      return;
+    }
+    showToast(name + ' connected · ' + r.tools_count + ' tools', false);
+    applyStatus(card, d, tools, btn, {
+      online: true, server_info: r.server_info,
+      tools_count: r.tools_count, tools_sample: r.tools_sample || [],
+    });
+    // Force a fresh awareness snapshot on the next chat tick.
+    fetch('/api/tunnels/reload', { method: 'POST' }).catch(() => {});
+  }
+
+  async function doProbe(name, btn, d, tools, card) {
+    d.className = 'status-dot probing';
+    btn.disabled = true;
+    btn.textContent = 'Probing…';
+    const r = await fetch('/api/tunnels/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platforms: [name] }),
+    }).then(r => r.json());
+    btn.disabled = false;
+    const probed = (r.probed || [])[0];
+    if (probed && probed.ok) {
+      showToast(name + ' is reachable', false);
+      // Re-fetch full catalog so the rest is in sync.
+      refresh();
+    } else {
+      showToast(name + ' not reachable: '
+                + ((probed && probed.error) || 'unknown'), true);
+      d.className = 'status-dot offline';
+      btn.textContent = 'Probe';
+    }
+  }
+
+  refresh();
+  // Auto-refresh every 10s so newly-connected tunnels show up.
+  setInterval(() => {
+    fetch('/api/settings/tunnels').then(r => r.json()).then(res => {
+      const registered = {};
+      for (const r of (res.registered || [])) registered[r.name] = r;
+      for (const card of grid.querySelectorAll('.card')) {
+        const name = card.dataset.name;
+        const d = card.querySelector('.status-dot');
+        const btn = card.querySelector('button[data-action="connect"]');
+        const tools = card.querySelector('.tool-list');
+        applyStatus(card, d, tools, btn, registered[name]);
+      }
+    }).catch(() => {});
+  }, 10000);
+  </script>
+</body>
+</html>

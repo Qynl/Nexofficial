@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nex</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- The face lives entirely in WebGL on this canvas. -->
+  <canvas id="nex" aria-label="Nex"></canvas>
+
+  <!-- Hidden by default. Press ` (backtick) to toggle. -->
+  <div id="dev" hidden>
+    <div class="dev-title">NEX · debug</div>
+    <div class="dev-section">
+      <div class="dev-row" id="dev-states"></div>
+    </div>
+    <div class="dev-section">
+      <div class="dev-row" id="dev-idle"></div>
+    </div>
+    <div class="dev-section">
+      <div class="dev-row">
+        <button data-action="mic">Toggle mic</button>
+        <button data-action="music">Toggle music</button>
+        <button data-action="tts">Mute TTS</button>
+<button data-action="reset">Reset idle</button>
+      <button data-action="wake">WAKE</button>
+      <button data-action="error">ERROR</button>
+      <button data-action="settings">Settings · MCP tunnels</button>
+    </div>
+  </div>
+  <div class="dev-section">
+    <input id="dev-input" placeholder="say something to Nex...">
+      <button data-action="send">send</button>
+    </div>
+    <div class="dev-section dev-status">
+      <div><span class="lbl">state</span> <span id="dev-state">IDLE</span></div>
+      <div><span class="lbl">activity</span> <span id="dev-activity">NORMAL</span></div>
+      <div><span class="lbl">behavior</span> <span id="dev-behavior">·</span></div>
+      <div><span class="lbl">last</span> <span id="dev-last">—</span></div>
+      <div><span class="lbl">next</span> <span id="dev-next">—</span></div>
+      <div><span class="lbl">recent</span> <span id="dev-recent">—</span></div>
+    </div>
+  </div>
+
+  <!-- Speech bubble used in SPEAKING state. Pure white on black, minimal. -->
+  <div id="bubble" hidden></div>
+
+  <script src="/webgl.js"></script>
+  <script src="/animations.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

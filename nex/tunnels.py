@@ -1,0 +1,271 @@
+"""NEX MCP tunnel registry.
+
+An MCP tunnel routes `tools/call` from Nex clients to whichever
+upstream (Roblox Studio plugin, Unreal Remote Control bridge,
+Blender addon bridge, etc.) actually owns the requested tool.
+
+Design:
+
+  * Each tunnel wraps an `Upstream`. They start cold; first call
+    runs the MCP `initialize` handshake.
+  * `aggregated_tools()` returns ONE list, where every upstream
+    tool is namespaced as `<upstream>.<tool>` plus Nex's own
+    unprefixed tools.
+  * `route(name, args)` parses the namespace and forwards. Names
+    without a prefix stay local (Nex's own `tool_*` calls).
+  * If a tunnel is down, `aggregated_tools()` simply skips it; if
+    a client calls a tool whose upstream is offline we return a
+    JSON-RPC error saying the upstream isn't connected.
+
+Thread-safety: tools/list is read-mostly and Nex's HTTP handler is
+already serialised (BaseHTTPRequestThread per request), so we keep
+this simple without a lock. The internal `Upstream` object pools
+its own connection state per call.
+"""
+from __future__ import annotations
+
+import os
+import re
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from upstream import (
+    Upstream, UpstreamError, default_registry, DEFAULT_TUNNELS,
+    _parse_extra_tunnels,
+)
+
+
+# Max bytes for a tool description we expose to clients. The MCP 2025
+# spec caps a single tool description at 2^16 chars; we cap at 8KB to
+# keep token costs modest when aggregating many upstreams.
+_DESC_CAP = 8 * 1024
+
+
+class TunnelRegistry:
+    """Owns Upstream instances and aggregates their tool catalogs."""
+
+    def __init__(self, upstreams: Optional[List[Upstream]] = None) -> None:
+        # Copy so callers can't mutate our state.
+        self._upstreams: List[Upstream] = list(upstreams or default_registry())
+        self._lock = threading.Lock()
+        self._local_tools_fn: Optional[Callable[[], List[Dict[str, Any]]]] = None
+        self._local_router: Optional[Callable[[str, Dict[str, Any]],
+                                              Dict[str, Any]]] = None
+        # Tool prefix characters we accept on the wire.
+        self._prefix_re = re.compile(r"^[a-zA-Z0-9_-]{1,32}\.(.*)$")
+
+    # ----- wiring ---------------------------------------------------------
+
+    def bind_local(self, *,
+                   tool_provider: Callable[[], List[Dict[str, Any]]],
+                   tool_router: Callable[[str, Dict[str, Any]],
+                                         Dict[str, Any]]) -> None:
+        """Hook the registry up to Nex's own sandbox tool set.
+
+        `tool_provider` returns the local tool schemas (no prefix).
+        `tool_router(name, args)` invokes a local tool by name and
+        returns the MCP-style result envelope.
+        """
+        with self._lock:
+            self._local_tools_fn = tool_provider
+            self._local_router = tool_router
+
+    # ----- introspection --------------------------------------------------
+
+    def list_upstreams(self) -> List[Dict[str, Any]]:
+        return [u.status() for u in self._upstreams]
+
+    def summary(self) -> Dict[str, Any]:
+        statuses = self.list_upstreams()
+        online = sum(1 for s in statuses if not s["last_error"]
+                     or (s.get("tools_count", 0) > 0))
+        return {
+            "tunnels": statuses,
+            "online": online,
+            "total": len(statuses),
+            "platforms": [s["label"] for s in statuses],
+            "names":    [s["name"]  for s in statuses],
+        }
+
+    # ----- aggregates -----------------------------------------------------
+
+    def aggregated_tools(self) -> List[Dict[str, Any]]:
+        """Return the merged tool list as MCP clients see it.
+
+        Local tools are unprefixed. Upstream tools are prefixed with
+        `<upstream_name>.`. The upstream's own description is
+        preserved (truncated to 8KB) and we annotate every entry
+        with the platform it belongs to.
+        """
+        out: List[Dict[str, Any]] = []
+        if self._local_tools_fn is not None:
+            for t in self._local_tools_fn() or []:
+                out.append(dict(t))
+        for u in self._upstreams:
+            try:
+                tools = u.tools()
+            except UpstreamError:
+                # Cold upstream; keep going.
+                continue
+            if not tools:
+                continue
+            label = u.label or u.name
+            for t in tools:
+                schema = t.get("inputSchema") or {"type": "object",
+                                                  "properties": {}}
+                desc = (t.get("description") or "").strip()
+                if len(desc) > _DESC_CAP:
+                    desc = desc[:_DESC_CAP] + "…"
+                out.append({
+                    "name": u.name + "." + t["name"],
+                    "description": ("[" + label + "] " + desc
+                                    if desc
+                                    else "[" + label + "] tool"),
+                    "inputSchema": schema,
+                })
+        return out
+
+    # ----- routing --------------------------------------------------------
+
+    def route(self, tool_name: str,
+              arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Route `tool_name` to its owner and return the MCP envelope.
+
+        Returns one of:
+          * {"content": [...], "isError": False}  — successful call
+          * {"error": "..."}                     — handled locally
+          * {"isError": True, "content": [...]}  — upstream rejected
+        """
+        m = self._prefix_re.match(tool_name) if "." in tool_name else None
+        if m:
+            upstream_name = tool_name.split(".", 1)[0]
+            inner = tool_name.split(".", 1)[1]
+            u = self._find(upstream_name)
+            if u is None:
+                return self._err("unknown tunnel: " + upstream_name)
+            return self._call_upstream(u, inner, arguments)
+        # Local tool.
+        if self._local_router is None:
+            return self._err("no local tool router registered")
+        return self._local_router(tool_name, arguments or {})
+
+    # ----- primitives -----------------------------------------------------
+
+    def _find(self, name: str) -> Optional[Upstream]:
+        for u in self._upstreams:
+            if u.name == name:
+                return u
+        return None
+
+    def _call_upstream(self, u: Upstream, tool: str,
+                       args: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            resp = u.call(tool, args or {})
+        except UpstreamError as exc:
+            return self._err("upstream " + u.name + " not reachable: "
+                             + str(exc))
+        result = resp.get("result", {})
+        # Re-shape so the LLM gets the MCP "content" envelope.
+        content = result.get("content")
+        if isinstance(content, list):
+            return {
+                "content": content,
+                "isError": bool(result.get("isError", False)),
+            }
+        # Upstream returned something else (string, dict) — wrap it.
+        return {
+            "content": [{"type": "text", "text": json_dumps(result)}],
+            "isError": False,
+        }
+
+    def _err(self, msg: str) -> Dict[str, Any]:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Tunnel error: " + msg}],
+        }
+
+
+def json_dumps(obj: Any) -> str:
+    import json
+    return json.dumps(obj, ensure_ascii=False, indent=2,
+                      sort_keys=True)[:_DESC_CAP]
+
+
+# ---------------------------------------------------------------------------
+# Singleton wiring. server.py imports this and binds the local tool
+# provider at boot; the rest of the system reads TUNNELS.
+# ---------------------------------------------------------------------------
+
+_TUNNELS: Optional[TunnelRegistry] = None
+
+
+def get_tunnels() -> TunnelRegistry:
+    global _TUNNELS
+    if _TUNNELS is None:
+        _TUNNELS = TunnelRegistry()
+    return _TUNNELS
+
+
+def reload_tunnels(extra: Optional[List[Dict[str, Any]]] = None,
+                    replace: bool = False) -> TunnelRegistry:
+    """Re-read NEX_TUNNELS and rebuild the registry.
+
+    `extra` is appended to the env-derived config; if `replace` is True,
+    only `extra` is used (env is ignored). Used by:
+      * /api/tunnels/reload — re-reads env.
+      * POST /api/tunnels with a JSON body — installs `extra` and
+        (by default) keeps the env-derived ones too.
+
+    Entries may declare either:
+      * ``url`` for HTTP, OR
+      * ``transport="stdio"`` + ``command`` + ``args`` (list) for
+        stdio MCP children (e.g. Roblox Studio's ``mcp.bat``).
+    """
+    global _TUNNELS
+    if replace or extra:
+        cfg: List[Dict[str, Any]] = []
+        if not replace:
+            cfg += DEFAULT_TUNNELS
+        cfg += _parse_extra_tunnels()
+        cfg += list(extra or [])
+    else:
+        cfg = list(DEFAULT_TUNNELS) + _parse_extra_tunnels()
+    upstreams = []
+    for c in cfg:
+        url = c.get("url") or _stdio_url_for(c)
+        u = Upstream(c["name"], url,
+                     c.get("label") or c["name"])
+        if _is_stdio_entry(c):
+            u._stdio_command = (
+                c["command"], list(c.get("args") or []),
+            )
+        upstreams.append(u)
+    fresh = TunnelRegistry(upstreams)
+    if _TUNNELS is not None and _TUNNELS._local_tools_fn is not None:
+        fresh.bind_local(
+            tool_provider=_TUNNELS._local_tools_fn,
+            tool_router=_TUNNELS._local_router,
+        )
+    _TUNNELS = fresh
+    return _TUNNELS
+
+
+def _is_stdio_entry(c: Dict[str, Any]) -> bool:
+    if c.get("transport") == "stdio":
+        return True
+    if c.get("command") and not c.get("url"):
+        return True
+    return False
+
+
+def _stdio_url_for(c: Dict[str, Any]) -> str:
+    """URL sentinel for a stdio upstream row (Upstream.__init__
+    refuses ``None`` — the sentinel lets it carry the row)."""
+    return "stdio://" + c["name"]
+
+
+def reset_tunnels_for_testing() -> None:
+    """Drop the cached registry. Only used by the test harness."""
+    global _TUNNELS
+    _TUNNELS = None
