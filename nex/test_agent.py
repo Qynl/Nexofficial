@@ -179,4 +179,30 @@ _expect(unknown.capability.source in ("heuristic", "conservative"),
         "discovered tool capability is classified")
 
 
+# ---------------------------------------------------------------------------
+# 7. Quality gate: an EMPTY result is rejected, never shipped as "success".
+# ---------------------------------------------------------------------------
+class _EmptyMock(mock_mcp.MockMCPServer):
+    def call(self, tool, args):
+        return {"result": {}}     # looks like success but carries no info
+
+
+empty_mock = _EmptyMock("qa", [{"name": "make_thing", "description": "x",
+                                "inputSchema": {}}])
+reg_qa = agent_loop.CapabilityRegistry(
+    [mock_mcp.server_view("qa", empty_mock)])
+g_qa = task_graph.TaskGraph()
+g_qa.add(task_graph.Task(id="qa", name="make", stage="make",
+                          server="qa", tool="make_thing", args={}))
+rep_qa = agent_loop.AutonomousAgent(reg_qa).run("make a thing", graph=g_qa)
+_expect("make" in rep_qa.failed,
+        "empty result is treated as failure, not fake success: %s" % rep_qa.failed)
+_expect(g_qa.get("qa").result is None or _is_empty(g_qa.get("qa").result),
+        "no low-quality/empty result accepted")
+
+
+def _is_empty(r):
+    return r is None or (isinstance(r, dict) and len(r) == 0)
+
+
 print("\nAll agent tests passed.")

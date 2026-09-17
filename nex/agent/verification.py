@@ -21,10 +21,33 @@ class VerificationResult:
     detail: Any = None
 
 
+def _is_empty_result(result: Any) -> bool:
+    """A produced result that carries no information is a low-quality
+    outcome — treat it as a failure so the loop retries/repairs rather
+    than shipping nothing as 'success'."""
+    if result is None:
+        return True
+    if isinstance(result, dict) and len(result) == 0:
+        return True
+    if isinstance(result, str) and result.strip() == "":
+        return True
+    return False
+
+
 def verify_task(task: Any, registry: CapabilityRegistry,
                 result: Any) -> VerificationResult:
-    """Run the task's verify_tool against the registry, if present."""
+    """Run the task's verify_tool against the registry, if present.
+
+    If no verifier exists, we still apply a minimum quality gate: an empty
+    result (None / {} / '') is NOT accepted as success. This is what stops
+    the agent from silently shipping low-quality (or no) output.
+    """
     if not task.verify_tool:
+        if _is_empty_result(result):
+            return VerificationResult(
+                ok=False, verified=False,
+                note="no verifier and result is empty; rejecting to "
+                     "avoid low-quality/empty output")
         return VerificationResult(
             ok=True, verified=False,
             note="no verifier available; result unverified")

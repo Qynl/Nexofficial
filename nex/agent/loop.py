@@ -65,6 +65,16 @@ def _error_signature(error: str) -> str:
     return norm[:120]
 
 
+def _is_transient(error: str) -> bool:
+    """Transient errors (timeouts, unreachable, rate-limit, 5xx) are worth
+    retrying harder than logical/validation errors (which won't fix
+    themselves)."""
+    return bool(re.search(
+        r"(timeout|timed out|unreachable|connection reset|econnrefused|"
+        r"503|502|504|circuit breaker|rate limit|temporarily)", error or "",
+        re.IGNORECASE))
+
+
 def _diagnose(error: str, task: Any):
     """Generic, non-hardcoded repair: if the error names a missing argument,
     supply a placeholder default for it and retry."""
@@ -240,8 +250,11 @@ class AutonomousAgent:
                 self._emit("REPAIRING", "agent.tool_failed", task=task.id,
                            error=err)
 
+                # Transient errors get more retries (they often self-heal);
+                # logical/validation errors stop sooner.
+                cap_retries = 8 if _is_transient(err) else _MAX_REPEAT
                 seen_sigs[sig] = seen_sigs.get(sig, 0) + 1
-                if seen_sigs[sig] > _MAX_REPEAT:
+                if seen_sigs[sig] > cap_retries:
                     task.error = err
                     graph.mark_failed(task.id, err, sig)
                     state.record_failure(task.name, err)
