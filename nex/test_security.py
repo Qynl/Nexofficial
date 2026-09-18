@@ -4,8 +4,8 @@ Covers:
   1. Loopback default bind (0.0.0.0 requires explicit opt-in).
   2. NEX_AUTH_TOKEN gates every /api + /mcp route; served HTML bootstraps
      the token for the same-origin frontend.
-  3. call_upstream is a read-only protocol inspector (no arbitrary
-     JSON-RPC passthrough — no policy bypass).
+  3. call_upstream no longer exists anywhere; unprefixed non-capability
+     tools are refused at the boundary (see also test_mcp.py).
   4. write_file: honest overwrite/destructive flags + O_NOFOLLOW.
   5. run_command honors the NEX_RUN_ALLOW executable allowlist.
   6. compile_check reports WHAT was checked (source vs environment).
@@ -151,7 +151,7 @@ finally:
     proc.terminate()
     proc.wait(timeout=3)
 
-# ---------- 3. call_upstream allowlist (via the /mcp gateway) ----------------
+# ---------- 3. call_upstream removed; boundary refuses stray tools ----------
 
 def _mcp_tool(base, name, arguments):
     status, body = _http("POST", base + "/mcp", {
@@ -168,22 +168,24 @@ def _mcp_tool(base, name, arguments):
 
 proc, base = _boot()
 try:
+    # call_upstream is GONE — the boundary refuses it by name.
     blob, inner = _mcp_tool(base, "call_upstream", {
         "platform": "whatever", "method": "tools/call",
         "params": {"name": "write_file",
                    "arguments": {"path": "pwn.txt", "content": "x"}}})
-    _expect("not allowed" in json.dumps(inner),
-            "call_upstream: tools/call rejected")
-    blob, inner = _mcp_tool(base, "call_upstream", {
-        "platform": "whatever", "method": "resources/write", "params": {}})
-    _expect("not allowed" in json.dumps(inner),
-            "call_upstream: resources/write rejected")
-    # An allowlisted method passes the gate (then fails on unknown
-    # platform — proving the allowlist isn't blocking it).
-    blob, inner = _mcp_tool(base, "call_upstream", {
-        "platform": "no-such-server", "method": "tools/list", "params": {}})
-    _expect("unknown platform" in json.dumps(inner),
-            "call_upstream: allowlisted method reaches upstream layer")
+    _expect("not a Nex capability" in blob,
+            "call_upstream removed from the surface entirely")
+
+    # Sandbox tools are infrastructure: refused through MCP too.
+    blob, inner = _mcp_tool(base, "write_file",
+                            {"path": "pwn.txt", "content": "x"})
+    _expect("not a Nex capability" in blob,
+            "write_file refused via /mcp (boundary)")
+
+    # But Amazon Music — the one non-MCP capability — works.
+    blob, inner = _mcp_tool(base, "amazon-music.am_pause", {})
+    _expect("amazonmusic://" in json.dumps(inner),
+            "amazon-music connector reachable via /mcp")
 finally:
     proc.terminate()
     proc.wait(timeout=3)

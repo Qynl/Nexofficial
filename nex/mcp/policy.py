@@ -28,14 +28,25 @@ from mcp.capability import (
 )
 
 
-# Internal Nex tools that are part of Nex's own runtime, not external PC
-# control. These stay available even in MCP-only mode.
+# THE CAPABILITY BOUNDARY. Nex's AI can act ONLY through:
+#   1. explicitly connected MCP servers (authorized via `server`), and
+#   2. the explicitly implemented Amazon Music connector (server
+#      "amazon-music", an allowlisted pseudo-upstream).
+# These internal names are MCP-protocol introspection (part of the MCP
+# layer itself). EVERYTHING else internal — filesystem, shell, host
+# scanning, compile/validate helpers — is NOT an AI capability, even
+# though the code exists as Nex infrastructure. Not policy-gated:
+# structurally absent from the boundary.
 INTERNAL_ALLOWED = frozenset({
-    "list_files", "read_file", "write_file", "append_to_file",
-    "search_files", "log_event", "recent_events", "speak",
     "who_am_i", "list_platforms", "tunnel_status", "tunnel_probe",
-    "call_upstream", "detect_engines", "engine_info", "compile_check",
-    "validate_assets", "json_path_query", "diff_files",
+})
+
+# Amazon Music controls (server "amazon-music"). The connector is a
+# pseudo-upstream, so these authorize through the normal server path;
+# listed here for the bare-name (unprefixed) call form.
+MUSIC_ALLOWED = frozenset({
+    "am_play", "am_pause", "am_toggle", "am_next", "am_previous",
+    "am_volume", "am_search_play",
 })
 
 # Tools that are ALWAYS treated as external/unsafe (never auto-allowed).
@@ -45,7 +56,7 @@ ALWAYS_DENIED = frozenset({"run_command"})
 @dataclass
 class Policy:
     """Configurable security policy."""
-    mcp_only: bool = False
+    mcp_only: bool = True   # THE BOUNDARY: MCP servers + Amazon Music only.
     server_allowlist: Optional[Set[str]] = None   # None = all servers allowed
     tool_allowlist: Dict[str, Set[str]] = field(default_factory=dict)
     require_confirm_categories: Set[str] = field(
@@ -118,11 +129,16 @@ def authorize(server: Optional[str], tool: str,
                         "process execution is high-risk: confirmation "
                         "required", "PROCESS")
 
-    # 2) Internal Nex runtime tool.
+    # 2) Internal Nex runtime tool — ONLY the MCP introspection set.
+    # Everything else internal (filesystem/shell/host tools) is not an AI
+    # capability, regardless of flags.
     if server is None or server == "__internal__":
         if tool in INTERNAL_ALLOWED:
             return Decision(True, False,
-                            "internal Nex tool (own runtime)", cat)
+                            "internal Nex tool (MCP introspection)", cat)
+        if tool in MUSIC_ALLOWED:
+            return Decision(True, False,
+                            "Amazon Music control (explicit allowlist)", cat)
         # Unknown internal tool in MCP-only -> block external-style tools.
         if pol.mcp_only:
             return Decision(False, False,

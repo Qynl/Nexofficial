@@ -64,9 +64,20 @@ d = policy_mod.authorize("unreal-engine", "delete_actor",
 _expect(d.allowed is True, "destructive allowed by default policy")
 _expect(d.requires_confirmation is True, "destructive requires confirmation")
 
-# Internal Nex tool allowed.
+# THE BOUNDARY: internal filesystem tools are NOT AI capabilities anymore —
+# denied even as "internal", because they are infrastructure, not surface.
 d2 = policy_mod.authorize(None, "write_file", cap.classify_capability("write_file"))
-_expect(d2.allowed is True, "internal write_file allowed")
+_expect(d2.allowed is False, "boundary: internal write_file DENIED (infra, not capability)")
+d2b = policy_mod.authorize(None, "read_file", cap.classify_capability("read_file"))
+_expect(d2b.allowed is False, "boundary: internal read_file DENIED")
+d2c = policy_mod.authorize(None, "detect_engines", cap.classify_capability("detect_engines"))
+_expect(d2c.allowed is False, "boundary: host scanning DENIED")
+# MCP introspection stays.
+d2d = policy_mod.authorize(None, "who_am_i", cap.classify_capability("who_am_i"))
+_expect(d2d.allowed is True, "boundary: who_am_i allowed (MCP introspection)")
+# Amazon Music allowlist (bare form).
+d2e = policy_mod.authorize(None, "am_play", cap.classify_capability("am_play"))
+_expect(d2e.allowed is True, "boundary: am_play allowed (explicit connector)")
 
 # MCP-only blocks shell, always.
 p_mcp = Policy(mcp_only=True)
@@ -92,6 +103,50 @@ p_ta = Policy(tool_allowlist={"unreal-engine": {"spawn_actor"}})
 d7 = policy_mod.authorize("unreal-engine", "delete_actor",
                           cap.classify_capability("delete_actor"), p_ta)
 _expect(d7.allowed is False, "tool not in server tool-allow-list is denied")
+
+
+# --------------------------------------------------------------------------
+# Amazon Music connector invariants: the allowlist is EXACTLY the 7 controls,
+# every op is bounded to the amazonmusic:// scheme, invalid args are refused,
+# and the connector is the ONLY non-MCP capability.
+# --------------------------------------------------------------------------
+import music_amazon as m  # noqa: E402
+
+_expect({t[0] for t in m.MUSIC_TOOLS} == {
+    "am_play", "am_pause", "am_toggle", "am_next", "am_previous",
+    "am_volume", "am_search_play"},
+    "music allowlist is exactly the 7 controls")
+
+for op in ("am_play", "am_pause", "am_toggle", "am_next", "am_previous"):
+    r = m.call_tool(op, {})
+    _expect(r.get("ok") is True and r["link"].startswith("amazonmusic://"),
+            "music: %s bounded to amazonmusic:// scheme" % op)
+
+_expect(m.call_tool("am_volume", {"level": 300})
+        == {"ok": False, "error": "volume must be 0..100"},
+        "music: volume >100 refused")
+_expect(m.call_tool("am_volume", {"level": -1})
+        == {"ok": False, "error": "volume must be 0..100"},
+        "music: negative volume refused")
+_expect("error" in m.call_tool("am_search_play",
+                               {"query": "podcast" * 99}),
+        "music: oversized query refused")
+_expect("unknown Amazon Music control" in
+        m.call_tool("rm_rf", {})["error"],
+        "music: non-allowlisted control refused")
+r = m.call_tool("am_search_play", {"query": "AC/DC"})
+_expect(r["ok"] is True and r["link"] == "amazonmusic://search/AC%2FDC",
+        "music: search query is URL-quoted into the deep link")
+
+# Connector duck-types Upstream for the agent registry.
+up = m.MusicUpstream()
+agent_registry = importlib.import_module("agent.registry")
+reg_m = agent_registry.CapabilityRegistry.from_upstreams([up])
+_expect([v.name for v in reg_m.all_tools()]
+        == [t[0] for t in m.MUSIC_TOOLS],
+        "music: agent registry sees exactly the 7 controls")
+_expect(reg_m.by_name("write_file") is None,
+        "music: agent registry has NO filesystem tools")
 
 
 print("\nAll capability/policy tests passed.")

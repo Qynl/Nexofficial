@@ -198,8 +198,11 @@ status, body = _http_json(
          "url": "http://127.0.0.1:%d/mcp" % PORT}
     ], "replace": True})
 _expect(status == 200, "POST /api/tunnels returns 200")
-_expect([t["name"] for t in body["tunnels"]] == ["fake-roblox"],
-        "registry replaced with the fake tunnel only")
+names_after = [t["name"] for t in body["tunnels"]]
+_expect("fake-roblox" in names_after,
+        "registry replaced: fake tunnel present")
+_expect("amazon-music" in names_after,
+        "built-in amazon-music connector survives replace (explicit capability)")
 
 
 try:

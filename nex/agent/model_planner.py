@@ -61,6 +61,17 @@ PLAN_SYSTEM = (
 )
 
 
+# THE CAPABILITY BOUNDARY, stated to the planner verbatim.
+PLAN_BOUNDARY = (
+    "HARD CAPABILITY BOUNDARY: you can act ONLY through (1) tools exposed "
+    "by explicitly connected MCP servers and (2) the Amazon Music controls "
+    "(am_*). You have NO filesystem, shell, operating-system, or arbitrary "
+    "network access — those tools do not exist for you. If a goal truly "
+    "requires something outside this boundary, say so plainly in the plan's "
+    "'assumptions' and stop; never invent or simulate such a step."
+)
+
+
 def _catalog(registry, goal: str = "", max_catalog: int = 80) -> str:
     """Capability-filtered tool catalog for the planning prompt.
 
@@ -241,7 +252,8 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
         user_msg += ("\n\nA previous attempt scored low. Address these concrete "
                      "improvements:\n- " + "\n- ".join(feedback[:5]))
     messages = [
-        {"role": "system", "content": PLAN_SYSTEM + "\n\nLIVE TOOL CATALOG:\n" + catalog},
+        {"role": "system", "content": PLAN_SYSTEM + "\n\n" + PLAN_BOUNDARY
+            + "\n\nLIVE TOOL CATALOG:\n" + catalog},
         {"role": "user", "content": user_msg},
     ]
     try:

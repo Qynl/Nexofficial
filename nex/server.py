@@ -129,6 +129,19 @@ TAG_RE = re.compile(
 )
 
 
+def _safe_env_payload(env: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the payload from an MCP-style envelope; non-JSON text
+    (e.g. plain refusal messages) comes back as {"message": text}."""
+    try:
+        text = (env.get("content") or [{}])[0].get("text", "")
+        try:
+            return json.loads(text)
+        except (ValueError, TypeError):
+            return {"message": text}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Settings-page helpers — small pure functions reused from the
 # _handle_settings_tunnels handler. Kept at module scope so the
@@ -270,24 +283,10 @@ def _NEX_META_TOOL_DEFS() -> List[Dict[str, Any]]:
                 "required": ["platform"]
             },
         },
-        {
-            "name": "call_upstream",
-            "description":
-                "Read-only MCP protocol inspection on a child server. "
-                "Allowed methods ONLY: initialize, ping, tools/list, "
-                "resources/list, resources/read, prompts/list. Tool "
-                "EXECUTION must go through tools/call — this tool "
-                "deliberately cannot invoke arbitrary JSON-RPC methods.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "platform": {"type": "string"},
-                    "method": {"type": "string"},
-                    "params": {"type": "object"},
-                },
-                "required": ["platform", "method"]
-            },
-        },
+        # call_upstream REMOVED from the capability surface: a model-
+        # reachable protocol passthrough is a policy bypass by shape.
+        # Tool execution belongs to tools/call; inspection happens via
+        # discovery, not model-visible tools.
     ]
 
 
@@ -333,50 +332,49 @@ def _NEX_META_TOOL_HANDLERS() -> Dict[str, Any]:
         return {"error": "unknown platform: " + plat,
                 "known": [u.name for u in reg._upstreams]}
 
-    # Read-only protocol methods ONLY. call_upstream used to be a raw
-    # JSON-RPC passthrough — a policy bypass around capability/policy
-    # (arbitrary _method + params). Tool execution belongs in tools/call;
-    # this surface is for INSPECTING what an upstream exposes.
-    UPSTREAM_RPC_ALLOW = frozenset({
-        "initialize", "ping", "tools/list",
-        "resources/list", "resources/read", "prompts/list",
-    })
-
-    def call_upstream(args: Dict[str, Any]) -> Dict[str, Any]:
-        plat = (args or {}).get("platform")
-        method = (args or {}).get("method")
-        params = (args or {}).get("params") or {}
-        if not plat or not method:
-            return {"error": "missing 'platform' or 'method'"}
-        if method not in UPSTREAM_RPC_ALLOW:
-            return {"error": (
-                "method '%s' not allowed via call_upstream (read-only "
-                "protocol inspection only: %s). Execute tools via "
-                "tools/call." % (method, ", ".join(sorted(UPSTREAM_RPC_ALLOW))))}
-        reg = get_tunnels()
-        for u in reg._upstreams:
-            if u.name == plat:
-                try:
-                    # HACK: synthesise a JSON-RPC via _rpc, but the
-                    # upstream methods (initialize, tools/list,
-                    # resources/read, etc.) aren't always tools.
-                    resp = u._rpc(method, params)
-                    return {"platform": u.name,
-                            "method": method,
-                            "result": resp.get("result", resp.get("error"))}
-                except UpstreamError as exc:
-                    return {"error": str(exc),
-                            "platform": plat, "method": method}
-        return {"error": "unknown platform: " + plat,
-                "known": [u.name for u in reg._upstreams]}
+    # call_upstream handler REMOVED (see tool catalog note): the model
+    # never needs a raw JSON-RPC passthrough to child servers.
 
     return {
         "who_am_i": who_am_i,
         "list_platforms": list_platforms,
         "tunnel_status": tunnel_status,
         "tunnel_probe": tunnel_probe,
-        "call_upstream": call_upstream,
     }
+
+
+def _boundary_router(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """The ONLY local routing on the gateway: MCP introspection, plus
+    bare-name Amazon Music controls (their connector owns the rest).
+    Everything else is not a capability — refused, not policy-checked."""
+    handler = _NEX_META_TOOL_HANDLERS().get(name)
+    if handler is not None:
+        try:
+            payload = handler(args or {})
+        except Exception as exc:  # noqa: BLE001
+            return {"isError": True,
+                    "content": [{"type": "text", "text": repr(exc)}]}
+        return {"content": [{"type": "text",
+                             "text": json.dumps(payload, indent=2,
+                                                default=str)}],
+                "isError": "error" in payload}
+    if name.startswith("am_"):
+        try:
+            from music_amazon import call_tool as _am_call
+            payload = _am_call(name, args or {})
+        except Exception as exc:  # noqa: BLE001
+            return {"isError": True,
+                    "content": [{"type": "text", "text": repr(exc)}]}
+        return {"content": [{"type": "text",
+                             "text": json.dumps(payload, indent=2,
+                                                default=str)}],
+                "isError": "error" in payload}
+    return {"isError": True,
+            "content": [{"type": "text",
+                         "text": (
+                             "'%s' is not a Nex capability. Nex acts only "
+                             "through explicitly connected MCP servers and "
+                             "the Amazon Music connector." % name)}]}
 
 
 def _read_log_file(tail_bytes: int = 200_000) -> str:
@@ -1193,13 +1191,14 @@ class NexHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True})
             return
         if path == "/api/tools/call":
-            # REST shim for tool calls (dev panel / browser-side).
-            from tools import call_tool  # type: ignore
+            # REST shim — SAME capability boundary as /mcp.
             body = self._read_json_body()
             name = body.get("name") or ""
             args = body.get("arguments") or {}
-            result = call_tool(name, args)
-            self._send_json(200, {"ok": True, "name": name, "result": result})
+            env = _boundary_router(name, args or {})
+            self._send_json(200, {"ok": True, "name": name,
+                                  "result": _safe_env_payload(env),
+                                  "isError": env.get("isError", False)})
             return
         if path == "/mcp":
             self._handle_mcp()
@@ -1272,13 +1271,14 @@ class NexHandler(BaseHTTPRequestHandler):
                 return
             self.send_error(405, "Method not allowed")
             return
-        # /api/tools/<name> shorthand.
+        # /api/tools/<name> shorthand — SAME capability boundary as /mcp.
         if path.startswith("/api/tools/"):
-            from tools import call_tool  # type: ignore
             name = path[len("/api/tools/"):]
             body = self._read_json_body()
-            result = call_tool(name, body)
-            self._send_json(200, {"ok": True, "name": name, "result": result})
+            env = _boundary_router(name, body or {})
+            self._send_json(200, {"ok": True, "name": name,
+                                  "result": _safe_env_payload(env),
+                                  "isError": env.get("isError", False)})
             return
         self.send_error(404, "Not Found")
 
@@ -1851,7 +1851,7 @@ class NexHandler(BaseHTTPRequestHandler):
                     "Nex is an MCP tunnel. Local tools are unprefixed "
                     "(list_files, read_file, write_file, run_command, "
                     "search_files, log_event, recent_events, speak, "
-                    "who_am_i, list_platforms, call_upstream). Tools "
+                    "who_am_i, list_platforms, tunnel_probe). Tools "
                     "from connected editors are namespaced — e.g. "
                     "roblox-studio.execute_luau or "
                     "unreal-engine.spawn_actor. Use list_platforms to "
@@ -1937,21 +1937,25 @@ class NexHandler(BaseHTTPRequestHandler):
     def _mcp_tools_list(self) -> Dict[str, Any]:
         """Aggregate meta + local + upstream tools."""
         from tunnels import get_tunnels
-        import mc_tools as _mc_tools
-        # Aggregated returns: local (via the bound provider) +
-        # upstream (namespaced). We append meta + mc_tools here so the
-        # front of the list surfaces the introspection tools and the
-        # AAA primitives every MCP client needs to drive game dev.
+        # THE CAPABILITY SURFACE: MCP introspection + everything from
+        # explicitly connected servers (incl. the amazon-music connector).
+        # No sandbox/filesystem/shell/host tools — Nex infrastructure is
+        # not Nex's AI capability surface.
         meta = _NEX_META_TOOL_DEFS()
         try:
             aggregated = get_tunnels().aggregated_tools() or []
         except Exception:  # noqa: BLE001
             aggregated = []
-        mc_defs = list(_mc_tools.tool_definitions() or [])
-        # Meta tools come first; then mc_tools (engine detection,
-        # compile-check, validate-assets, etc); then sandbox tools +
-        # upstream tools.
-        tools = list(meta) + mc_defs + aggregated
+        # Dedupe by name (the local boundary provider already surfaces
+        # the introspection tools inside `aggregated`).
+        seen = set()
+        tools = []
+        for t in list(meta) + list(aggregated):
+            n = t.get("name")
+            if n and n in seen:
+                continue
+            seen.add(n)
+            tools.append(t)
         return {"tools": tools,
                 "_meta": {"gateway": "nex",
                           "tunnels_online":
@@ -1990,7 +1994,7 @@ class NexHandler(BaseHTTPRequestHandler):
                                      + decision.reason}],
                         "isError": True}
         # Local-prefix tools below are handled without the registry.
-        if name in ("who_am_i", "list_platforms", "call_upstream",
+        if name in ("who_am_i", "list_platforms",
                     "tunnel_status", "tunnel_probe"):
             handler = _NEX_META_TOOL_HANDLERS().get(name)
             if handler is None:
@@ -2003,31 +2007,16 @@ class NexHandler(BaseHTTPRequestHandler):
                                 json.dumps(payload, ensure_ascii=False,
                                            sort_keys=True, indent=2)}],
                     "isError": False}
-        # Otherwise delegate to the registry — it will route prefixed
-        # names to upstreams and unprefixed names to local tools.
-        # Wrap the raw result into the MCP {content, isError} envelope.
+        # BOUNDARY: prefixed names route to their upstream (or the
+        # amazon-music connector); bare names only pass if they are MCP
+        # introspection or Amazon Music controls. Sandbox/filesystem/
+        # shell tools are infrastructure, NOT callable here.
         from tunnels import get_tunnels
-        from tools import call_tool  # type: ignore
-        import mc_tools as _mc_tools  # noqa: E402
         try:
             if "." in name:
                 env = get_tunnels().route(name, arguments or {})
             else:
-                # Local tools live in BOTH tools.py (file/sandbox) AND
-                # mc_tools.py (engine detection, compile-check, etc).
-                # Try tools.py first, then mc_tools.
-                raw = call_tool(name, arguments or {})
-                if isinstance(raw, dict) and "error" in raw and (
-                        str(raw["error"]).startswith("unknown tool")):
-                    raw = _mc_tools.call_tool(name, arguments or {})
-                env = {
-                    "content": [{"type": "text",
-                                 "text": json.dumps(raw,
-                                                    ensure_ascii=False,
-                                                    sort_keys=True,
-                                                    indent=2)}],
-                    "isError": "error" in raw,
-                }
+                env = _boundary_router(name, arguments or {})
             return env
         except Exception as exc:  # noqa: BLE001
             return self._tool_error(repr(exc))
@@ -2726,52 +2715,21 @@ def configure_for_stdio() -> None:
         from tunnels import get_tunnels
         from tools import tool_definitions, call_tool  # type: ignore
         reg = get_tunnels()
-        # Local provider returns BOTH the regular sandbox tools AND
-        # the meta-tools (who_am_i, list_platforms, …) so the stdio
-        # MCP client sees the same surface the HTTP gateway exposes.
+        # BOUNDARY: the stdio MCP client sees MCP introspection only
+        # (upstream tools arrive via their own upstreams; Amazon Music
+        # rides its connector). No sandbox/filesystem/shell tools.
         def _combined_provider():
-            import mc_tools as _mc_tools
-            return (list(_NEX_META_TOOL_DEFS())
-                    + list(_mc_tools.tool_definitions() or [])
-                    + list(tool_definitions() or []))
+            return list(_NEX_META_TOOL_DEFS())
         # Router dispatches meta tools to their in-process handlers and
         # everything else to the regular local call_tool.
         from tunnels import get_tunnels as _gt
         _reg = _gt()
 
+        # BOUNDARY router: introspection + namespaced upstreams only.
         def _combined_router(name, args):
-            if name in ("who_am_i", "list_platforms", "tunnel_status",
-                        "tunnel_probe", "call_upstream"):
-                handler = _NEX_META_TOOL_HANDLERS().get(name)
-                if handler is None:
-                    return {"isError": True,
-                            "content": [{"type": "text",
-                                         "text": "unknown meta tool"}]}
-                try:
-                    payload = handler(args or {})
-                except Exception as exc:  # noqa: BLE001
-                    return {"isError": True,
-                            "content": [{"type": "text",
-                                         "text": repr(exc)}]}
-                return {"content": [{"type": "text", "text":
-                                    json.dumps(payload, ensure_ascii=False,
-                                               sort_keys=True,
-                                               indent=2)}],
-                        "isError": False}
             if "." in name:
                 return _reg.route(name, args or {})
-            # Local: try tools.py first, fall through to mc_tools.
-            import mc_tools as _mc_tools
-            raw = call_tool(name, args or {})
-            if isinstance(raw, dict) and "error" in raw and (
-                    str(raw["error"]).startswith("unknown tool")):
-                raw = _mc_tools.call_tool(name, args or {})
-            return {"content": [{"type": "text",
-                                 "text": json.dumps(raw,
-                                                    ensure_ascii=False,
-                                                    sort_keys=True,
-                                                    indent=2)}],
-                    "isError": "error" in raw}
+            return _boundary_router(name, args or {})
 
         reg.bind_local(
             tool_provider=_combined_provider,
@@ -2915,9 +2873,12 @@ def main() -> None:
         from tunnels import get_tunnels
         from tools import tool_definitions, call_tool  # type: ignore
         reg = get_tunnels()
+        # BOUNDARY: only MCP introspection is "local" on the gateway.
+        # (tools.call_tool stays available to Nex's own plumbing — it is
+        # just not an AI capability.)
         reg.bind_local(
-            tool_provider=tool_definitions,
-            tool_router=call_tool,
+            tool_provider=_NEX_META_TOOL_DEFS,
+            tool_router=_boundary_router,
         )
         summary = reg.summary()
         online = summary["online"]

@@ -413,19 +413,21 @@ def _http(method, path, body=None):
         return 0, {"error": str(e)}
 
 
-# Submit a plan via the live endpoint.
+# Submit a plan via the live endpoint. Tools are from the BOUNDARY
+# surface: Amazon Music controls (safe) + a destructive-classified step
+# to exercise the confirm gate.
 status, body = _http("POST", "/api/plan", {
     "plan": {
         "title": "test via http",
         "rationale": "verify the live endpoint",
         "steps": [
-            {"name": "list",
-             "tool": "list_files",
-             "args": {"path": ""},
-             "why": "see state", "expect": "list"},
-            {"name": "delete",
-             "tool": "delete_thing",
-             "args": {"target": "world"},
+            {"name": "play",
+             "tool": "am_play",
+             "args": {},
+             "why": "start music", "expect": "played"},
+            {"name": "destroy",
+             "tool": "unreal-engine.delete_actor",
+             "args": {"actor": "world"},
              "why": "tidy", "expect": "deleted"},
         ],
     }})
@@ -458,34 +460,63 @@ _expect(status == 200 and any(p["id"] == pid for p in body.get("plans", [])),
         "GET /api/plan lists active plans")
 
 
-# ---------- 10. live: /tools/list exposes mc_tools ---------------------
+# ---------- 10. live: /tools/list enforces THE BOUNDARY ----------------
 
 status, body = _http("POST", "/mcp",
                      {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
 _expect(status == 200, "/mcp tools/list 200")
 names = [t["name"] for t in body["result"]["tools"]]
-_expect("detect_engines" in names,
-        "/tools/list includes detect_engines")
-_expect("compile_check" in names,
-        "/tools/list includes compile_check")
-_expect("validate_assets" in names,
-        "/tools/list includes validate_assets")
-_expect("json_path_query" in names,
-        "/tools/list includes json_path_query")
-_expect("diff_files" in names,
-        "/tools/list includes diff_files")
 
-# Use detect_engines through MCP.
+# Amazon Music controls present (the explicit connector, namespaced
+# like every other server's tools).
+_expect("amazon-music.am_play" in names, "/tools/list includes amazon-music.am_play")
+_expect("amazon-music.am_volume" in names, "/tools/list includes amazon-music.am_volume")
+_expect("amazon-music.am_search_play" in names, "/tools/list includes amazon-music.am_search_play")
+
+# MCP introspection present.
+_expect("who_am_i" in names, "/tools/list includes who_am_i")
+_expect("list_platforms" in names, "/tools/list includes list_platforms")
+
+# THE BOUNDARY: sandbox/filesystem/shell/host tools are GONE.
+for gone in ("write_file", "read_file", "list_files", "run_command",
+             "search_files", "detect_engines", "engine_info",
+             "compile_check", "validate_assets", "json_path_query",
+             "diff_files", "call_upstream"):
+    _expect(gone not in names,
+            "/tools/list excludes %s (boundary)" % gone)
+
+# Calling a removed tool through MCP is refused by the boundary.
 status, body = _http("POST", "/mcp",
                      {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                       "params": {"name": "detect_engines",
                                  "arguments": {}}})
-_expect(status == 200, "tools/call detect_engines 200")
+_expect(status == 200, "tools/call detect_engines 200 (envelope)")
 result = body["result"]
-content_text = result["content"][0]["text"]
-engines = json.loads(content_text)
-_expect(isinstance(engines, dict),
-        "detect_engines result parses as dict")
+_expect(result.get("isError") is True,
+        "detect_engines refused at the boundary")
+_expect("not a Nex capability" in result["content"][0]["text"],
+        "refusal explains the boundary")
+
+# Amazon Music works through the same gateway (namespaced).
+status, body = _http("POST", "/mcp",
+                     {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                      "params": {"name": "amazon-music.am_play",
+                                 "arguments": {}}})
+_expect(status == 200, "tools/call amazon-music.am_play 200")
+_expect(body["result"].get("isError") is not True,
+        "amazon-music.am_play executes")
+_expect("amazonmusic://" in body["result"]["content"][0]["text"],
+        "am_play result is an honest structured payload")
+
+# Bare-name music call also works.
+status, body = _http("POST", "/mcp",
+                     {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": "am_volume",
+                                 "arguments": {"level": 42}}})
+_expect(status == 200 and body["result"].get("isError") is not True,
+        "bare am_volume executes")
+_expect('"level": 42' in body["result"]["content"][0]["text"],
+        "am_volume level recorded")
 
 
 # ---------- 11. live: invalid plan shape rejected ----------------------
