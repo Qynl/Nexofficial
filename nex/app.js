@@ -437,6 +437,149 @@
     devInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSend();
     });
+
+    // --- Autonomous agent: Build / Plan mode (STAGE 19/24) ---
+    const agentRow = document.createElement('div');
+    agentRow.className = 'agent-row';
+    agentRow.appendChild(makeBtn('Build', 'agent', 'build',
+      'Autonomous build — sends the input as a goal to the agent (model-driven plan + judges)'));
+    agentRow.appendChild(makeBtn('Plan', 'agent', 'plan',
+      'Plan only — generate + show a goal-specific plan without executing'));
+    dev.appendChild(agentRow);
+
+    dev.querySelectorAll('button[data-agent]').forEach(b => {
+      b.addEventListener('click', () => runAgent(b.dataset.agent));
+    });
+  }
+
+  function makeBtn(label, kind, value, title) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.dataset[kind] = value;
+    b.title = title || '';
+    return b;
+  }
+
+  function runAgent(mode) {
+    const goal = (devInput.value || '').trim();
+    if (!goal) { devInput.focus(); return; }
+    anim.setState({ state: 'THINKING', params: { source: 'agent' } });
+    ensureAgentPanel();
+    agentPanel().innerHTML = '<div class="agent-title">Agent (' + mode + ')</div>'
+      + '<div class="agent-sub">goal: ' + escapeHtml(goal) + '</div>'
+      + '<div class="agent-status">queued…</div>';
+    fetch('/api/agent/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: goal, mode: mode }),
+    }).then(r => r.json()).then(j => {
+      if (!j || !j.ok) {
+        agentPanel().innerHTML += '<div class="agent-status err">'
+          + (j && j.error ? j.error : 'failed to start') + '</div>';
+      }
+    }).catch(e => {
+      agentPanel().innerHTML += '<div class="agent-status err">network error</div>';
+    });
+  }
+
+  function agentPanel() {
+    let p = document.getElementById('agent-panel');
+    if (!p) {
+      p = document.createElement('div');
+      p.id = 'agent-panel';
+      p.hidden = false;
+      document.body.appendChild(p);
+    }
+    return p;
+  }
+
+  function ensureAgentPanel() {
+    const p = agentPanel();
+    p.hidden = false;
+    return p;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function renderAgentPlan(plan) {
+    const p = ensureAgentPanel();
+    const steps = (plan && plan.steps) || [];
+    let html = '<div class="agent-title">Plan' + (plan && plan.title ? ' — ' + escapeHtml(plan.title) : '') + '</div>';
+    html += '<ol class="agent-steps">';
+    for (const s of steps) {
+      html += '<li><b>' + escapeHtml(s.name || '?') + '</b> '
+        + '<code>' + escapeHtml(s.tool || '') + '</code>'
+        + (s.depends_on && s.depends_on.length ? ' <i>← ' + escapeHtml(s.depends_on.join(', ')) + '</i>' : '')
+        + (s.why ? '<br><span class="agent-why">' + escapeHtml(s.why) + '</span>' : '')
+        + '</li>';
+    }
+    html += '</ol>';
+    // Insert plan after the title block, keep the goal/status above.
+    const head = p.querySelector('.agent-title');
+    const sub = p.querySelector('.agent-sub');
+    const status = p.querySelector('.agent-status');
+    const block = document.createElement('div');
+    block.innerHTML = html;
+    if (status && status.nextSibling) p.insertBefore(block, status.nextSibling);
+    else if (status) status.after(block);
+    else p.appendChild(block);
+  }
+
+  function renderAgentVerdict(v) {
+    const p = ensureAgentPanel();
+    const llm = (v && v.judges && v.judges.llm) || null;
+    const score = (v && v.score != null) ? Math.round(v.score * 100) : null;
+    let html = '<div class="agent-title">Judge verdict'
+      + (score != null ? ' — ' + score + '%' : '') + '</div>';
+    html += '<div class="agent-verdict verdict-' + ((v && v.pass) ? 'pass' : 'fail') + '">'
+      + ((v && v.pass) ? 'PASSED quality bar' : 'below quality bar — improving…') + '</div>';
+    if (llm) {
+      html += '<div class="agent-scores">'
+        + 'fun ' + (llm.fun || '-') + ' · quality ' + (llm.quality || '-')
+        + ' · playability ' + (llm.playability || '-') + '</div>';
+    }
+    const dims = (v && v.dimensions) || {};
+    const labels = { core_loop: 'core loop', feedback: 'feedback', art: 'art',
+      audio: 'audio', progression: 'progression', polish: 'polish' };
+    html += '<div class="agent-dims">';
+    for (const k in labels) {
+      if (dims[k] != null) {
+        html += '<span class="dim ' + (dims[k] ? 'on' : 'off') + '">' + labels[k] + '</span>';
+      }
+    }
+    html += '</div>';
+    const sugg = (v && v.suggestions) || [];
+    if (sugg.length) {
+      html += '<div class="agent-sugg"><b>Improve:</b><ul>';
+      for (const s of sugg.slice(0, 5)) html += '<li>' + escapeHtml(s) + '</li>';
+      html += '</ul></div>';
+    }
+    const block = document.createElement('div');
+    block.innerHTML = html;
+    p.appendChild(block);
+  }
+
+  function renderAgentReport(report) {
+    const p = ensureAgentPanel();
+    const r = report || {};
+    let html = '<div class="agent-title">Build result — ' + escapeHtml(r.status || '?') + '</div>';
+    html += '<div class="agent-status">';
+    html += '✓ ' + (r.completed ? r.completed.length : 0)
+      + ' completed · ✗ ' + (r.failed ? r.failed.length : 0)
+      + ' failed · ⊘ ' + (r.skipped ? r.skipped.length : 0) + '</div>';
+    if (r.failed && r.failed.length) {
+      html += '<div class="agent-failed">Failed: ' + escapeHtml(r.failed.join(', ')) + '</div>';
+    }
+    if (r.missing && r.missing.length) {
+      html += '<div class="agent-missing">Missing capability: '
+        + escapeHtml(r.missing.map(m => (m.tool || m.task)).join(', ')) + '</div>';
+    }
+    const block = document.createElement('div');
+    block.innerHTML = html;
+    p.appendChild(block);
   }
 
   function sendState(name) {
@@ -597,6 +740,26 @@
         // A model reply contained a JSON plan. Show a confirm banner
         // so the user can approve / cancel destructive steps.
         showPlanBanner(evt.plan);
+      } else if (evt.type === 'agent.plan_ready') {
+        // The agent produced a goal-specific plan (model-driven or
+        // capability fallback). Show it in the agent panel.
+        const p = ensureAgentPanel();
+        const st = p.querySelector('.agent-status');
+        if (st) st.textContent = (evt.model_driven ? 'model-driven plan ready' : 'capability plan ready')
+          + (evt.revise ? ' (revised)' : '');
+        if (evt.steps) renderAgentPlan({ title: evt.title, steps: evt.steps });
+      } else if (evt.type === 'agent.judged') {
+        // Quality judges scored the build. Render the verdict.
+        if (evt.verdict) renderAgentVerdict(evt.verdict);
+      } else if (evt.type === 'agent.report') {
+        // Final build result.
+        const res = evt.result || {};
+        if (res.report) renderAgentReport(res.report);
+        else if (res.mode === 'plan') renderAgentPlan(res);
+      } else if (evt.type === 'agent.error') {
+        const p = ensureAgentPanel();
+        p.innerHTML += '<div class="agent-status err">agent error: '
+          + escapeHtml(evt.error || 'unknown') + '</div>';
       } else if (evt.type === 'hello') {
         // no-op; backend announces its config here.
       }

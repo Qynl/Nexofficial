@@ -2222,9 +2222,16 @@ class NexHandler(BaseHTTPRequestHandler):
         Runs in a background thread and streams semantic agent events to the
         SSE bus (so the front-end animates PLANNING/EXECUTING/… without
         knowing MCP internals). The HTTP call returns immediately.
+
+        Body:
+          { "goal": "...", "mode": "build" | "plan" }
+        `mode:"plan"` produces the plan + a graph and returns it without
+        executing; `mode:"build"` executes and (when a model is reachable)
+        runs quality judges, optionally rebuilding once on a failing verdict.
         """
         body = self._read_json_body() or {}
         goal = (body.get("goal") or "").strip()
+        mode = body.get("mode", "build")
         if not goal:
             self._send_json(400, {"ok": False, "error": "missing 'goal'"})
             return
@@ -2232,19 +2239,21 @@ class NexHandler(BaseHTTPRequestHandler):
         def _runner() -> None:
             try:
                 from agent.server_run import run_agent_goal
-                report = run_agent_goal(goal, bus=BUS)
-                try:
-                    payload = report.to_dict()
-                except Exception:  # noqa: BLE001
-                    payload = dict(report) if isinstance(report, dict) else {}
-                BUS.publish({"type": "agent.report", "report": payload,
+                result = run_agent_goal(
+                    goal, bus=BUS,
+                    llm_call=model_chat,
+                    llm_reachable=model_reachable(),
+                    mode=mode,
+                )
+                BUS.publish({"type": "agent.report", "result": result,
                              "ts": time.time()})
             except Exception as exc:  # noqa: BLE001
                 BUS.publish({"type": "agent.error", "error": repr(exc),
                              "ts": time.time()})
 
         threading.Thread(target=_runner, daemon=True).start()
-        self._send_json(200, {"ok": True, "queued": True, "goal": goal})
+        self._send_json(200, {"ok": True, "queued": True, "goal": goal,
+                              "mode": mode})
 
     def _handle_chat(self) -> None:
         body = self._read_json_body()
