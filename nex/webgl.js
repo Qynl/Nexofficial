@@ -82,6 +82,7 @@
     uniform float u_sweep;      // <0 off, else 0..1 light-sweep position
     uniform float u_scan;       // <0 off, else 0..1 scanline position
     uniform float u_dust;       // 0..1 — ambient dust visibility
+    uniform float u_iris;       // 0..1 — inner ring detail (listening/scan)
 
     // Per-eye overrides (set from JS; default 0).
     uniform vec4  u_left;   // x: offsetX, y: offsetY, z: scaleX, w: scaleY
@@ -299,6 +300,21 @@
       float rimW = clamp(0.55 - (p.y - u_lookY * 0.02) * 3.0, 0.0, 1.0);
       shade += (rimL + rimR) * rimW * 0.12;
 
+      // Iris: a soft inner ring per eye (listening / verifying detail).
+      // Shading only — coverage never changes.
+      if (u_iris > 0.001) {
+        float cT = cos(u_faceTilt), sT = sin(u_faceTilt);
+        vec2 lq = p - leftCenter - vec2(u_faceShiftX, u_faceShiftY) - vec2(u_left.x, u_left.y);
+        vec2 rq = p - rightCenter - vec2(u_faceShiftX, u_faceShiftY) - vec2(u_right.x, u_right.y);
+        lq = mat2(cT, -sT, sT, cT) * lq;
+        rq = mat2(cT, -sT, sT, cT) * rq;
+        vec2 ln = lq / vec2(u_baseW * u_left.z, u_baseH * u_left.w);
+        vec2 rn = rq / vec2(u_baseW * u_right.z, u_baseH * u_right.w);
+        float ringL = exp(-abs(length(ln) - 0.62) * 7.0);
+        float ringR = exp(-abs(length(rn) - 0.62) * 7.0);
+        shade += (ringL * depthL + ringR * depthR) * 0.16 * u_iris;
+      }
+
       // Working sweep: a soft vertical light band travelling across the
       // eyes while Nex plans / executes. u_sweep < 0 means off.
       if (u_sweep >= 0.0) {
@@ -431,7 +447,7 @@
         'u_asymmetry','u_distortion','u_motion',
         'u_audioLow','u_audioMid','u_audioHigh',
         'u_speech','u_listening','u_music','u_error','u_glitch',
-        'u_accent','u_accentAmt','u_burst','u_sweep','u_scan','u_dust',
+        'u_accent','u_accentAmt','u_burst','u_sweep','u_scan','u_dust','u_iris',
         'u_left','u_right','u_prop',
       ];
       for (const n of names) U[n] = gl.getUniformLocation(this.program, n);
@@ -507,6 +523,7 @@
       gl.uniform1f(U.u_sweep, (state.sweep ?? -1));
       gl.uniform1f(U.u_scan, (state.scan ?? -1));
       gl.uniform1f(U.u_dust, state.dust ?? 1);
+      gl.uniform1f(U.u_iris, state.iris ?? 0);
     }
 
     render(state, audio) {

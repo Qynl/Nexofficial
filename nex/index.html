@@ -7,33 +7,50 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <!-- Ambient state light: an ultra-subtle tinted glow ABOVE the (opaque)
+       canvas via screen blending. Reacts to body[data-state]. -->
+  <div id="ambient" aria-hidden="true"></div>
+
   <!-- The face lives entirely in WebGL on this canvas. -->
   <canvas id="nex" aria-label="Nex"></canvas>
 
-  <!-- Hidden by default. Press ` (backtick) to toggle. -->
+  <!-- Conversation transcript (streamed from SSE speak events). -->
+  <div id="chat-log" aria-live="polite"></div>
+
+  <!-- Control deck. Hidden by default. Press ` (backtick) to toggle. -->
   <div id="dev" hidden>
-    <div class="dev-title">NEX · debug</div>
+    <div class="dev-title">NEX · controls <span class="dev-hint">` to close</span></div>
+
     <div class="dev-section">
+      <div class="dev-lbl">states</div>
       <div class="dev-row" id="dev-states"></div>
     </div>
+
     <div class="dev-section">
+      <div class="dev-lbl">idle</div>
       <div class="dev-row" id="dev-idle"></div>
     </div>
+
     <div class="dev-section">
+      <div class="dev-lbl">session</div>
       <div class="dev-row">
         <button data-action="mic">Toggle mic</button>
         <button data-action="music">Toggle music</button>
         <button data-action="tts">Mute TTS</button>
-<button data-action="reset">Reset idle</button>
-      <button data-action="wake">WAKE</button>
-      <button data-action="error">ERROR</button>
-      <button data-action="settings">Settings · MCP tunnels</button>
+        <button data-action="reset">Reset idle</button>
+      </div>
+      <div class="dev-row">
+        <button data-action="wake">WAKE</button>
+        <button data-action="error">ERROR</button>
+        <button data-action="settings">Settings · MCP tunnels</button>
+      </div>
     </div>
-  </div>
-  <div class="dev-section">
-    <input id="dev-input" placeholder="say something to Nex...">
+
+    <div class="dev-section dev-send">
+      <input id="dev-input" placeholder="say something to Nex...">
       <button data-action="send">send</button>
     </div>
+
     <div class="dev-section dev-status">
       <div><span class="lbl">state</span> <span id="dev-state">IDLE</span></div>
       <div><span class="lbl">activity</span> <span id="dev-activity">NORMAL</span></div>
@@ -46,6 +63,18 @@
 
   <!-- Speech bubble used in SPEAKING state. Pure white on black, minimal. -->
   <div id="bubble" hidden></div>
+
+  <!-- Keyboard shortcuts (?). -->
+  <div id="help-overlay" hidden>
+    <div class="help-card">
+      <div class="help-title">Keyboard</div>
+      <div class="help-row"><kbd>`</kbd><span>toggle control deck</span></div>
+      <div class="help-row"><kbd>?</kbd><span>this overlay</span></div>
+      <div class="help-row"><kbd>Enter</kbd><span>send message</span></div>
+      <div class="help-row"><kbd>Esc</kbd><span>close overlays</span></div>
+      <button class="help-close">close</button>
+    </div>
+  </div>
 
   <script src="/webgl.js"></script>
   <script src="/animations.js"></script>

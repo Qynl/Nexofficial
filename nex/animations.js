@@ -833,6 +833,7 @@
         sweep: -1,   // <0 = off, else 0..1 position
         scan: -1,    // <0 = off, else 0..1 position
         dust: 1,
+        iris: 0,     // 0..1 inner-ring detail
       };
     }
 
@@ -941,6 +942,7 @@
       this.stateEnterT = this.wakeStart;
       this.statePhase = 'enter';
       this.params.visibility = 0;
+      this.params.dust = 2.4;   // dust flare on boot, settles to 1
       this.currentBehavior = null;
     }
 
@@ -1193,6 +1195,7 @@
       const p = this.params;
       const a = clamp(t / 0.45, 0, 1);
       p.visibility = Easing.outCubic(a);
+      p.dust = 1 + 1.4 * (1 - Easing.outCubic(clamp(t / 1.6, 0, 1)));
       if (t > 0.45) {
         const tp = clamp((t - 0.45) / 0.20, 0, 1);
         const v = Math.sin(tp * Math.PI);
@@ -1268,6 +1271,7 @@
       const breathe = Math.sin(t * 1.4) * 0.4;
       p.breath = breathe;
       p.listening = clamp(1.0 - t * 0.8, 0.6, 1.0);
+      p.iris = 0.8;
       p.motionIntensity = 0.25 + 0.15 * Math.sin(t * 2.3);
       // Gentle horizontal shift
       p.faceShiftX = 0.004 * Math.sin(t * 1.1);
@@ -1314,6 +1318,7 @@
 
     _stateSpeaking(t, dt) {
       const p = this.params;
+      p.iris = 0.45 + 0.15 * Math.sin(t * 5.0);
       // Speech intensity rises quickly then settles.
       p.speechIntensity = clamp(0.4 + 0.6 * (1 - Math.exp(-t * 1.5)), 0.4, 1.0);
 
@@ -1630,6 +1635,7 @@
       p.lookY = -0.06;
       p.eyeLeft.scaleY = 0.92; p.eyeRight.scaleY = 0.92;
       p.eyeLeft.scaleX = 1.02; p.eyeRight.scaleX = 1.02;
+      p.iris = 0.9;
       p.motionIntensity = 0.25 + 0.1 * Math.sin(t * 3.1);
       // Shader scanline: ping-pong 0->1->0 per pass.
       const cycle = (t * 0.8) % 1.0;

@@ -53,7 +53,7 @@ const expectedUniforms = [
   'u_asymmetry','u_distortion','u_motion',
   'u_audioLow','u_audioMid','u_audioHigh',
   'u_speech','u_listening','u_music','u_error','u_glitch',
-  'u_accent','u_accentAmt','u_burst','u_sweep','u_scan','u_dust',
+  'u_accent','u_accentAmt','u_burst','u_sweep','u_scan','u_dust','u_iris',
   'u_left','u_right','u_prop',
 ];
 for (const u of expectedUniforms) {
@@ -124,6 +124,32 @@ for (const n of ['doubleBlink', 'contentSquint', 'driftGaze', 'settle']) {
       ok('new behavior runs: ' + n);
     } catch (e) { bad('new behavior threw: ' + n + ' ' + e.message); }
   }
+}
+
+// Iris detail: LISTENING/SCAN/SPEAKING drive it, IDLE keeps it off.
+{
+  const a = new global.NexAnim();
+  a.start();
+  while (a.state === 'WAKE') a.tick(0.02);
+  a.setState({ state: 'LISTENING' });
+  a.tick(0.05);
+  ok('LISTENING raises iris (' + a.params.iris + ')', a.params.iris >= 0.5);
+  a.setState({ state: 'IDLE' });
+  a.tick(0.05);
+  ok('IDLE keeps iris off', (a.params.iris || 0) < 0.01);
+  a.setState({ state: 'SCAN' });
+  a.tick(0.05);
+  ok('SCAN raises iris', a.params.iris >= 0.5);
+}
+
+// Wake dust flare settles back to 1.
+{
+  const a = new global.NexAnim();
+  a.start();
+  ok('wake starts with dust flare', a.params.dust > 1.5);
+  for (let i = 0; i < 200; i++) a.tick(0.02);
+  ok('dust settles to 1 after wake (' + a.params.dust.toFixed(2) + ')',
+     Math.abs(a.params.dust - 1) < 0.05);
 }
 
 // SCAN state honored + drives shader FX params.

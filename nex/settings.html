@@ -253,6 +253,11 @@
     ugrid.innerHTML = '';
     let _ui = 0;
     const userRows = Object.values(registered).filter(r => r.user_added);
+    const heading = document.querySelector('#user-servers h2');
+    if (heading) {
+      heading.textContent = 'Your MCP servers'
+        + (userRows.length ? ' (' + userRows.length + ')' : '');
+    }
     empty.style.display = userRows.length ? 'none' : '';
     for (const r of userRows) {
       const card = document.createElement('div');

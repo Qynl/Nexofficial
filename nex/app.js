@@ -67,6 +67,9 @@
     bindNetwork();
     startConnPill();
     showBootHint();
+    bindHelpChrome();
+    // Stagger the UI in once the face has begun waking.
+    requestAnimationFrame(() => document.body.classList.add('ready'));
 
     // Pointer gaze: the face quietly follows the cursor (blended only in
     // IDLE by the animation engine — calm idle is untouched).
@@ -77,15 +80,40 @@
       anim.setGaze(nx * 0.9, ny * 0.7);
     }, { passive: true });
 
-    // Speech bubble fade handling.
+    // Mirror the live state onto <body data-state=...> so CSS can react
+    // (ambient light, panel accents) without any polling.
+    anim._origSetState = anim.setState.bind(anim);
+    anim.setState = (req) => {
+      anim._origSetState(req);
+      const name = ((req && req.state) || 'IDLE').toUpperCase();
+      document.body.dataset.state = name;
+    };
+    document.body.dataset.state = 'IDLE';
+
+    // Speech bubble fade handling — typewriter-style reveal: only the NEW
+    // suffix of each streamed chunk animates in.
+    let bubbleText = '';
     anim._origSetSpeech = anim.setSpeechText.bind(anim);
     anim.setSpeechText = (t) => {
       anim._origSetSpeech(t);
-      if (t) {
-        bubble.textContent = t;
+      const text = String(t || '');
+      if (text) {
+        if (text.startsWith(bubbleText) && bubbleText && !bubble.hidden) {
+          const suffix = text.slice(bubbleText.length);
+          if (suffix) {
+            const span = document.createElement('span');
+            span.className = 'chat-new';
+            span.textContent = suffix;
+            bubble.appendChild(span);
+          }
+        } else {
+          bubble.textContent = text;
+        }
+        bubbleText = text;
         bubble.hidden = false;
         requestAnimationFrame(() => bubble.classList.add('show'));
       } else {
+        bubbleText = '';
         bubble.classList.remove('show');
         setTimeout(() => { if (!bubble.classList.contains('show')) bubble.hidden = true; }, 250);
       }
@@ -658,6 +686,96 @@
     setTimeout(() => h.remove(), 5600);
   }
 
+  // ---- conversation transcript ---------------------------------------------
+  let chatEl = null;
+  let currentNexMsg = null;
+
+  function chatLog() {
+    if (!chatEl) chatEl = document.getElementById('chat-log');
+    if (!chatEl) return null;
+    chatEl.hidden = false;
+    chatEl.classList.add('active');
+    clearTimeout(chatEl._dim);
+    chatEl._dim = setTimeout(() => chatEl.classList.remove('active'), 12000);
+    return chatEl;
+  }
+
+  function addChatUser(text) {
+    const log = chatLog();
+    if (!log) return;
+    currentNexMsg = null;   // a user turn starts a fresh Nex message
+    const m = document.createElement('div');
+    m.className = 'chat-msg user rowIn';
+    m.textContent = text;
+    log.appendChild(m);
+    trimChat(log);
+  }
+
+  function chatNexMsg() {
+    const log = chatLog();
+    if (!log) return null;
+    if (!currentNexMsg) {
+      currentNexMsg = document.createElement('div');
+      currentNexMsg.className = 'chat-msg nex rowIn';
+      currentNexMsg._text = '';
+      log.appendChild(currentNexMsg);
+      trimChat(log);
+    }
+    return currentNexMsg;
+  }
+
+  function updateChatNex(fullText) {
+    const msg = chatNexMsg();
+    if (!msg) return;
+    const text = String(fullText || '');
+    if (!text) return;
+    if (text.startsWith(msg._text) && msg._text.length > 0) {
+      const suffix = text.slice(msg._text.length);
+      if (suffix) {
+        const span = document.createElement('span');
+        span.className = 'chat-new';
+        span.textContent = suffix;
+        msg.appendChild(span);
+      }
+    } else {
+      // Non-cumulative chunk: render as its own fading segment.
+      const span = document.createElement('span');
+      span.className = 'chat-new';
+      span.textContent = (msg._text ? ' ' : '') + text;
+      msg.appendChild(span);
+    }
+    msg._text += text.startsWith(msg._text) ? text.slice(msg._text.length) : text;
+    trimChat(msg.parentNode);
+  }
+
+  function trimChat(log) {
+    if (!log) return;
+    const msgs = log.querySelectorAll('.chat-msg');
+    for (let i = 0; i < msgs.length - 8; i++) msgs[i].remove();
+  }
+
+  // ---- help overlay ---------------------------------------------------------
+  function toggleHelp(force) {
+    const h = document.getElementById('help-overlay');
+    if (!h) return;
+    const show = force != null ? force : h.hidden;
+    h.hidden = !show;
+    if (show) {
+      requestAnimationFrame(() => h.classList.add('in'));
+    } else {
+      h.classList.remove('in');
+    }
+  }
+
+  function bindHelpChrome() {
+    const closeBtn = document.querySelector('.help-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => toggleHelp(false));
+    const overlay = document.getElementById('help-overlay');
+    if (overlay) overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) toggleHelp(false);
+    });
+  }
+
   // ---- typing indicator ---------------------------------------------------
   let typingEl = null;
   function showTyping() {
@@ -687,6 +805,18 @@
   function ensureAgentPanel() {
     const p = agentPanel();
     p.hidden = false;
+    // Persistent collapse toggle (re-added if innerHTML was wiped).
+    if (!p.querySelector('.panel-toggle')) {
+      const t = document.createElement('button');
+      t.className = 'panel-toggle';
+      t.textContent = p.classList.contains('collapsed') ? '+' : '–';
+      t.title = 'collapse panel';
+      t.addEventListener('click', () => {
+        p.classList.toggle('collapsed');
+        t.textContent = p.classList.contains('collapsed') ? '+' : '–';
+      });
+      p.appendChild(t);
+    }
     return p;
   }
 
@@ -797,6 +927,7 @@
     anim.setState({ state: 'LISTENING' });
     showTyping();
     setTimeout(hideTyping, 30000);  // safety net
+    addChatUser(text);
   }
 
   function markButton(name, on) {
@@ -814,6 +945,12 @@
       }
       if (e.key === 'Escape') {
         dev.hidden = true;
+        toggleHelp(false);
+        return;
+      }
+      if (e.key === '?' && dev.hidden) {
+        e.preventDefault();
+        toggleHelp();
         return;
       }
       // Number keys 1..9 jump to states.
@@ -863,8 +1000,10 @@
         hideTyping();
         const shown = (evt.tts_text != null ? evt.tts_text : evt.text) || '';
         anim.setSpeechText(stripTagsClient(shown));
+        updateChatNex(stripTagsClient(shown));
       } else if (evt.type === 'speak.delta') {
         hideTyping();
+        updateChatNex(stripTagsClient(evt.text || ''));
         // Streaming: the bubble updates with each safe-boundary chunk.
         // The backend sends a complete, tag-stripped chunk. `text` is
         // the cumulative cleaned text; we use it directly so we never
@@ -929,6 +1068,8 @@
           if (face) anim.setState({ state: face, params: { source: 'agent' } });
           if (evt.agentState === 'EXECUTING' && anim.sweepOnce) anim.sweepOnce(2.2);
           if (evt.agentState === 'PLANNING' && anim.sweepOnce) anim.sweepOnce(1.4);
+          if (evt.agentState === 'COMPLETED' && anim.celebrate) anim.celebrate();
+          if (evt.agentState === 'BLOCKED' && anim.trouble) anim.trouble();
         }
         // Surface a short status line in the debug panel when available.
         if (dev && !dev.hidden && evt.agentState) {

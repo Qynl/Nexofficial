@@ -47,7 +47,281 @@ html, body {
   display: block;
   background: var(--bg);
   cursor: default;
+  z-index: 1;
 }
+
+/* --- ambient state light -------------------------------------------------- */
+/* An ultra-subtle tinted glow that sits above the opaque canvas via screen
+   blending and reacts to body[data-state]. At rest it is invisible. */
+
+#ambient {
+  position: fixed;
+  inset: -12%;
+  z-index: 2;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  opacity: 0;
+  transition: opacity 1.4s var(--ease-out), background 1.4s var(--ease-out);
+  background: radial-gradient(58% 46% at 50% 44%, rgba(255, 255, 255, 0.05), transparent 70%);
+}
+body[data-state="LISTENING"] #ambient,
+body[data-state="SPEAKING"] #ambient {
+  opacity: 0.7;
+  background: radial-gradient(58% 46% at 50% 44%, rgba(120, 170, 255, 0.05), transparent 70%);
+}
+body[data-state="THINKING"] #ambient,
+body[data-state="SCAN"] #ambient {
+  opacity: 0.7;
+  background: radial-gradient(58% 46% at 50% 44%, rgba(78, 201, 176, 0.06), transparent 70%);
+}
+body[data-state="EXECUTING"] #ambient {
+  opacity: 0.8;
+  background: radial-gradient(62% 50% at 50% 44%, rgba(78, 201, 176, 0.07), transparent 72%);
+}
+body[data-state="ERROR"] #ambient,
+body[data-state="CONFUSED"] #ambient {
+  opacity: 0.8;
+  background: radial-gradient(60% 48% at 50% 44%, rgba(255, 120, 100, 0.07), transparent 72%);
+}
+body[data-state="MUSIC"] #ambient {
+  opacity: 0.6;
+  background: radial-gradient(60% 48% at 50% 44%, rgba(180, 140, 255, 0.06), transparent 72%);
+}
+
+/* --- UI cascade (boot) ----------------------------------------------------- */
+/* Elements opt in with .ui-el; body.ready staggers them in. */
+
+.ui-el, #conn-pill, #chat-log {
+  opacity: 0;
+  transform: translateY(6px);
+}
+body.ready .ui-el, body.ready #conn-pill {
+  animation: uiIn 0.7s var(--ease-out) both;
+}
+body.ready #conn-pill { animation-delay: 0.9s; }
+/* Chat log cascades into its DIMMED baseline (0.28), not full opacity. */
+body.ready #chat-log {
+  animation: uiInChat 0.7s var(--ease-out) 1.1s both;
+}
+@keyframes uiIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes uiInChat {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 0.28; transform: translateY(0); }
+}
+
+/* --- conversation transcript ------------------------------------------------ */
+
+#chat-log {
+  position: fixed;
+  top: 64px;
+  left: 16px;
+  width: min(340px, 86vw);
+  max-height: 44vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  transition: opacity 0.8s ease, border-color 0.5s ease, background 0.5s ease;
+  opacity: 0.28;
+  z-index: 18;
+  scrollbar-width: thin;
+  scrollbar-color: var(--dimmer) transparent;
+  pointer-events: none;
+}
+#chat-log.active {
+  opacity: 1;
+  border-color: var(--border);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  box-shadow: var(--shadow);
+}
+#chat-log[hidden] { display: none; }
+.chat-msg {
+  max-width: 92%;
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-msg.user {
+  align-self: flex-end;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--border);
+}
+.chat-msg.nex {
+  align-self: flex-start;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(78, 201, 176, 0.28);
+}
+.chat-new { animation: chatNew 0.5s var(--ease-out) both; }
+@keyframes chatNew {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* streamed text suffix (bubble + chat) fades in gently */
+.chat-new { display: inline; }
+
+/* --- help overlay ------------------------------------------------------------ */
+
+#help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.25s var(--ease-out);
+}
+#help-overlay.in { opacity: 1; }
+#help-overlay[hidden] { display: none; }
+.help-card {
+  min-width: 260px;
+  padding: 18px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+  transform: scale(0.94) translateY(8px);
+  transition: transform 0.25s var(--ease-spring);
+}
+#help-overlay.in .help-card { transform: scale(1) translateY(0); }
+.help-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+  margin-bottom: 10px;
+}
+.help-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+}
+.help-row kbd {
+  display: inline-block;
+  min-width: 34px;
+  text-align: center;
+  padding: 3px 7px;
+  border: 1px solid var(--border-bright);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg);
+}
+.help-close { margin-top: 12px; }
+
+/* --- agent panel: collapse toggle -------------------------------------------- */
+
+.panel-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-radius: 5px;
+}
+#agent-panel { position: fixed; }
+#agent-panel.collapsed > *:not(.panel-toggle) { display: none; }
+#agent-panel.collapsed {
+  max-height: none;
+  overflow: hidden;
+}
+
+/* --- bubble: streamed suffix --------------------------------------------------- */
+
+#bubble .chat-new { animation: chatNew 0.45s var(--ease-out) both; }
+
+/* --- state-reactive accents on chrome ------------------------------------------- */
+
+#conn-pill {
+  transition: border-color 0.5s ease, box-shadow 0.5s ease, opacity 0.7s var(--ease-out);
+}
+body[data-state="EXECUTING"] #conn-pill,
+body[data-state="SCAN"] #conn-pill {
+  border-color: rgba(78, 201, 176, 0.5);
+  box-shadow: 0 0 12px rgba(78, 201, 176, 0.15), var(--shadow);
+}
+body[data-state="ERROR"] #conn-pill {
+  border-color: rgba(255, 138, 138, 0.5);
+  box-shadow: 0 0 12px rgba(255, 138, 138, 0.15), var(--shadow);
+}
+body[data-state="COMPLETED"] #conn-pill,
+body[data-state="PROUD"] #conn-pill {
+  border-color: rgba(123, 224, 160, 0.5);
+  box-shadow: 0 0 12px rgba(123, 224, 160, 0.18), var(--shadow);
+}
+
+/* --- dev panel: section labels + send row ---------------------------------------- */
+
+.dev-lbl {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dimmer);
+  margin-bottom: 4px;
+}
+.dev-hint {
+  float: right;
+  color: var(--dimmer);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.dev-send {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.dev-send input { flex: 1; }
+
+/* --- mobile ------------------------------------------------------------------------ */
+
+@media (max-width: 640px) {
+  #conn-pill { top: 10px; left: 10px; }
+  #agent-panel {
+    left: 2vw;
+    right: 2vw;
+    width: 96vw;
+    bottom: 10px;
+    max-height: 42vh;
+  }
+  #dev {
+    right: 2vw;
+    left: 2vw;
+    width: 96vw;
+    bottom: 10px;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  #chat-log {
+    left: 2vw;
+    right: 2vw;
+    width: auto;
+    top: 56px;
+    max-height: 30vh;
+  }
+  #bubble { bottom: 12vh; }
+  #boot-hint { display: none; }
+}
+
 
 /* --- buttons: precise micro-interactions -------------------------------- */
 
