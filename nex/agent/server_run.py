@@ -23,6 +23,81 @@ def _registry() -> Any:
     return CapabilityRegistry.from_upstreams(get_tunnels().raw_upstreams())
 
 
+def _design_goal(goal: str, reg, bus, llm_call, reachable: bool,
+                 state=None, policy=None) -> Dict[str, Any]:
+    """NEX 2.0 design phase: understand BEFORE building.
+
+    Produces the structured Design Document (one model call), then a DRAFT
+    task plan that implements it (validated against the live registry),
+    persists the project, and emits `agent.design_ready` — the Plan Page
+    renders that. Nothing is built until the user approves.
+    """
+    from agent.project_state import ProjectState
+
+    if llm_call is None or not reachable:
+        # Honest: design requires the model. A skeleton run is still
+        # possible (build mode without design), but no design doc can be
+        # invented here.
+        if bus is not None:
+            bus({"type": "agent.design_failed",
+                 "error": "no model reachable — the design stage needs "
+                          "the model (skeleton builds run without one)",
+                 "goal": goal})
+        return {"mode": "design", "goal": goal, "ok": False,
+                "error": "model unreachable"}
+
+    st = state or ProjectState(goal=goal, engine=None)
+    st.goal = st.goal or goal
+    st.phase = "DESIGNING"
+
+    from agent.loop import AutonomousAgent
+    designer = AutonomousAgent(reg, bus=bus, policy=policy,
+                               llm=llm_call, persist=False)
+    designer._make_design(goal, st)
+    if not st.design or not st.design.get("concept"):
+        return {"mode": "design", "goal": goal, "ok": False,
+                "error": "design did not parse"}
+
+    # Draft plan implementing the design (validated, not executed).
+    design = st.design
+    locked = st.locked_decisions()
+    graph, plan = _build_plan(goal, reg, llm_call, True,
+                              design=design, locked=locked)
+    plan_steps = (plan or {}).get("steps", []) if isinstance(plan, dict)         else []
+
+    # Persist so START BUILD can resume exactly this project.
+    try:
+        from agent.projects_store import save_project, new_project_id
+        st.project_id = st.project_id or new_project_id(goal)
+        st.phase = "PLANNING"
+        save_project(st)
+    except Exception:  # noqa: BLE001
+        pass
+
+    if bus is not None:
+        bus({
+            "type": "agent.design_ready",
+            "goal": goal,
+            "project_id": getattr(st, "project_id", ""),
+            "design": {k: design.get(k) for k in
+                       ("concept", "genre", "engine", "gameplay_loop",
+                        "design_pillars", "mechanics", "world", "story",
+                        "audio", "visual_direction", "milestones",
+                        "dependencies", "acceptance_criteria", "tests",
+                        "quality_gates")},
+            "plan": {"title": (plan or {}).get("title") if isinstance(plan, dict) else None,
+                     "steps": plan_steps,
+                     "model_driven": plan is not None,
+                     "stage_count": len(graph.all()) if graph else 0},
+            "locked": locked,
+        })
+    return {"mode": "design", "goal": goal, "ok": True,
+            "project_id": getattr(st, "project_id", ""),
+            "design": design,
+            "plan": plan,
+            "stages": [t.stage for t in graph.all()] if graph else []}
+
+
 def agent_capabilities() -> Dict[str, Any]:
     """Compact capability summary of every live MCP server."""
     try:
@@ -33,12 +108,16 @@ def agent_capabilities() -> Dict[str, Any]:
 
 
 def _build_plan(goal: str, reg, llm_call, reachable: bool,
-                feedback: Optional[List[str]] = None):
-    """Return (TaskGraph, plan_dict|None). Uses the model when reachable."""
+                feedback: Optional[List[str]] = None,
+                design: Optional[Dict[str, Any]] = None,
+                locked: Optional[List[str]] = None):
+    """Return (TaskGraph, plan_dict|None). Uses the model when reachable.
+    Design-aware: when a Design Document exists, the plan implements it."""
     from agent.planner import plan as default_planner
     from agent.model_planner import model_driven_planner
     if llm_call is not None and reachable:
-        return model_driven_planner(goal, reg, llm_call, feedback=feedback)
+        return model_driven_planner(goal, reg, llm_call, feedback=feedback,
+                                    design=design, locked=locked)
     return default_planner(goal, reg), None
 
 
@@ -49,13 +128,18 @@ def run_agent_goal(goal: str,
                    llm_reachable: bool = False,
                    mode: str = "build",
                    judge_iterations: int = 1,
-                   graph: Optional[Any] = None) -> Any:
+                   graph: Optional[Any] = None,
+                   state: Optional[Any] = None) -> Any:
     """Plan (and optionally build + judge) a goal against the live registry.
 
     `mode`:
+      * "design" — NEX 2.0: produce the Design Document + a DRAFT task plan,
+                  persist the project, emit agent.design_ready, do NOT build.
+                  This is what the Plan Page renders for approval.
       * "plan"  — produce the plan + a graph, emit a plan event, do NOT execute.
       * "build" — execute and (if a model is available) run quality judges,
-                  optionally rebuilding once on a failing verdict.
+                  optionally rebuilding once on a failing verdict. The
+                  build -> critique -> improve loop runs inside the agent.
 
     `llm_call` is an injected ``llm(messages) -> str`` (the server passes its
     own model_chat so this module stays model-server agnostic). `llm_reachable`
@@ -73,13 +157,20 @@ def run_agent_goal(goal: str,
     reg = _registry()
     pol = current_policy()
 
+    if mode == "design":
+        return _design_goal(goal, reg, bus, llm_call, llm_reachable,
+                            state=state, policy=pol)
+
     if graph is not None:
         # Pre-built graph (e.g. the /api/plan/<id>/autonomous bridge): an MC
         # plan already validated against the live registry. It IS the
         # TaskGraph; skip re-planning. No synthetic model plan is attached.
         plan = None
     else:
-        graph, plan = _build_plan(goal, reg, llm_call, llm_reachable)
+        design = getattr(state, "design", None) if state is not None else None
+        locked = state.locked_decisions() if state is not None else None
+        graph, plan = _build_plan(goal, reg, llm_call, llm_reachable,
+                                  design=design, locked=locked)
 
     if bus is not None:
         steps = (plan or {}).get("steps", []) if isinstance(plan, dict) else []
@@ -108,7 +199,7 @@ def run_agent_goal(goal: str,
     # path (skeleton fallback) and failed tool calls get genuine LLM repair.
     # A pre-built graph (MC plan bridge) is still honored and runs as-is.
     agent = AutonomousAgent(reg, bus=bus, policy=pol, llm=llm_call)
-    report = agent.run(goal, graph=graph)
+    report = agent.run(goal, graph=graph, state=state)
 
     verdict = None
     if llm_call is not None and llm_reachable:

@@ -113,6 +113,23 @@ def _resolve_args(task: Any, graph: TaskGraph) -> Dict[str, Any]:
     return args
 
 
+def _critique_feedback(goal: str, critique, state) -> List[str]:
+    """Turn a critique into concrete planner feedback strings (the same
+    channel judges use)."""
+    lines = []
+    for f in critique.findings[:5]:
+        lines.append("%s: %s" % (f.get("kind"), f.get("message")))
+    if getattr(state, "design", None):
+        from agent.design import design_summary
+        lines.append("Keep implementing THE DESIGN (do not restart, do "
+                     "not change locked decisions): "
+                     + design_summary(state.design)[:400].replace("\n",
+                                                                  " | "))
+    if critique.note:
+        lines.append("critic note: " + critique.note)
+    return lines[:5]
+
+
 class AutonomousAgent:
     def __init__(self, registry: CapabilityRegistry,
                  planner: Callable = None,
@@ -124,7 +141,10 @@ class AutonomousAgent:
                  backoff_base: float = 0.1,
                  max_backoff: float = 2.0,
                  recovery_passes: int = 1,
-                 llm: Optional[Callable] = None) -> None:
+                 llm: Optional[Callable] = None,
+                 max_critique_cycles: int = 1,
+                 design_enabled: bool = True,
+                 persist: bool = True) -> None:
         self.registry = registry
         self.planner = planner or default_planner
         self.policy = policy or current_policy()
@@ -143,6 +163,15 @@ class AutonomousAgent:
         # (goal-specific TaskGraph), with the skeleton as fallback.
         self.llm = llm
         self.last_plan = None
+        # NEX 2.0: design-first planning + the build->critique->improve
+        # loop. `max_critique_cycles` bounds self-criticism so Nex never
+        # churns forever. The critique loop runs only when there is a
+        # design document or an LLM critic (a bare skeleton run with no
+        # design has nothing to critique against).
+        self.max_critique_cycles = max(0, max_critique_cycles)
+        self.design_enabled = design_enabled
+        self.persist = persist
+        self.last_critique = None
 
     # ----- event helper ---------------------------------------------------
     def _emit(self, agent_state=None, event_type=None, **payload) -> None:
@@ -185,9 +214,18 @@ class AutonomousAgent:
                 self._emit("WAITING", "agent.checkpoint_resume_failed",
                            checkpoint=resume_checkpoint, error=repr(exc))
 
+        # --- NEX 2.0: understand BEFORE planning --------------------------
+        # The design document answers WHAT we are building and WHY before
+        # any tool call. Structured data (agent.design), stored on the
+        # project state, feeds the planner, the critic and the UI.
+        if self.design_enabled and not state.design and self.llm is not None \
+                and graph is None:
+            self._make_design(goal, state)
+
         self._emit("PLANNING", "agent.plan_started", goal=goal)
         if graph is None:
             graph = self._make_plan(goal, state)
+        self._design_guard(graph, state)
         self._emit("PLANNING", "agent.plan_updated",
                    task_count=len(graph.all()),
                    stages=[t.stage for t in graph.all()])
@@ -195,46 +233,7 @@ class AutonomousAgent:
         state.pending = [t.name for t in graph.all() if t.status == PENDING]
 
         # --- Execution with multi-pass recovery ------------------------------
-        # Pass 1 executes everything that's ready. If failures leave the graph
-        # non-terminal (skipped dependents / failed leaves), we REVIVE and try
-        # again (up to `recovery_passes` extra times) instead of stopping.
-        # This is what keeps Nex from "always stopping" at the first failure:
-        # it re-runs repair + same-tool-on-another-server recovery before it
-        # ever reports a task as truly blocked.
-        passes = 0
-        max_passes = 1 + self.recovery_passes
-        while passes < max_passes:
-            passes += 1
-            # Drain every ready wave within this pass (traverse the DAG).
-            while True:
-                ready = graph.ready()
-                if not ready:
-                    break
-                for task in ready:
-                    self._execute_task(task, state, graph)
-            # Either everything is terminal, or some tasks are blocked
-            # (failed / skipped). If terminal, we're done.
-            if graph.is_terminal():
-                # Only failed/skipped remain. Try to revive them for another
-                # pass before declaring the run blocked.
-                if not self._revive(graph):
-                    break
-                continue
-            if not self._revive(graph):
-                break
-
-        # Guaranteed final drain: a recovery pass may have just re-PENDINGed a
-        # previously-failed task right as the pass budget ran out. Give it one
-        # execution so its outcome (success or genuine failure) is reported
-        # instead of being left dangling as PENDING.
-        while True:
-            ready = graph.ready()
-            if not ready:
-                break
-            for task in ready:
-                self._execute_task(task, state, graph)
-            if graph.is_terminal():
-                break
+        self._run_passes(graph, state)
 
         succeeded = [t.name for t in graph.completed()]
         failed = [t.name for t in graph.failed()]
@@ -277,9 +276,234 @@ class AutonomousAgent:
                    status=status, completed=succeeded, failed=failed,
                    missing=missing)
 
-        return CompletionReport(status=status, goal=goal, completed=succeeded,
-                               failed=failed, skipped=skipped, reasons=reasons,
-                               missing=missing)
+        report = CompletionReport(status=status, goal=goal,
+                                  completed=succeeded, failed=failed,
+                                  skipped=skipped, reasons=reasons,
+                                  missing=missing)
+
+        # --- NEX 2.0: build -> critique -> improve (bounded) ---------------
+        # Nex doesn't get a free pass after one iteration. The critic asks
+        # "is this actually GOOD?", and POLISH/REPLAN verdicts send the
+        # agent back to work (bounded by max_critique_cycles).
+        report = self._critique_and_improve(goal, state, graph, report)
+
+        if self.persist:
+            try:
+                from agent.projects_store import save_project
+                save_project(state, report)
+            except Exception:  # noqa: BLE001
+                pass
+        return report
+
+    # ------------------------------------------------------------------
+    def _run_passes(self, graph, state) -> None:
+        """Execute the graph with multi-pass recovery.
+        Pass 1 executes everything that's ready. If failures leave the graph
+        non-terminal (skipped dependents / failed leaves), we REVIVE and try
+        again (up to `recovery_passes` extra times) instead of stopping.
+        This is what keeps Nex from "always stopping" at the first failure:
+        it re-runs repair + same-tool-on-another-server recovery before it
+        ever reports a task as truly blocked.
+        """
+        passes = 0
+        max_passes = 1 + self.recovery_passes
+        while passes < max_passes:
+            passes += 1
+            # Drain every ready wave within this pass (traverse the DAG).
+            while True:
+                ready = graph.ready()
+                if not ready:
+                    break
+                for task in ready:
+                    self._execute_task(task, state, graph)
+            # Either everything is terminal, or some tasks are blocked
+            # (failed / skipped). If terminal, we're done.
+            if graph.is_terminal():
+                # Only failed/skipped remain. Try to revive them for another
+                # pass before declaring the run blocked.
+                if not self._revive(graph):
+                    break
+                continue
+            if not self._revive(graph):
+                break
+
+        # Guaranteed final drain: a recovery pass may have just re-PENDINGed a
+        # previously-failed task right as the pass budget ran out. Give it one
+        # execution so its outcome (success or genuine failure) is reported
+        # instead of being left dangling as PENDING.
+        while True:
+            ready = graph.ready()
+            if not ready:
+                break
+            for task in ready:
+                self._execute_task(task, state, graph)
+            if graph.is_terminal():
+                break
+
+    # ----- NEX 2.0: design-first + critic helpers ------------------------
+    def _make_design(self, goal: str, state: ProjectState) -> None:
+        """Produce the structured Design Document (one LLM call). Failure
+        is honest: the run continues without a design, never with an
+        invented one."""
+        try:
+            from agent.design import (design_prompt, parse_design,
+                                      missing_sections, design_summary)
+            state.phase = "DESIGNING"
+            self._emit("THINKING", "agent.design_started", goal=goal)
+            catalog_text = ""
+            try:
+                from agent.model_planner import _catalog
+                catalog_text = _catalog(self.registry, goal)
+            except Exception:  # noqa: BLE001
+                catalog_text = ""
+            prompt = design_prompt(goal, state.engine, catalog_text,
+                                   state.locked_decisions())
+            reply = self.llm([{"role": "user", "content": prompt}])
+            design = parse_design(reply, idea=goal, engine=state.engine)
+            if design is None:
+                self._emit("PLANNING", "agent.design_failed",
+                           note="model returned no parseable design JSON")
+                state.phase = "PLANNING"
+                return
+            state.design = design
+            # Design milestones that name concrete tasks become design-
+            # grounded hints for the planner (via plan_feedback context).
+            missing = missing_sections(design)
+            self._emit("PLANNING", "agent.design_ready",
+                       design={k: design.get(k) for k in
+                               ("concept", "genre", "gameplay_loop",
+                                "design_pillars", "mechanics", "world",
+                                "milestones", "quality_gates")},
+                       summary=design_summary(design),
+                       missing=missing)
+        except Exception as exc:  # noqa: BLE001
+            self._emit("PLANNING", "agent.design_failed", error=repr(exc))
+            state.phase = "PLANNING"
+
+    def _design_guard(self, graph, state) -> int:
+        """Deterministic design stability: any task whose name re-litigates
+        a LOCKED decision is skipped before execution (with the reason
+        recorded). The planner seeing locked decisions is the first
+        guard; this is the safety net."""
+        locked = state.locked_decisions()
+        if not locked:
+            return 0
+        try:
+            from agent.design import conflicts_locked
+        except ImportError:  # noqa: BLE001
+            return 0
+        n = 0
+        for task in graph.all():
+            if task.status != PENDING:
+                continue
+            dec = conflicts_locked(task.name, locked)
+            if dec:
+                graph.mark_skipped(task.id,
+                                   "conflicts with locked design "
+                                   "decision: " + dec)
+                n += 1
+        if n:
+            self._emit("PLANNING", "agent.design_guard",
+                       blocked=n,
+                       locked=locked)
+        return n
+
+    def _critique_and_improve(self, goal: str, state: ProjectState,
+                              graph, report):
+        """Run the critic and, for POLISH/REPLAN verdicts, do bounded
+        improvement runs through the ONE canonical pipeline."""
+        if self.max_critique_cycles <= 0:
+            return report
+        # The critic measures work against the DESIGN DOCUMENT. Without a
+        # design there is nothing to critique against — single-goal model
+        # runs already have the judge round in server_run; bare skeleton
+        # runs would only gain noise.
+        if not getattr(state, "design", {}):
+            state.phase = ("COMPLETE" if report.status == STATUS_COMPLETED
+                           else "PAUSED")
+            return report
+
+        try:
+            from agent.critic import (critique as run_critique,
+                                      ACTION_COMPLETE, ACTION_REPLAN)
+        except ImportError:  # noqa: BLE001
+            return report
+
+        current = report
+        for cycle in range(1, self.max_critique_cycles + 1):
+            state.phase = "CRITIQUING"
+            self._emit("OBSERVING", "agent.critique_started", cycle=cycle)
+            c = run_critique(goal, state, current, llm=self.llm,
+                             cycle=cycle)
+            self.last_critique = c
+            state.record_cycle(dict(c.to_dict(), ts=time.time()))
+            state.phase = ("COMPLETE" if c.action == ACTION_COMPLETE
+                           else ("PLANNING" if c.action == ACTION_REPLAN
+                                 else "POLISHING"))
+            self._emit("COMPLETED" if c.verdict == "PASS" else "OBSERVING",
+                       "agent.critique", verdict=c.verdict, action=c.action,
+                       findings=c.findings, scores=c.scores, note=c.note,
+                       cycle=cycle)
+            if c.action == ACTION_COMPLETE:
+                if current.status != STATUS_COMPLETED:
+                    current.status = (
+                        STATUS_COMPLETED if current.completed
+                        and not current.failed else current.status)
+                return current
+
+            # Improvement run: same pipeline, critique-aware planning.
+            feedback = _critique_feedback(goal, c, state)
+            state.plan_feedback = feedback
+            state.phase = "POLISHING" if c.action != ACTION_REPLAN \
+                else "PLANNING"
+            self._emit(state.phase, "agent.improve_started",
+                       cycle=cycle, action=c.action)
+            try:
+                g2 = self._make_plan(goal, state)
+            except Exception as exc:  # noqa: BLE001
+                self._emit("BLOCKED", "agent.improve_plan_failed",
+                           error=repr(exc))
+                return current
+            self._design_guard(g2, state)
+            if not g2.all():
+                self._emit("OBSERVING", "agent.improve_no_plan",
+                           note="critic asked for changes but no "
+                                "improvement plan was possible")
+                return current
+            self._run_passes(g2, state)
+
+            # Merge outcomes.
+            succeeded = list(dict.fromkeys(
+                list(current.completed)
+                + [t.name for t in g2.completed()]))
+            failed_names = [t.name for t in g2.failed()]
+            skipped = list(dict.fromkeys(
+                list(current.skipped) + [t.name for t in g2.skipped()]))
+            failed = list(current.failed) + failed_names
+            reasons = list(current.reasons) + [
+                "%s: %s" % (t.name, t.error or "failed")
+                for t in g2.failed()]
+            skipped_like = [t for t in g2.skipped()]
+            missing = list(current.missing) + [{
+                "task": t.name, "stage": t.stage, "server": t.server,
+                "tool": t.tool, "reason": t.error or t.notes or "unavailable"}
+                for t in skipped_like]
+            if failed and not succeeded:
+                status = STATUS_FAILED
+            elif failed or skipped:
+                status = STATUS_PARTIAL
+            else:
+                status = STATUS_COMPLETED
+            current = CompletionReport(status=status, goal=goal,
+                                       completed=succeeded, failed=failed,
+                                       skipped=skipped, reasons=reasons,
+                                       missing=missing)
+            state.completed = succeeded
+            state.failed = [{"task": n, "reason": r.split(": ", 1)[-1]}
+                            for n, r in zip(failed, reasons)]
+        state.phase = ("COMPLETE" if current.status == STATUS_COMPLETED
+                       else "PAUSED")
+        return current
 
     # ----- planning (canonical: LLM-driven, skeleton fallback) -----------
     def _make_plan(self, goal: str, state: ProjectState) -> TaskGraph:
@@ -289,8 +513,12 @@ class AutonomousAgent:
             try:
                 from agent.model_planner import model_driven_planner
                 feedback = getattr(state, "plan_feedback", None)
-                g, plan = model_driven_planner(goal, self.registry, self.llm,
-                                               feedback=feedback)
+                state.plan_feedback = None  # feedback is single-shot
+                g, plan = model_driven_planner(
+                    goal, self.registry, self.llm,
+                    feedback=feedback,
+                    design=getattr(state, "design", {}) or None,
+                    locked=state.locked_decisions() or None)
                 if g is not None and g.all():
                     self.last_plan = plan
                     return g

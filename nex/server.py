@@ -1119,6 +1119,26 @@ class NexHandler(BaseHTTPRequestHandler):
             # REST list of available tools (handy for the dev panel).
             # Includes namespaced upstream tools when tunnels are up.
             self._send_json(200, {"tools": self._mcp_tools_list().get("tools", [])})
+        elif path == "/api/projects":
+            from agent.projects_store import list_projects
+            self._send_json(200, {"ok": True,
+                                  "projects": list_projects()})
+        elif path == "/api/project":
+            from agent.projects_store import list_projects, load_project
+            projs = list_projects(limit=1)
+            if not projs:
+                self._send_json(200, {"ok": True, "project": None})
+            else:
+                self._send_json(200, {"ok": True,
+                                      "project": load_project(projs[0]["id"])})
+        elif path.startswith("/api/project/"):
+            from agent.projects_store import load_project
+            pid = path[len("/api/project/"):].split("/")[0]
+            doc = load_project(pid)
+            if doc is None:
+                self._send_json(404, {"ok": False, "error": "unknown project"})
+            else:
+                self._send_json(200, {"ok": True, "project": doc})
         elif path == "/api/agent/capabilities":
             # Live MCP capability registry (server view) — what the agent
             # actually sees, not a curated doc.
@@ -1176,6 +1196,57 @@ class NexHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/chat":
             self._handle_chat()
+            return
+        if path == "/api/project":
+            # NEX 2.0: understand BEFORE building. Produces the Design
+            # Document + draft plan (Plan Page) without executing anything.
+            body = self._read_json_body() or {}
+            goal = (body.get("goal") or "").strip()
+            if not goal:
+                self._send_json(400, {"ok": False, "error": "missing 'goal'"})
+                return
+
+            def _designer() -> None:
+                try:
+                    from agent.server_run import run_agent_goal
+                    run_agent_goal(goal, bus=BUS, llm_call=model_chat,
+                                   llm_reachable=model_reachable(),
+                                   mode="design")
+                except Exception as exc:  # noqa: BLE001
+                    BUS.publish({"type": "agent.error", "error": repr(exc),
+                                 "ts": time.time()})
+
+            threading.Thread(target=_designer, daemon=True).start()
+            self._send_json(200, {"ok": True, "queued": True, "goal": goal,
+                                  "mode": "design"})
+            return
+        if path.startswith("/api/project/") and path.endswith("/build"):
+            # Approve + build a designed project (loads its persisted
+            # state: design doc, locked decisions, critique memory).
+            pid = path[len("/api/project/"):-len("/build")]
+            from agent.projects_store import load_project_state
+            st = load_project_state(pid)
+            if st is None:
+                self._send_json(404, {"ok": False,
+                                      "error": "unknown project"})
+                return
+
+            def _builder() -> None:
+                try:
+                    from agent.server_run import run_agent_goal
+                    result = run_agent_goal(st.goal or pid, bus=BUS,
+                                            llm_call=model_chat,
+                                            llm_reachable=model_reachable(),
+                                            mode="build", state=st)
+                    BUS.publish({"type": "agent.report", "result": result,
+                                 "ts": time.time()})
+                except Exception as exc:  # noqa: BLE001
+                    BUS.publish({"type": "agent.error", "error": repr(exc),
+                                 "ts": time.time()})
+
+            threading.Thread(target=_builder, daemon=True).start()
+            self._send_json(200, {"ok": True, "queued": True,
+                                  "project_id": pid, "mode": "build"})
             return
         if path == "/api/agent/run":
             self._handle_agent_run()

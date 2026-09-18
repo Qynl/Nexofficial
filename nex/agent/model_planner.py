@@ -230,7 +230,9 @@ def plan_to_graph(plan: Dict[str, Any], registry) -> TaskGraph:
 
 def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
                           fallback=None, max_catalog: int = 80,
-                          feedback: Optional[List[str]] = None
+                          feedback: Optional[List[str]] = None,
+                          design: Optional[Dict[str, Any]] = None,
+                          locked: Optional[List[str]] = None
                           ) -> Tuple[TaskGraph, Optional[Dict[str, Any]]]:
     """Ask the LLM for a goal-specific plan, parse + validate it, and return a
     TaskGraph. Returns (graph, plan_dict). On any failure returns the fallback
@@ -247,12 +249,22 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
         return fallback(goal, registry), None
 
     catalog = _catalog(registry, goal=goal, max_catalog=max_catalog)
+    system = PLAN_SYSTEM + "\n\n" + PLAN_BOUNDARY
+    if design:
+        from agent.design import design_summary
+        system += ("\n\nAPPROVED DESIGN DOCUMENT (implement THIS — do not "
+                   "restart the project, do not contradict it):\n"
+                   + design_summary(design))
+    if locked:
+        system += ("\n\nLOCKED DESIGN DECISIONS (binding; any step that "
+                   "re-litigates them will be blocked):\n"
+                   + "\n".join("- " + d for d in locked[:8]))
     user_msg = "Goal: %s\n\nProduce the plan JSON now." % goal
     if feedback:
-        user_msg += ("\n\nA previous attempt scored low. Address these concrete "
-                     "improvements:\n- " + "\n- ".join(feedback[:5]))
+        user_msg += ("\n\nAddress these concrete findings before "
+                     "re-planning:\n- " + "\n- ".join(feedback[:5]))
     messages = [
-        {"role": "system", "content": PLAN_SYSTEM + "\n\n" + PLAN_BOUNDARY
+        {"role": "system", "content": system
             + "\n\nLIVE TOOL CATALOG:\n" + catalog},
         {"role": "user", "content": user_msg},
     ]

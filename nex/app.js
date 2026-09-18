@@ -1219,6 +1219,30 @@
         const p = ensureAgentPanel();
         p.innerHTML += '<div class="agent-status err">agent error: '
           + escapeHtml(evt.error || 'unknown') + '</div>';
+      } else if (evt.type === 'agent.design_started') {
+        // NEX 2.0: Nex is thinking about WHAT to build before any tool call.
+        anim.setState({ state: 'FOCUSED', params: { source: 'design' } });
+        showToast('Nex is designing the project — understanding before building', 'ok');
+      } else if (evt.type === 'agent.design_ready') {
+        // The Plan Page: inspect the structured design + draft plan.
+        renderPlanPage(evt);
+        anim.setState({ state: 'PROUD', params: { source: 'design' } });
+      } else if (evt.type === 'agent.design_failed') {
+        showToast('Design stage: ' + (evt.error || evt.note || 'failed')
+          + ' — Nex can still build without a design doc', 'err');
+        anim.setState({ state: 'CONFUSED', params: { source: 'design' } });
+      } else if (evt.type === 'agent.critique') {
+        // The critic verdict: PASS / WEAK + findings + next action.
+        renderCritique(evt);
+        anim.setState({ state: evt.verdict === 'PASS' ? 'PROUD' : 'CONFUSED',
+                        params: { source: 'critique' } });
+      } else if (evt.type === 'agent.improve_started') {
+        anim.setState({ state: 'FOCUSED', params: { source: 'polish' } });
+        showToast('Nex is ' + (evt.action === 'REPLAN' ? 'replanning'
+          : 'polishing') + ' (critique cycle ' + (evt.cycle || 1) + ')', 'ok');
+      } else if (evt.type === 'agent.design_guard') {
+        showToast('Design guard: ' + (evt.blocked || 0)
+          + ' step(s) blocked — they contradicted a LOCKED design decision', 'err');
       } else if (evt.type === 'amazon_music') {
         // The Amazon Music connector (official Web API backend) hands
         // us the playable; this is only the speaker.
@@ -1227,6 +1251,155 @@
         // no-op; backend announces its config here.
       }
     };
+
+  // ------------------------------------------------------------------
+  // NEX 2.0 — THE PLAN PAGE. A real page (not a text blob): the
+  // structured Design Document + the draft plan, inspectable before
+  // Nex touches anything. START BUILD approves via /api/project/<id>/build.
+  // ------------------------------------------------------------------
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+
+  function renderPlanPage(evt) {
+    var design = evt.design || {};
+    var plan = evt.plan || {};
+    var old = document.getElementById('nexPlanPage');
+    if (old) old.remove();
+
+    var page = el('div', 'nex-plan-page');
+    page.id = 'nexPlanPage';
+
+    var card = el('div', 'nex-plan-card');
+    card.appendChild(el('div', 'nex-plan-kicker',
+      'NEX · DESIGN DOCUMENT' + (evt.project_id ? ' · ' + evt.project_id : '')));
+    card.appendChild(el('h1', 'nex-plan-title',
+      design.concept || evt.goal || 'Untitled project'));
+    var sub = [design.genre, design.engine].filter(Boolean).join(' · ');
+    if (sub) card.appendChild(el('div', 'nex-plan-sub', sub));
+
+    function section(label) {
+      var s = el('div', 'nex-plan-section');
+      s.appendChild(el('div', 'nex-plan-label', label));
+      return s;
+    }
+    function list(items, cls) {
+      var ul = el('ul', 'nex-plan-list' + (cls ? ' ' + cls : ''));
+      (items || []).forEach(function (it) {
+        var name = (typeof it === 'string') ? it
+          : (it && (it.name || it.decision)) || '';
+        if (name) ul.appendChild(el('li', null, name));
+      });
+      return ul;
+    }
+
+    if (design.design_pillars && design.design_pillars.length) {
+      var pil = section('DESIGN PILLARS');
+      pil.appendChild(list(design.design_pillars));
+      card.appendChild(pil);
+    }
+    if (design.gameplay_loop) {
+      var loop = section('CORE LOOP');
+      loop.appendChild(el('div', 'nex-plan-loop', design.gameplay_loop));
+      card.appendChild(loop);
+    }
+    if (design.mechanics && design.mechanics.length) {
+      var sys = section('SYSTEMS');
+      sys.appendChild(list(design.mechanics, 'checks'));
+      card.appendChild(sys);
+    }
+    if (design.world && (design.world.summary || (design.world.locations || []).length)) {
+      var w = section('WORLD');
+      if (design.world.summary) w.appendChild(el('div', null, design.world.summary));
+      if (design.world.locations.length) w.appendChild(list(design.world.locations));
+      card.appendChild(w);
+    }
+    if (design.milestones && design.milestones.length) {
+      var ms = section('MILESTONES');
+      design.milestones.forEach(function (m, i) {
+        var row = el('div', 'nex-plan-milestone');
+        row.appendChild(el('div', 'nex-plan-ms-name',
+          'MILESTONE ' + String(i + 1).padStart(2, '0') + ' — ' + (m.name || '')));
+        if (m.tasks && m.tasks.length) row.appendChild(list(m.tasks));
+        ms.appendChild(row);
+      });
+      card.appendChild(ms);
+    }
+    if (design.quality_gates && design.quality_gates.length) {
+      var qg = section('QUALITY GATES');
+      qg.appendChild(list(design.quality_gates.map(function (g) {
+        return (g && g.done ? '✓ ' : '○ ') + (g.name || '');
+      })));
+      card.appendChild(qg);
+    }
+    if (design.dependencies && design.dependencies.length) {
+      var dep = section('DEPENDENCIES (honest gaps)');
+      dep.appendChild(list(design.dependencies));
+      card.appendChild(dep);
+    }
+    if (plan.steps && plan.steps.length) {
+      var ps = section('DRAFT PLAN — ' + plan.steps.length + ' step(s)'
+        + (plan.model_driven ? ' (model-driven, validated against live MCP)'
+                             : ' (capability skeleton)'));
+      ps.appendChild(list(plan.steps.map(function (s) {
+        return (s.name || s.tool || '?');
+      })));
+      card.appendChild(ps);
+    }
+
+    var actions = el('div', 'nex-plan-actions');
+    var start = el('button', 'nex-plan-start', 'START BUILD');
+    start.addEventListener('click', function () {
+      if (!evt.project_id) {
+        showToast('No persisted project to build — run the design stage first', 'err');
+        return;
+      }
+      start.disabled = true;
+      start.textContent = 'BUILDING…';
+      fetch('/api/project/' + encodeURIComponent(evt.project_id) + '/build',
+        { method: 'POST' }).then(function () {
+          page.remove();
+          showToast('Nex is building: ' + (design.concept || evt.goal), 'ok');
+        }).catch(function () {
+          start.disabled = false;
+          start.textContent = 'START BUILD';
+          showToast('Could not start the build', 'err');
+        });
+    });
+    actions.appendChild(start);
+    var close = el('button', 'nex-plan-close', 'CLOSE');
+    close.addEventListener('click', function () { page.remove(); });
+    actions.appendChild(close);
+    card.appendChild(actions);
+    page.appendChild(card);
+    document.body.appendChild(page);
+    page.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') page.remove();
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // The critic readout: PASS/WEAK + findings, in the work panel.
+  // ------------------------------------------------------------------
+  function renderCritique(evt) {
+    var p = ensureAgentPanel();
+    var box = el('div', 'agent-critique '
+      + (evt.verdict === 'PASS' ? 'critique-pass' : 'critique-weak'));
+    box.appendChild(el('div', 'agent-critique-head',
+      'CRITIQUE CYCLE ' + (evt.cycle || 1) + ' — '
+      + (evt.verdict === 'PASS' ? 'GOOD' : 'WEAK')
+      + ' · NEXT: ' + (evt.action || '')));
+    if (evt.note) box.appendChild(el('div', 'agent-critique-note', evt.note));
+    (evt.findings || []).slice(0, 5).forEach(function (f) {
+      box.appendChild(el('div', 'agent-critique-finding',
+        (f.severity === 'major' ? '⚠ ' : '· ') + (f.message || '')));
+    });
+    p.appendChild(box);
+    p.classList.remove('collapsed');
+  }
 
   function showPlanBanner(plan) {
     // Minimal in-page banner. Built on top of the existing #bubble
