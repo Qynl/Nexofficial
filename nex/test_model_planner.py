@@ -163,10 +163,173 @@ def test_judges_with_llm():
     _expect(len(verdict["suggestions"]) >= 1, "suggestions merged")
 
 
+# ---------------------------------------------------------------------------
+# Unification: ONE planning + execution pipeline
+# ---------------------------------------------------------------------------
+
+def test_validate_plan_deep():
+    from agent.model_planner import validate_plan_deep
+    reg = _registry()
+    good = {"steps": [{"name": "a", "tool": "create_asset", "args": {}}]}
+    errs, warns = validate_plan_deep(good, reg)
+    _expect(errs == [], "good plan has no errors, got %r" % errs)
+
+    missing = {"steps": [{"name": "a", "tool": "no_such_tool", "args": {}}]}
+    errs, _ = validate_plan_deep(missing, reg)
+    _expect(len(errs) == 1 and "not found" in errs[0], "unknown tool -> error")
+
+    shell_tools = [{"name": "run_command", "description": "x",
+                    "inputSchema": {}}]
+    shell = CapabilityRegistry([mock_mcp.server_view(
+        "shell_mcp", mock_mcp.MockMCPServer("shell_mcp", shell_tools))])
+    denied = {"steps": [{"name": "sh", "tool": "run_command",
+                         "args": {"cmd": "ls"}}]}
+    errs, _ = validate_plan_deep(denied, shell)
+    _expect(len(errs) == 1 and "denied by policy" in errs[0],
+            "policy-denied tool -> error, got %r" % errs)
+
+    # Required-arg enforcement from the LIVE schema.
+    strict_tools = [{"name": "save_thing", "description": "x",
+                     "inputSchema": {"type": "object",
+                                     "required": ["path"],
+                                     "properties": {"path": {"type": "string"}}}}]
+    strict = CapabilityRegistry([mock_mcp.server_view(
+        "strict_mcp", mock_mcp.MockMCPServer("strict_mcp", strict_tools))])
+    bad_args = {"steps": [{"name": "s", "tool": "save_thing", "args": {}}]}
+    errs, _ = validate_plan_deep(bad_args, strict)
+    _expect(len(errs) == 1 and "missing required arg 'path'" in errs[0],
+            "missing required arg -> error, got %r" % errs)
+    unknown = {"steps": [{"name": "s", "tool": "save_thing",
+                          "args": {"path": "x", "bogus": 1}}]}
+    errs, warns = validate_plan_deep(unknown, strict)
+    _expect(errs == [] and len(warns) == 1 and "not in live schema" in warns[0],
+            "unknown arg -> warning only")
+
+
+def test_agent_uses_llm_planner_canonically():
+    """With an llm attached, run() plans via the model, not the skeleton."""
+    import json as _json
+    reg = _registry()
+    llm_plan = {"plan": {"title": "LLM plan", "rationale": "r",
+                         "verification": "v",
+                         "steps": [
+                             {"name": "llm_project", "tool": "create_project",
+                              "args": {"name": "llmgame"}, "why": "w",
+                              "expect": "e"},
+                             {"name": "llm_asset", "tool": "create_asset",
+                              "args": {"type": "mesh"}, "why": "w",
+                              "expect": "e", "depends_on": ["llm_project"]},
+                         ]}}
+
+    def plan_llm(messages):
+        return _json.dumps(llm_plan)
+
+    agent = agent_loop.AutonomousAgent(reg, llm=plan_llm)
+    report = agent.run("make the llm thing")
+    names = [t["name"] for t in report.to_dict().get("tasks", [])] \
+        if hasattr(report, "to_dict") else []
+    _expect(agent.last_plan is not None,
+            "canonical planning used the model (last_plan set)")
+    _expect(report.status == STATUS_COMPLETED,
+            "LLM-planned graph executes to completion, got %r" % report.status)
+
+
+def test_llm_repair_used_when_regex_fails():
+    """A failure that matches no regex falls through to genuine LLM repair,
+    bounded to one attempt per task."""
+    import json as _json
+
+    class RepairMock(mock_mcp.MockMCPServer):
+        def call(self, tool, args):
+            if tool == "flaky" and not args.get("fixed"):
+                return {"error": "quantum flux misalignment"}  # no regex hit
+            return {"result": {"id": "ok", "fixed": bool(args.get("fixed"))}}
+
+    tools = [{"name": "flaky", "description": "x", "inputSchema": {}}]
+    reg = CapabilityRegistry([mock_mcp.server_view(
+        "repair_mcp", RepairMock("repair_mcp", tools))])
+
+    repair_prompts = []
+
+    def repair_llm(messages):
+        repair_prompts.append(list(messages))
+        return _json.dumps({"args": {"fixed": True}})
+
+    from agent.task_graph import TaskGraph, Task
+    g = TaskGraph()
+    g.add(Task(id="t1", name="flaky_step", stage="asset",
+               server="repair_mcp", tool="flaky", args={}))
+    agent = agent_loop.AutonomousAgent(reg, llm=repair_llm)
+    report = agent.run("repair me", graph=g)
+    _expect(report.status == STATUS_COMPLETED,
+            "LLM repair recovers the task, got %r" % report.status)
+    _expect(len(repair_prompts) == 1,
+            "LLM repair bounded to one attempt, ran %d" % len(repair_prompts))
+    _expect("tool-repair agent" in repair_prompts[0][0]["content"],
+            "repair prompt is a tool-repair prompt")
+    # llm_diagnosed flag recorded on the task
+    _expect(g.get("t1").llm_diagnosed is True, "llm_diagnosed flag recorded")
+    _expect(g.get("t1").args.get("fixed") is True, "corrected args applied")
+
+
+def test_reconcile_on_resume():
+    """Resume reconciles the checkpoint against live reality."""
+    import os, tempfile
+    from agent.project_state import ProjectState
+    from agent.checkpoints import save_checkpoint, reconcile_on_resume
+
+    reg = _registry()
+    from agent.task_graph import TaskGraph, Task, PENDING, FAILED, SUCCESS
+    g = TaskGraph()
+    g.add(Task(id="done", name="done_step", stage="asset",
+               server="asset_mcp", tool="create_asset", args={},
+               verify_tool="verify_asset"))
+    g.add(Task(id="todo", name="todo_step", stage="asset",
+               server="asset_mcp", tool="ghost_tool", args={}))
+    g.mark_success("done", {"id": "asset_1"})
+
+    state = ProjectState(goal="resume me")
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "ckpt.json")
+        save_checkpoint(path, "resume me", state, g)
+
+        # 1. Availability-only reconcile: ghost_tool vanished -> FAILED.
+        out = reconcile_on_resume(path, reg)
+        _expect(out is not None, "checkpoint loads")
+        _, s2, g2, rep = out
+        _expect("ghost_tool" in rep["missing_tools"], "vanished tool reported")
+        _expect(g2.get("todo").status == FAILED,
+                "pending task with vanished tool marked FAILED")
+        _expect(g2.get("done").status == SUCCESS,
+                "completed task untouched without call_tool")
+
+        # 2. Reconcile with re-verification against a registry whose
+        #    verifier now errors (artifact really gone).
+        class BrokenVerifyMock(mock_mcp.MockMCPServer):
+            def call(self, tool, args):
+                if tool == "verify_asset":
+                    return {"error": "artifact no longer exists"}
+                return super().call(tool, args)
+        broken_reg = CapabilityRegistry([mock_mcp.server_view(
+            "asset_mcp", BrokenVerifyMock("asset_mcp", [
+                {"name": "create_asset", "description": "x", "inputSchema": {}},
+                {"name": "import_asset", "description": "x", "inputSchema": {}},
+                {"name": "verify_asset", "description": "x", "inputSchema": {}},
+            ]))])
+        _, _, g3, rep3 = reconcile_on_resume(path, broken_reg)
+        _expect(rep3["reverified"] == 1, "completed task reverified")
+        _expect(g3.get("done").status == PENDING,
+                "failed re-verify demotes completed task to pending/redo")
+
+
 if __name__ == "__main__":
     test_model_planner_basic()
     test_model_planner_drops_hallucinated()
     test_model_planner_fallback_on_garbage()
     test_judges_rule()
     test_judges_with_llm()
+    test_validate_plan_deep()
+    test_agent_uses_llm_planner_canonically()
+    test_llm_repair_used_when_regex_fails()
+    test_reconcile_on_resume()
     print("\nAll model-planner + judge tests passed.")

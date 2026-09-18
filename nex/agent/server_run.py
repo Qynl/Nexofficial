@@ -48,7 +48,8 @@ def run_agent_goal(goal: str,
                    llm_call: Optional[Callable] = None,
                    llm_reachable: bool = False,
                    mode: str = "build",
-                   judge_iterations: int = 1) -> Any:
+                   judge_iterations: int = 1,
+                   graph: Optional[Any] = None) -> Any:
     """Plan (and optionally build + judge) a goal against the live registry.
 
     `mode`:
@@ -72,7 +73,13 @@ def run_agent_goal(goal: str,
     reg = _registry()
     pol = current_policy()
 
-    graph, plan = _build_plan(goal, reg, llm_call, llm_reachable)
+    if graph is not None:
+        # Pre-built graph (e.g. the /api/plan/<id>/autonomous bridge): an MC
+        # plan already validated against the live registry. It IS the
+        # TaskGraph; skip re-planning. No synthetic model plan is attached.
+        plan = None
+    else:
+        graph, plan = _build_plan(goal, reg, llm_call, llm_reachable)
 
     if bus is not None:
         steps = (plan or {}).get("steps", []) if isinstance(plan, dict) else []
@@ -97,7 +104,10 @@ def run_agent_goal(goal: str,
         }
 
     # ---- BUILD ----
-    agent = AutonomousAgent(reg, bus=bus, policy=pol)
+    # llm is attached so planning goes through the canonical model-driven
+    # path (skeleton fallback) and failed tool calls get genuine LLM repair.
+    # A pre-built graph (MC plan bridge) is still honored and runs as-is.
+    agent = AutonomousAgent(reg, bus=bus, policy=pol, llm=llm_call)
     report = agent.run(goal, graph=graph)
 
     verdict = None

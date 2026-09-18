@@ -39,6 +39,7 @@ class Task:
     error: Optional[str] = None
     error_signature: Optional[str] = None
     tried_alts: List[str] = field(default_factory=list)
+    llm_diagnosed: bool = False   # bounded: LLM repair runs at most once/task
     notes: str = ""
 
 
@@ -131,7 +132,8 @@ class TaskGraph:
                     "verify_args": t.verify_args, "status": t.status,
                     "attempts": t.attempts, "max_attempts": t.max_attempts,
                     "result": t.result, "error": t.error,
-                    "error_signature": t.error_signature, "notes": t.notes,
+                    "error_signature": t.error_signature,
+                    "llm_diagnosed": t.llm_diagnosed, "notes": t.notes,
                 }
                 for t in self._tasks.values()
             ]
@@ -152,6 +154,7 @@ class TaskGraph:
                 max_attempts=td.get("max_attempts", 3),
                 result=td.get("result"), error=td.get("error"),
                 error_signature=td.get("error_signature"),
+                llm_diagnosed=bool(td.get("llm_diagnosed", False)),
                 notes=td.get("notes", ""),
             ))
         return g

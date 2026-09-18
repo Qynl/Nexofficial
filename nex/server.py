@@ -1429,6 +1429,86 @@ class NexHandler(BaseHTTPRequestHandler):
             self._send_json(200, view)
             return
 
+        if action == "autonomous":
+            # THE BRIDGE: run a confirmed MC plan through the ONE canonical
+            # execution pipeline (validate against the live registry ->
+            # TaskGraph -> AutonomousAgent: policy gate, verification,
+            # multi-pass recovery, checkpoints). This is not the sequential
+            # step executor; tool success here is verified, not assumed.
+            view = _mc._public_view(plan)
+            plan_body = plan["plan"]  # the submitted plan document itself
+            if view["cancelled"]:
+                self._send_json(409, {"ok": False,
+                                      "error": "plan was cancelled"}); return
+            if not view["confirmed"]:
+                self._send_json(409, {
+                    "ok": False,
+                    "error": "plan has destructive steps and must be "
+                             "confirmed first (POST /api/plan/%s/confirm)"
+                             % pid}); return
+
+            from agent.model_planner import (validate_plan_deep,
+                                             plan_to_graph)
+            from agent.server_run import _registry
+            registry = _registry()
+            errors, warnings = validate_plan_deep(plan_body, registry)
+            if errors:
+                self._send_json(422, {
+                    "ok": False,
+                    "error": "plan failed live-registry validation",
+                    "validation_errors": errors,
+                    "validation_warnings": warnings,
+                    "plan": view}); return
+            graph = plan_to_graph(plan_body, registry)
+            if not graph.all():
+                self._send_json(422, {
+                    "ok": False,
+                    "error": "no executable steps after registry validation",
+                    "validation_warnings": warnings,
+                    "plan": view}); return
+
+            def _runner() -> None:
+                try:
+                    from agent.server_run import run_agent_goal
+                    result = run_agent_goal(
+                        plan_body.get("title") or "MC plan %s" % pid,
+                        bus=BUS,
+                        llm_call=model_chat,
+                        llm_reachable=model_reachable(),
+                        mode="build",
+                        graph=graph,
+                    )
+                    result = dict(result) if isinstance(result, dict) else {}
+                    result["bridged_from_plan"] = pid
+                    result["validation_warnings"] = warnings
+                    # The TaskGraph path verifies results; reflect that
+                    # honestly in the MC plan record instead of the
+                    # sequential executor's unverified "completed".
+                    try:
+                        rec = _mc.get_plan(pid)
+                        if rec is not None:
+                            rec["verified"] = bool(
+                                (result.get("report") or {}).get("success"))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    BUS.publish({"type": "agent.report", "result": result,
+                                 "ts": time.time()})
+                except Exception as exc:  # noqa: BLE001
+                    BUS.publish({"type": "agent.error",
+                                 "source": "plan_bridge", "plan": pid,
+                                 "error": repr(exc), "ts": time.time()})
+
+            threading.Thread(target=_runner, daemon=True).start()
+            self._send_json(202, {
+                "ok": True,
+                "bridged": pid,
+                "note": "plan handed to the autonomous agent pipeline; "
+                        "stream /api/events (SSE) for agent.plan_ready / "
+                        "agent.report",
+                "validation_warnings": warnings,
+            })
+            return
+
         if action == "execute":
             # Body may carry {"step": <int>} to run a single step,
             # or {"stop_on_error": false} to keep going past failures.

@@ -164,3 +164,14 @@ def capability_for_tool(tool: Dict[str, Any]) -> ToolCapability:
         annotations=tool.get("annotations"),
         schema=tool.get("inputSchema"),
     )
+
+
+def category_hints() -> Dict[str, tuple]:
+    """Public read-only view of the heuristic keyword sets.
+
+    This is the single source of truth for name-based classification.
+    Other modules (e.g. mc.py's 3-bucket plan pre-tagger) must DERIVE
+    their hints from here rather than keeping their own copy, so there
+    is exactly one canonical capability/policy vocabulary.
+    """
+    return {k: tuple(v) for k, v in _CAT_HINTS.items()}

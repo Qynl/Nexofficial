@@ -1,6 +1,11 @@
-"""Capability-driven planner (STAGE 6 / STAGE 10 / STAGE 12).
+"""Deterministic skeleton planner — FALLBACK ONLY.
 
-Builds a dependency-aware task graph from the *discovered* capabilities.
+The CANONICAL planner is the model-driven one (agent.model_planner): when
+an LLM is attached, AutonomousAgent._make_plan() asks the model for a
+goal-specific plan and validates it against the live registry. This module
+is the deterministic fallback used when no model is available or the model
+returns nothing usable — so the agent still produces a dependency-aware
+graph from the *discovered* capabilities.
 It does NOT hardcode a game recipe — it reacts to whatever tools the live
 servers expose. Each stage is gated on capability discovery:
 

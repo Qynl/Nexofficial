@@ -770,6 +770,12 @@
     // element so we don't need a stylesheet change. Reusing the
     // bubble keeps the visual style consistent with the rest of
     // the chat surface.
+    //
+    // UNIFIED PIPELINE: "Approve + run" hands the plan to the ONE
+    // canonical execution path (/autonomous → live-registry validation →
+    // TaskGraph → AutonomousAgent with policy/verification/recovery).
+    // The old sequential executor is kept as an explicit "step mode"
+    // fallback for manual step-through.
     if (!plan || !plan.id) return;
     const confirmed = !plan.needs_confirmation;
     const stepCount = plan.step_count || 0;
@@ -786,23 +792,61 @@
     const bubble = document.getElementById('bubble');
     if (!bubble) return;
     bubble.textContent = "";
+
+    function showValidationErrors(res) {
+      bubble.textContent = "";
+      const errs = (res && res.validation_errors) || [res && res.error || 'run failed'];
+      const head = document.createElement('div');
+      head.textContent = 'Plan rejected before execution:';
+      bubble.appendChild(head);
+      for (const e of errs.slice(0, 4)) {
+        const d = document.createElement('div');
+        d.textContent = '· ' + e;
+        bubble.appendChild(d);
+      }
+      setTimeout(() => { bubble.hidden = true; }, 8000);
+    }
+
+    async function runAutonomous(afterConfirm) {
+      if (afterConfirm) {
+        await fetch('/api/plan/' + plan.id + '/confirm', { method: 'POST' });
+      }
+      const r = await fetch('/api/plan/' + plan.id + '/autonomous',
+                            { method: 'POST' });
+      const res = await r.json().catch(() => ({}));
+      if (r.status === 202) {
+        bubble.textContent = 'Plan handed to the autonomous pipeline '
+          + '(validated → task graph → verify). Watch the agent panel.';
+        setTimeout(() => { bubble.hidden = true; }, 4000);
+      } else {
+        showValidationErrors(res);
+      }
+    }
+
+    async function runStepMode(afterConfirm) {
+      if (afterConfirm) {
+        await fetch('/api/plan/' + plan.id + '/confirm', { method: 'POST' });
+      }
+      await fetch('/api/plan/' + plan.id + '/execute',
+                  { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stop_on_error: false }) });
+      bubble.hidden = true;
+    }
+
+    const btnRow = document.createElement('div');
+    btnRow.style.marginTop = '6px';
     const line = document.createElement('div');
     line.textContent = summary;
     bubble.appendChild(line);
     if (!confirmed) {
-      const btnRow = document.createElement('div');
-      btnRow.style.marginTop = '6px';
       const approve = document.createElement('button');
       approve.textContent = 'Approve + run';
-      approve.onclick = async () => {
-        await fetch('/api/plan/' + plan.id + '/confirm',
-                    { method: 'POST' });
-        await fetch('/api/plan/' + plan.id + '/execute',
-                    { method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ stop_on_error: false }) });
-        bubble.hidden = true;
-      };
+      approve.onclick = () => runAutonomous(true);
+      const step = document.createElement('button');
+      step.textContent = 'Step mode';
+      step.style.marginLeft = '6px';
+      step.onclick = () => runStepMode(true);
       const cancel = document.createElement('button');
       cancel.textContent = 'Cancel';
       cancel.style.marginLeft = '6px';
@@ -812,17 +856,19 @@
         bubble.hidden = true;
       };
       btnRow.appendChild(approve);
+      btnRow.appendChild(step);
       btnRow.appendChild(cancel);
       bubble.appendChild(btnRow);
     } else {
       // All-safe plan — kick off immediately so the user doesn't have
       // to click. The model has been told not to include destructive
       // steps in a no-confirm plan, so this is safe.
-      fetch('/api/plan/' + plan.id + '/execute',
-            { method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ stop_on_error: false }) });
-      setTimeout(() => { bubble.hidden = true; }, 4000);
+      runAutonomous(false);
+      const step = document.createElement('button');
+      step.textContent = 'Step mode instead';
+      step.onclick = () => runStepMode(false);
+      btnRow.appendChild(step);
+      bubble.appendChild(btnRow);
     }
     bubble.hidden = false;
   }

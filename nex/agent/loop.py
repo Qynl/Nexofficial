@@ -1,10 +1,14 @@
 """Autonomous agent loop (STAGE 6 / STAGE 7 / STAGE 9 / STAGE 27).
 
 Implements the observe -> plan -> act -> verify -> reflect -> repair ->
-continue cycle against a live CapabilityRegistry. It is generic and does NOT
-hardcode any game recipe: it uses the planner to build a dependency graph
-from discovered capabilities, then executes it with retry/repair and
-dependency-aware failure propagation.
+continue cycle against a live CapabilityRegistry.
+
+PLANNING (unified): when an `llm` is attached, the GOAL-SPECIFIC plan comes
+from the model (agent.model_planner — LLM plan JSON validated against the
+LIVE registry and converted to a TaskGraph). The deterministic skeleton in
+agent/planner.py is only a FALLBACK when no model is available or the model
+returns nothing usable. There is exactly one execution pipeline: this loop
+(policy -> registry -> verification -> recovery -> checkpoints).
 
 When a task fails it tries, in order:
   A. retry unchanged          (transient error, maybe fixed)
@@ -90,6 +94,14 @@ def _diagnose(error: str, task: Any):
     return None, None
 
 
+def _safe_json(obj: Any) -> str:
+    try:
+        import json as _json
+        return _json.dumps(obj, ensure_ascii=False, default=str)[:400]
+    except Exception:  # noqa: BLE001
+        return str(obj)[:400]
+
+
 def _resolve_args(task: Any, graph: TaskGraph) -> Dict[str, Any]:
     args = dict(task.args or {})
     for dep_id in task.deps:
@@ -111,7 +123,8 @@ class AutonomousAgent:
                  max_iterations: int = 400,
                  backoff_base: float = 0.1,
                  max_backoff: float = 2.0,
-                 recovery_passes: int = 1) -> None:
+                 recovery_passes: int = 1,
+                 llm: Optional[Callable] = None) -> None:
         self.registry = registry
         self.planner = planner or default_planner
         self.policy = policy or current_policy()
@@ -126,6 +139,10 @@ class AutonomousAgent:
         # before declaring the run blocked. This is what keeps the agent from
         # "always stopping" at the first failure.
         self.recovery_passes = max(0, recovery_passes)
+        # Canonical model hook: when set, goals are planned by the LLM
+        # (goal-specific TaskGraph), with the skeleton as fallback.
+        self.llm = llm
+        self.last_plan = None
 
     # ----- event helper ---------------------------------------------------
     def _emit(self, agent_state=None, event_type=None, **payload) -> None:
@@ -138,15 +155,39 @@ class AutonomousAgent:
 
     # ----- main entry ------------------------------------------------------
     def run(self, goal: str, state: Optional[ProjectState] = None,
-            graph: Optional[TaskGraph] = None) -> CompletionReport:
+            graph: Optional[TaskGraph] = None,
+            resume_checkpoint: Optional[str] = None) -> CompletionReport:
         self._emit("OBSERVING", "agent.observe",
                    servers=[s.name for s in self.registry.servers])
         if state is None:
             state = ProjectState(goal=goal)
 
+        # --- Resume from a checkpoint (RECONCILE-ON-RESUME) -----------------
+        # A checkpoint is a claim; reality may have moved (servers down,
+        # tools gone, artifacts deleted). reconcile_on_resume re-discovers
+        # capabilities against the LIVE registry and demotes any completed
+        # task whose verifier now fails, so resume redoes real work instead
+        # of trusting stale state.
+        if resume_checkpoint and graph is None:
+            try:
+                from agent.checkpoints import reconcile_on_resume
+                recon = reconcile_on_resume(
+                    resume_checkpoint, self.registry, bus=self.bus)
+                if recon is not None:
+                    goal_c, state_c, graph_c, report_c = recon
+                    state = state_c
+                    state.goal = state.goal or goal_c
+                    graph = graph_c
+                    self._emit("OBSERVING", "agent.checkpoint_resumed",
+                               checkpoint=resume_checkpoint,
+                               reconciled=report_c)
+            except Exception as exc:  # noqa: BLE001
+                self._emit("WAITING", "agent.checkpoint_resume_failed",
+                           checkpoint=resume_checkpoint, error=repr(exc))
+
         self._emit("PLANNING", "agent.plan_started", goal=goal)
         if graph is None:
-            graph = self.planner(goal, self.registry)
+            graph = self._make_plan(goal, state)
         self._emit("PLANNING", "agent.plan_updated",
                    task_count=len(graph.all()),
                    stages=[t.stage for t in graph.all()])
@@ -239,6 +280,57 @@ class AutonomousAgent:
         return CompletionReport(status=status, goal=goal, completed=succeeded,
                                failed=failed, skipped=skipped, reasons=reasons,
                                missing=missing)
+
+    # ----- planning (canonical: LLM-driven, skeleton fallback) -----------
+    def _make_plan(self, goal: str, state: ProjectState) -> TaskGraph:
+        """ONE planning path: the model produces the goal-specific plan when
+        an llm is attached; the deterministic skeleton is the fallback."""
+        if self.llm is not None:
+            try:
+                from agent.model_planner import model_driven_planner
+                feedback = getattr(state, "plan_feedback", None)
+                g, plan = model_driven_planner(goal, self.registry, self.llm,
+                                               feedback=feedback)
+                if g is not None and g.all():
+                    self.last_plan = plan
+                    return g
+            except Exception:  # noqa: BLE001
+                pass
+        from agent.planner import plan as skeleton_plan
+        return skeleton_plan(goal, self.registry)
+
+    def _llm_diagnose(self, task: Any, err: str):
+        """Genuine LLM repair: capture the error + tool + args, ask the model
+        for corrected arguments, validate the reply is a dict of args.
+
+        Bounded: runs at most once per task (llm_diagnosed flag) so a broken
+        model can't loop us. Returns (new_args, note) or None; the regex
+        repair in _diagnose() remains the deterministic fallback.
+        """
+        if self.llm is None or getattr(task, "llm_diagnosed", False):
+            return None
+        task.llm_diagnosed = True
+        try:
+            reply = self.llm([
+                {"role": "system", "content": (
+                    "You are an MCP tool-repair agent. A tool call failed. "
+                    "Return ONLY a JSON object of CORRECTED arguments for the "
+                    "next retry, e.g. {\"args\": {...}}. No prose.")},
+                {"role": "user", "content": (
+                    "tool: %s\nserver: %s\ncurrent args: %s\nerror: %s"
+                    % (task.tool, task.server,
+                       _safe_json(task.args), err[:500]))},
+            ])
+            from agent.judges import _extract_json
+            obj = _extract_json(reply or "")
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(obj, dict):
+            return None
+        new_args = obj.get("args")
+        if isinstance(new_args, dict) and new_args and new_args != task.args:
+            return dict(new_args), "LLM-proposed corrected arguments"
+        return None
 
     def _revive(self, graph: TaskGraph) -> bool:
         """Prepare the graph for another recovery pass.
@@ -346,6 +438,12 @@ class AutonomousAgent:
 
                 # B) retry with corrected args (missing-parameter repair)
                 corrected, note = _diagnose(err, task)
+                if corrected is None:
+                    # B2) genuine LLM diagnosis (bounded once per task);
+                    # the regex repair above stays as the fast path.
+                    fixed = self._llm_diagnose(task, err)
+                    if fixed is not None:
+                        corrected, note = fixed
                 if corrected is not None:
                     task.args = corrected
                     args = _resolve_args(task, graph)

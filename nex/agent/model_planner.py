@@ -89,6 +89,58 @@ def validate_plan_tools(plan: Dict[str, Any], registry) -> Tuple[List[str], List
     return valid, missing
 
 
+def validate_plan_deep(plan: Dict[str, Any],
+                       registry) -> Tuple[List[str], List[str]]:
+    """Canonical live-registry validation for ANY plan (model-made or MC-made).
+
+    Checks, per step:
+      * the tool actually exists on a CONNECTED MCP server (registry lookup,
+        bare name or server.name),
+      * the capability is not policy-denied (mcp.policy.ALWAYS_DENIED),
+      * required args from the live inputSchema are present,
+      * no unknown top-level args (warn — schemas are sometimes loose).
+
+    Returns (errors, warnings). Empty errors == the plan is executable
+    against the current registry.
+    """
+    from mcp.policy import authorize
+
+    errors: List[str] = []
+    warnings: List[str] = []
+    for i, s in enumerate(plan.get("steps", [])):
+        tool = s.get("tool", "")
+        label = s.get("name") or tool or ("step_%d" % i)
+        tv = registry.by_name(tool)
+        if tv is None and "." in tool:
+            tv = registry.by_name(tool.split(".", 1)[-1])
+        if tv is None:
+            errors.append("step '%s': tool '%s' not found on any connected "
+                          "MCP server" % (label, tool))
+            continue
+        if not authorize(tv.server, tv.name, tv.capability).allowed:
+            errors.append("step '%s': tool '%s' is denied by policy"
+                          % (label, tv.name))
+            continue
+        schema = tv.schema if isinstance(tv.schema, dict) else {}
+        props = schema.get("properties", {}) or {}
+        required = schema.get("required", []) or []
+        args = s.get("args", {}) or {}
+        if not isinstance(args, dict):
+            errors.append("step '%s': args must be an object" % label)
+            continue
+        for req in required:
+            if req not in args:
+                errors.append("step '%s': missing required arg '%s' "
+                              "(required by live schema of '%s')"
+                              % (label, req, tv.name))
+        for key in args:
+            if props and key not in props:
+                warnings.append("step '%s': arg '%s' not in live schema of "
+                                "'%s' (server may ignore it)"
+                                % (label, key, tv.name))
+    return errors, warnings
+
+
 def plan_to_graph(plan: Dict[str, Any], registry) -> TaskGraph:
     """Convert a parsed mc-style plan into a validated TaskGraph.
 

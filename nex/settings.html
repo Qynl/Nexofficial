@@ -115,6 +115,23 @@
     }
     .toast.show { opacity: 1; }
     .toast.error { background: #c45a5a; color: #fff; }
+    #add-server-card input, #add-server-card select {
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 4px;
+      padding: 6px 8px;
+      font: inherit;
+      flex: 1;
+      min-width: 0;
+    }
+    #add-server-card input:focus, #add-server-card select:focus {
+      outline: none;
+      border-color: #4ec9b0;
+    }
+    #add-server-card select { flex: 0 0 auto; }
+    #add-feedback.error { color: #c45a5a; }
+    #add-feedback.ok { color: #4ec9b0; }
   </style>
 </head>
 <body>
@@ -129,6 +146,47 @@
 
   <div class="grid" id="grid">
     <div class="meta" id="loading">Loading tunnel catalog…</div>
+  </div>
+
+  <!-- Generic MCP connection manager: add ANY MCP server, HTTP or stdio.
+       This complements the curated catalog above — the catalog is guidance,
+       but any MCP server can be attached here and Nex discovers its real
+       capabilities live once connected. -->
+  <div class="card" id="add-server-card" style="max-width: 920px; margin-top: 24px;">
+    <div class="row">
+      <h2>+ Add MCP Server</h2>
+    </div>
+    <p class="meta" style="margin:0;">
+      Attach any Model Context Protocol server. Nex will probe it and
+      discover its tools live — nothing is hardcoded.
+    </p>
+    <div class="row">
+      <label class="meta" style="min-width:90px;" for="add-name">Name</label>
+      <input id="add-name" type="text" placeholder="my-editor" />
+    </div>
+    <div class="row">
+      <label class="meta" style="min-width:90px;" for="add-transport">Transport</label>
+      <select id="add-transport">
+        <option value="http">HTTP</option>
+        <option value="stdio">stdio</option>
+      </select>
+    </div>
+    <div class="row" id="row-url">
+      <label class="meta" style="min-width:90px;" for="add-url">Endpoint</label>
+      <input id="add-url" type="text" placeholder="http://localhost:3000/mcp" style="flex:1;" />
+    </div>
+    <div class="row" id="row-command" style="display:none;">
+      <label class="meta" style="min-width:90px;" for="add-command">Command</label>
+      <input id="add-command" type="text" placeholder="C:\...\mcp.bat or /usr/bin/nex-stdio" style="flex:1;" />
+    </div>
+    <div class="row" id="row-args" style="display:none;">
+      <label class="meta" style="min-width:90px;" for="add-args">Args</label>
+      <input id="add-args" type="text" placeholder='space-separated, e.g. --port 8787' style="flex:1;" />
+    </div>
+    <div class="actions">
+      <button id="add-submit" class="primary" data-action="add-server">Add server</button>
+      <span class="meta" id="add-feedback"></span>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -318,6 +376,91 @@
       btn.textContent = 'Probe';
     }
   }
+
+  /* ---- Generic MCP connection manager ------------------------------
+     Any MCP server can be attached at runtime: HTTP (url) or stdio
+     (command + args). POSTs to /api/tunnels, which rebuilds the
+     registry; the new server's real capabilities are discovered live. */
+  const addTransport = document.getElementById('add-transport');
+  const addFeedback = document.getElementById('add-feedback');
+
+  addTransport.addEventListener('change', () => {
+    const stdio = addTransport.value === 'stdio';
+    document.getElementById('row-url').style.display = stdio ? 'none' : '';
+    document.getElementById('row-command').style.display = stdio ? '' : 'none';
+    document.getElementById('row-args').style.display = stdio ? '' : 'none';
+  });
+
+  document.getElementById('add-submit').addEventListener('click', async () => {
+    const btn = document.getElementById('add-submit');
+    const name = document.getElementById('add-name').value.trim();
+    const transport = addTransport.value;
+    addFeedback.className = 'meta';
+    addFeedback.textContent = '';
+    if (!name) {
+      addFeedback.textContent = 'Name is required.';
+      addFeedback.classList.add('error');
+      return;
+    }
+    const entry = { name, label: name };
+    if (transport === 'stdio') {
+      const command = document.getElementById('add-command').value.trim();
+      if (!command) {
+        addFeedback.textContent = 'Command is required for stdio transport.';
+        addFeedback.classList.add('error');
+        return;
+      }
+      entry.transport = 'stdio';
+      entry.command = command;
+      const rawArgs = document.getElementById('add-args').value.trim();
+      // Shell-ish split honoring simple quotes; stdio args are a list.
+      const args = rawArgs.match(/(?:[^\s"']|"[^"]*"|'[^']*')+/g) || [];
+      entry.args = args.map(a => a.replace(/^["']|["']$/g, ''));
+    } else {
+      const url = document.getElementById('add-url').value.trim();
+      if (!url) {
+        addFeedback.textContent = 'Endpoint URL is required for HTTP transport.';
+        addFeedback.classList.add('error');
+        return;
+      }
+      entry.url = url;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Adding…';
+    try {
+      const r = await fetch('/api/tunnels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tunnels: [entry] }),
+      }).then(r => r.json());
+      if (r && (r.platforms || r.tunnels)) {
+        addFeedback.textContent = 'Added "' + name + '" — probing…';
+        addFeedback.classList.add('ok');
+        showToast(name + ' added to MCP tunnels', false);
+        document.getElementById('add-name').value = '';
+        document.getElementById('add-url').value = '';
+        document.getElementById('add-command').value = '';
+        document.getElementById('add-args').value = '';
+        refresh();
+        // Probe the new server so its status dot resolves quickly
+        // (inline: doProbe would rewrite the add-button's label).
+        fetch('/api/tunnels/probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platforms: [name] }),
+        }).then(() => refresh()).catch(() => {});
+        btn.disabled = false;
+        btn.textContent = 'Add server';
+      } else {
+        throw new Error(r && r.error ? r.error : 'unexpected response');
+      }
+    } catch (e) {
+      addFeedback.textContent = 'Failed to add: ' + e.message;
+      addFeedback.classList.add('error');
+      btn.disabled = false;
+      btn.textContent = 'Add server';
+    }
+  });
 
   refresh();
   // Auto-refresh every 10s so newly-connected tunnels show up.

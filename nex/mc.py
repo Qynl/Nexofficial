@@ -22,9 +22,13 @@ execute layer that:
   1. Teaches the model the *shape* of work via the system prompt
      (compose primitives, not look up recipes).
   2. Accepts multi-step plans from the model as JSON.
-  3. Validates every step against the live tool registry (the model
-     can't reference a tool that doesn't exist; it can't pass
-     arguments that don't match the schema).
+  3. Validates the plan's SHAPE (title/steps/arg types). Live-registry
+     validation — does the tool actually exist on a connected MCP
+     server, is the capability permitted, do args match the live
+     inputSchema — happens in the canonical agent path
+     (agent.model_planner.validate_plan_tools + AutonomousAgent's
+     policy gate + verification), which /api/plan/<id>/autonomous
+     uses to run any MC plan as a real TaskGraph.
   4. Tags each step `safe | reversible | destructive` based on the
      tool's policy.
   5. Stops and asks the user to confirm `destructive` steps.
@@ -82,6 +86,8 @@ import re
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from mcp.capability import DESTRUCTIVE, READ
 
 
 # ---------------------------------------------------------------------------
@@ -249,15 +255,26 @@ AAA_SYSTEM_PROMPT = (
 #    does, based on the tool's identity. This keeps the protocol simple
 #    and prevents the model from accidentally hiding a destructive step
 #    inside a normal-looking one.
+#
+#    SINGLE SOURCE OF TRUTH: the base keyword vocabulary is DERIVED from
+#    mcp.capability.category_hints() — the canonical capability model.
+#    mc.py only adds the plan-confirmation superset (create/spawn/etc.
+#    are tagged destructive here purely so the user confirms plan steps
+#    that mutate an editor). The canonical policy/authorization layer
+#    remains mcp/policy.py + agent verification; this 3-bucket tag only
+#    drives the plan UX.
 # ---------------------------------------------------------------------------
 
-# Keywords in tool name OR argument key names that mark the call as
-# destructive. Conservative on purpose: false negatives are fine (the
-# user can still approve), false positives are friction.
-_DESTRUCTIVE_HINTS = (
-    "delete", "remove", "destroy", "wipe", "purge", "drop",
+from mcp.capability import category_hints as _category_hints
+
+_H = _category_hints()
+
+# Plan-confirmation superset: mutating verbs that the canonical capability
+# model calls CREATE/MODIFY/BUILD but which the plan UX should surface for
+# user confirmation before they run against a live editor.
+_PLAN_CONFIRM_EXTRAS = (
     "write_file", "append_to_file", "commit", "push", "publish", "deploy",
-    "save", "build", "compile", "package",
+    "save", "build", "compile", "package", "bake",
     "spawn", "create_actor", "add_asset", "create",
     "register", "install", "configure", "set_", "update_",
     "send", "post", "upload",
@@ -265,14 +282,16 @@ _DESTRUCTIVE_HINTS = (
     "write", "append", "overwrite",
     "move", "rename", "copy",
     "import", "export",
-    "build", "compile", "package", "bake",
     "tool_call", "tools/call",
 )
-_REVERSIBLE_HINTS = (
-    "list", "search", "find", "fetch", "get", "read",
-    "ping", "echo", "status", "describe",
-    "speak", "log_event", "recent_events", "who_am_i",
+# Plan-UX read-only extras (canonical READ hints + Nex introspection tools).
+_PLAN_SAFE_EXTRAS = (
+    "who_am_i", "list_platforms", "ping", "echo",
+    "speak", "log_event", "recent_events",
 )
+
+_DESTRUCTIVE_HINTS = tuple(_H[DESTRUCTIVE]) + _PLAN_CONFIRM_EXTRAS
+_REVERSIBLE_HINTS = tuple(_H[READ]) + _PLAN_SAFE_EXTRAS
 
 
 def classify_step(tool_name: str, args: Optional[Dict[str, Any]] = None
@@ -432,6 +451,7 @@ def _public_view(p: Dict[str, Any]) -> Dict[str, Any]:
         "confirmed": p["confirmed"],
         "completed": p["completed"],
         "cancelled": p["cancelled"],
+        "verified": p.get("verified", False),
     }
 
 
@@ -477,9 +497,15 @@ def execute_plan_step(pid: str, step_index: int,
     }
     p["results"].append(record)
     # Mark plan complete if this was the last step.
+    # HONESTY: tool success != task success. A completed plan is marked
+    # `verified: False` unless a real verifier ran (the canonical verified
+    # execution path is the AutonomousAgent / agent.verification, reached
+    # via the /api/plan/<id>/autonomous bridge). This sequential executor
+    # never claims verification it didn't perform.
     if step_index == len(p["plan"]["steps"]) - 1:
         p["completed"] = True
         p["status"] = "completed"
+        p["verified"] = False
     return {"ok": True, "step": record, "plan": _public_view(p)}
 
 
