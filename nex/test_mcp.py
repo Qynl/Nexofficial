@@ -191,6 +191,34 @@ _expect(status == 200 and body["result"].get("isError") is not True,
         "bare am_next executes via the boundary router")
 
 
+# ---------- 4. resources: protocol metadata ONLY -----------------------------
+
+status, body = _rpc("resources/list")
+_expect(status == 200, "resources/list 200")
+uris = [r["uri"] for r in body["result"]["resources"]]
+_expect("nex://about" in uris, "resources include nex://about (metadata)")
+_expect("nex://tunnels" in uris,
+        "resources include nex://tunnels (MCP connection metadata)")
+for gone in ("nex://workspace/tree", "nex://log/recent", "nex://log/full",
+             "nex://state"):
+    _expect(gone not in uris,
+            "resources exclude %s (host access is not a capability)" % gone)
+
+status, body = _rpc("resources/read", {"uri": "nex://about"})
+blob = json.dumps(body)
+_expect("capability_boundary" in blob,
+        "nex://about states the capability boundary")
+
+# The removed host resources must be gone, not merely unlisted.
+for gone in ("nex://workspace/tree", "nex://log/recent", "nex://log/full",
+             "nex://state"):
+    status, body = _rpc("resources/read", {"uri": gone})
+    _expect("error" in json.dumps(body.get("result", {})).lower()
+            or "not a" in json.dumps(body.get("result", {})).lower()
+            or "error" in json.dumps(body).lower(),
+            "resources/read %s refused" % gone)
+
+
 # ---------- done ----------------------------------------------------------
 
 proc.terminate()

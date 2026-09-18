@@ -1805,9 +1805,9 @@ class NexHandler(BaseHTTPRequestHandler):
           * `notifications/cancelled`, `notifications/progress`,
             `notifications/initialized` — accepted silently.
           * `resources/list`, `resources/read`, `prompts/list`,
-            `prompts/get` — return Nex-side resources (activity log,
-            tunnel status) and prompts (per-platform cookbook
-            snippets).
+            `prompts/get` — protocol metadata ONLY (what Nex is, which
+            MCP servers are connected, curated per-platform tool
+            guides). No filesystem, log, or host-state resources.
         Server->client notifications stream out on `/mcp/sse`.
         """
         body = self._read_json_body()
@@ -1965,34 +1965,34 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def _mcp_tools_call(self, name: str,
                         arguments: Dict[str, Any]) -> Dict[str, Any]:
-        # ---- MCP-only enforcement (architecture boundary) -------------------
-        # Active only when NEX_MCP_ONLY=1. Any external action that is NOT a
-        # connected MCP tool (or an explicitly allowed internal tool) is
-        # rejected here — this is a real gate, not a prompt instruction.
-        if os.environ.get("NEX_MCP_ONLY") == "1":
-            from mcp.policy import authorize, current_policy
-            from mcp.capability import ToolCapability
-            server = name.split(".", 1)[0] if "." in name else None
-            cap = None
-            for t in self._mcp_tools_list().get("tools", []):
-                if t.get("name") == name:
-                    cd = t.get("_capability") or {}
-                    cap = ToolCapability(
-                        category=cd.get("category", "unknown"),
-                        read_only=cd.get("read_only", False),
-                        reversible=cd.get("reversible", False),
-                        destructive=cd.get("destructive", False),
-                        network=cd.get("network", False),
-                        requires_confirmation=cd.get("requires_confirmation", True),
-                        source=cd.get("source", "conservative"),
-                    )
-                    break
-            decision = authorize(server, name, cap, current_policy())
-            if not decision.allowed:
-                return {"content": [{"type": "text",
-                                     "text": "blocked by MCP-only policy: "
-                                     + decision.reason}],
-                        "isError": True}
+        # ---- THE BOUNDARY (architecture invariant) --------------------------
+        # ALWAYS enforced — there is no environment switch that turns the
+        # boundary off. Any action that is not a connected MCP tool or an
+        # Amazon Music control is rejected here; this is a real gate,
+        # not a prompt instruction.
+        from mcp.policy import authorize, current_policy
+        from mcp.capability import ToolCapability
+        server = name.split(".", 1)[0] if "." in name else None
+        cap = None
+        for t in self._mcp_tools_list().get("tools", []):
+            if t.get("name") == name:
+                cd = t.get("_capability") or {}
+                cap = ToolCapability(
+                    category=cd.get("category", "unknown"),
+                    read_only=cd.get("read_only", False),
+                    reversible=cd.get("reversible", False),
+                    destructive=cd.get("destructive", False),
+                    network=cd.get("network", False),
+                    requires_confirmation=cd.get("requires_confirmation", True),
+                    source=cd.get("source", "conservative"),
+                )
+                break
+        decision = authorize(server, name, cap, current_policy())
+        if not decision.allowed:
+            return {"content": [{"type": "text",
+                                 "text": "blocked by the capability boundary: "
+                                 + decision.reason}],
+                    "isError": True}
         # Local-prefix tools below are handled without the registry.
         if name in ("who_am_i", "list_platforms",
                     "tunnel_status", "tunnel_probe"):
@@ -2031,27 +2031,20 @@ class NexHandler(BaseHTTPRequestHandler):
     # ------------ MCP resources / prompts ----------------------------------
 
     def _mcp_resources_list(self) -> Dict[str, Any]:
+        # THE BOUNDARY, resources edition: only PROTOCOL METADATA about
+        # Nex itself. No filesystem, log, workspace, or host-state
+        # resources — the AI has no route to request those.
         from tunnels import get_tunnels
         out = [
-            {"uri": "nex://log/recent",
-             "name": "Recent Nex activity",
-             "description": "Tail of the .nex_log.jsonl workspace log.",
-             "mimeType": "application/json"},
-            {"uri": "nex://log/full",
-             "name": "Full Nex activity",
-             "description": "The full .nex_log.jsonl workspace log.",
-             "mimeType": "application/json"},
-            {"uri": "nex://workspace/tree",
-             "name": "Workspace tree",
-             "description": "Tree of files in NEX_TOOLS_ROOT.",
+            {"uri": "nex://about",
+             "name": "About Nex",
+             "description": "Protocol metadata: what Nex is and the hard "
+                            "capability boundary it enforces.",
              "mimeType": "application/json"},
             {"uri": "nex://tunnels",
-             "name": "Tunnel status",
-             "description": "Health of every configured MCP tunnel.",
-             "mimeType": "application/json"},
-            {"uri": "nex://state",
-             "name": "Nex frontend state",
-             "description": "Current Nex state + active behavior.",
+             "name": "Connected MCP servers",
+             "description": "Health of every explicitly connected MCP "
+                            "server.",
              "mimeType": "application/json"},
         ]
         # Curated, engine-specific tool guides — the MCP-only explanation
@@ -2087,23 +2080,32 @@ class NexHandler(BaseHTTPRequestHandler):
         return {"resources": out}
 
     def _mcp_resources_read(self, uri: str) -> Dict[str, Any]:
+        # Same boundary as tools: only protocol metadata is readable.
+        # Filesystem/log/state reads are infrastructure, not resources.
         from tunnels import get_tunnels
-        if uri == "nex://log/recent":
-            from tools import tool_recent_events  # type: ignore
-            payload = tool_recent_events(limit=30)
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
-        elif uri == "nex://log/full":
-            text = _read_log_file(tail_bytes=200_000)
-        elif uri == "nex://workspace/tree":
-            from tools import tool_list_files  # type: ignore
-            payload = tool_list_files("")
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if uri == "nex://about":
+            try:
+                tunnels = [s.get("name") for s in
+                           get_tunnels().list_upstreams()]
+            except Exception:  # noqa: BLE001
+                tunnels = []
+            text = json.dumps({
+                "server": "nex",
+                "kind": "mcp-aggregator",
+                "capability_boundary": (
+                    "Nex acts ONLY through explicitly connected MCP "
+                    "servers and the Amazon Music connector. Filesystem, "
+                    "shell, host-state, and log access are not AI "
+                    "capabilities and are not exposed as resources."),
+                "connected_mcp_servers": tunnels,
+                "resource_kinds": [
+                    "nex://about (this document)",
+                    "nex://tunnels (MCP connection metadata)",
+                    "tunnel://<name>/info (per-server metadata)",
+                    "mcp://<platform>/guide (curated tool guides)"],
+            }, ensure_ascii=False, indent=2)
         elif uri == "nex://tunnels":
             payload = get_tunnels().summary()
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
-        elif uri == "nex://state":
-            payload = {"state": _LAST_NEX_STATE or {"state": "IDLE"},
-                       "time": time.time()}
             text = json.dumps(payload, ensure_ascii=False, indent=2)
         elif uri.endswith("/guide") and uri.startswith("mcp://"):
             # Curated engine tool guide (mcp://<platform>/guide).
@@ -2123,7 +2125,12 @@ class NexHandler(BaseHTTPRequestHandler):
             else:
                 text = json.dumps({"error": "unknown tunnel", "uri": uri})
         else:
-            text = json.dumps({"error": "unknown resource", "uri": uri})
+            text = json.dumps({
+                "error": "unknown resource",
+                "uri": uri,
+                "note": ("Nex exposes only protocol metadata over MCP. "
+                         "Filesystem, log, workspace, and host-state "
+                         "reads are not AI capabilities.")})
         mime = ("text/markdown" if uri.endswith("/guide")
                 else "application/json")
         return {"contents": [{"uri": uri, "mimeType": mime,
@@ -2712,6 +2719,12 @@ def configure_for_stdio() -> None:
         emotion_set=EMOTION_STATES,
     )
     try:
+        # Amazon Music connector -> UI renderer events (play/pause/volume).
+        import music_amazon as _music
+        _music.set_notifier(BUS.publish)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from tunnels import get_tunnels
         from tools import tool_definitions, call_tool  # type: ignore
         reg = get_tunnels()
@@ -2849,6 +2862,13 @@ def main() -> None:
               % (len(_TOOL_LIST), os.environ.get("NEX_TOOLS_ROOT", "~")))
     except Exception as exc:  # noqa: BLE001
         print("Tools: NOT configured (%s)" % exc)
+
+    try:
+        # Amazon Music connector -> UI renderer events (play/pause/volume).
+        import music_amazon as _music
+        _music.set_notifier(BUS.publish)
+    except Exception:  # noqa: BLE001
+        pass
 
     # Start the autonomous observer in a background thread. It watches
     # the Nex activity log and emits speak events when there's something

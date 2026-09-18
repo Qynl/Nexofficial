@@ -652,6 +652,58 @@
   }
 
   // ---- toasts -----------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Amazon Music renderer. The connector (music_amazon.py, official
+  // Web API backend) owns auth, search, queue sessions and the
+  // mandatory event reporting; this is only the speaker: it renders
+  // the playable the connector hands over, or says honestly when it
+  // cannot (DRM streams need a Widevine-capable viewer).
+  // ------------------------------------------------------------------
+  var amAudio = null;
+  function handleAmazonMusic(evt) {
+    var action = evt.action || '';
+    if (action === 'volume') {
+      var vol = (typeof evt.volume === 'number' ? evt.volume : 70) / 100;
+      if (amAudio) amAudio.volume = vol;
+      showToast('Amazon Music volume: ' + evt.volume + '%', 'ok');
+      return;
+    }
+    if (action === 'pause') {
+      if (amAudio) amAudio.pause();
+      showToast('Amazon Music: paused'
+        + (evt.track && evt.track.title ? ' — ' + evt.track.title : ''), 'ok');
+      return;
+    }
+    if (action === 'play') {
+      var p = evt.playable || {};
+      var drm = (p.drm_type || '').toUpperCase();
+      if (!p.url || drm === 'WIDEVINE' || drm === 'FAIRPLAY'
+          || drm === 'PLAYREADY') {
+        showToast('Amazon Music: DRM-protected stream — this browser '
+          + 'cannot render it; use the Amazon Music app or web player',
+          'err');
+        return;
+      }
+      try {
+        if (!amAudio) { amAudio = new Audio(); }
+        amAudio.src = p.url;
+        amAudio.volume = (typeof evt.volume === 'number' ? evt.volume : 70) / 100;
+        var pr = amAudio.play();
+        if (pr && pr.catch) {
+          pr.catch(function () {
+            showToast('Amazon Music: browser blocked autoplay — interact '
+              + 'with the page once to allow audio', 'err');
+          });
+        }
+        showToast('Amazon Music: '
+          + (evt.track && evt.track.title ? evt.track.title
+                                          : (p.title || 'playing')), 'ok');
+      } catch (e) {
+        showToast('Amazon Music: could not start playback', 'err');
+      }
+    }
+  }
+
   function showToast(msg, kind) {
     let wrap = document.getElementById('toasts');
     if (!wrap) {
@@ -1167,6 +1219,10 @@
         const p = ensureAgentPanel();
         p.innerHTML += '<div class="agent-status err">agent error: '
           + escapeHtml(evt.error || 'unknown') + '</div>';
+      } else if (evt.type === 'amazon_music') {
+        // The Amazon Music connector (official Web API backend) hands
+        // us the playable; this is only the speaker.
+        handleAmazonMusic(evt);
       } else if (evt.type === 'hello') {
         // no-op; backend announces its config here.
       }

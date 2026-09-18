@@ -80,7 +80,7 @@ d2e = policy_mod.authorize(None, "am_play", cap.classify_capability("am_play"))
 _expect(d2e.allowed is True, "boundary: am_play allowed (explicit connector)")
 
 # MCP-only blocks shell, always.
-p_mcp = Policy(mcp_only=True)
+p_mcp = Policy()  # MCP_ONLY is now a module constant, always on
 d3 = policy_mod.authorize(None, "run_command", cap.classify_capability("run_command"))
 _expect(d3.allowed is False, "MCP-only blocks run_command (shell)")
 
@@ -147,6 +147,20 @@ _expect([v.name for v in reg_m.all_tools()]
         "music: agent registry sees exactly the 7 controls")
 _expect(reg_m.by_name("write_file") is None,
         "music: agent registry has NO filesystem tools")
+
+
+# --------------------------------------------------------------------------
+# The boundary is STRUCTURAL: a module constant, not a policy field, with
+# no runtime off-switch.
+# --------------------------------------------------------------------------
+_expect(getattr(policy_mod, "MCP_ONLY", False) is True,
+        "MCP_ONLY is a module constant, always True")
+_expect(not hasattr(policy_mod.Policy(), "mcp_only"),
+        "Policy has no mcp_only field (nothing can toggle the boundary)")
+_expect(not hasattr(policy_mod, "enable_mcp_only"),
+        "no enable_mcp_only() runtime off-switch")
+_expect(not hasattr(policy_mod.Policy, "with_mcp_only"),
+        "no Policy.with_mcp_only() off-switch")
 
 
 print("\nAll capability/policy tests passed.")

@@ -53,22 +53,23 @@ MUSIC_ALLOWED = frozenset({
 ALWAYS_DENIED = frozenset({"run_command"})
 
 
+# THE BOUNDARY IS NOT CONFIGURABLE. There is no flag, env var, or runtime
+# call that turns it off. (If a developer ever wants an unrestricted
+# playground, that must be a separate, explicitly non-autonomous dev
+# server — never a switch on the production agent.)
+MCP_ONLY = True
+
+
 @dataclass
 class Policy:
-    """Configurable security policy."""
-    mcp_only: bool = True   # THE BOUNDARY: MCP servers + Amazon Music only.
+    """Security policy. NOTE: the MCP-only capability boundary is a module
+    constant (MCP_ONLY) and deliberately NOT a policy field."""
     server_allowlist: Optional[Set[str]] = None   # None = all servers allowed
     tool_allowlist: Dict[str, Set[str]] = field(default_factory=dict)
     require_confirm_categories: Set[str] = field(
         default_factory=lambda: {DESTRUCTIVE, NETWORK})
     max_retries: int = 3
-    # When a tool is not in INTERNAL_ALLOWED and has no known server, it is
-    # "external unknown" — blocked in MCP-only, allowed otherwise.
     allow_external_unknown: bool = True
-
-    def with_mcp_only(self, enabled: bool = True) -> "Policy":
-        self.mcp_only = enabled
-        return self
 
 
 @dataclass
@@ -87,7 +88,7 @@ class Decision:
         }
 
 
-# Module-global policy so the server can flip MCP-only at runtime.
+# Module-global policy (allow-lists only — the boundary is not in here).
 _CURRENT: Policy = Policy()
 
 
@@ -98,10 +99,6 @@ def current_policy() -> Policy:
 def set_policy(p: Policy) -> None:
     global _CURRENT
     _CURRENT = p
-
-
-def enable_mcp_only(enabled: bool = True) -> None:
-    _CURRENT.mcp_only = enabled
 
 
 def authorize(server: Optional[str], tool: str,
@@ -139,13 +136,10 @@ def authorize(server: Optional[str], tool: str,
         if tool in MUSIC_ALLOWED:
             return Decision(True, False,
                             "Amazon Music control (explicit allowlist)", cat)
-        # Unknown internal tool in MCP-only -> block external-style tools.
-        if pol.mcp_only:
-            return Decision(False, False,
-                            "MCP-only: '%s' is not an allowed internal tool"
-                            % tool, cat)
-        return Decision(True, cap.requires_confirmation,
-                        "internal tool (no server)", cat)
+        # THE BOUNDARY: everything else internal is infrastructure —
+        # impossible, not merely discouraged.
+        return Decision(False, False,
+                        "boundary: '%s' is not a Nex capability" % tool, cat)
 
     # 3) External MCP tool.
     # Server allow-list.
