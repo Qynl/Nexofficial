@@ -299,38 +299,27 @@ class AutonomousAgent:
         from agent.planner import plan as skeleton_plan
         return skeleton_plan(goal, self.registry)
 
-    def _llm_diagnose(self, task: Any, err: str):
-        """Genuine LLM repair: capture the error + tool + args, ask the model
-        for corrected arguments, validate the reply is a dict of args.
+    def _llm_diagnose(self, task: Any, err: str, phase: str = "execute"):
+        """Genuine LLM failure diagnosis (agent.diagnose): the model gets the
+        failure context + the LIVE tool catalog and returns a structured
+        recovery decision — corrected args, a different (validated, live)
+        tool, or an honest give-up. Registry-validated before use, and
+        bounded to one attempt per task (llm_diagnosed) so a broken model
+        can't loop the pipeline. The deterministic repairs stay first.
 
-        Bounded: runs at most once per task (llm_diagnosed flag) so a broken
-        model can't loop us. Returns (new_args, note) or None; the regex
-        repair in _diagnose() remains the deterministic fallback.
+        Returns the normalized decision dict or None.
         """
         if self.llm is None or getattr(task, "llm_diagnosed", False):
             return None
         task.llm_diagnosed = True
-        try:
-            reply = self.llm([
-                {"role": "system", "content": (
-                    "You are an MCP tool-repair agent. A tool call failed. "
-                    "Return ONLY a JSON object of CORRECTED arguments for the "
-                    "next retry, e.g. {\"args\": {...}}. No prose.")},
-                {"role": "user", "content": (
-                    "tool: %s\nserver: %s\ncurrent args: %s\nerror: %s"
-                    % (task.tool, task.server,
-                       _safe_json(task.args), err[:500]))},
-            ])
-            from agent.judges import _extract_json
-            obj = _extract_json(reply or "")
-        except Exception:  # noqa: BLE001
-            return None
-        if not isinstance(obj, dict):
-            return None
-        new_args = obj.get("args")
-        if isinstance(new_args, dict) and new_args and new_args != task.args:
-            return dict(new_args), "LLM-proposed corrected arguments"
-        return None
+        from agent.diagnose import diagnose as _diagnose_llm
+        decision = _diagnose_llm(task, err, self.registry, self.llm,
+                                 phase=phase)
+        if decision is not None:
+            self._emit("REPAIRING", "agent.repair_started", task=task.id,
+                       note=decision.get("reason", ""),
+                       action=decision.get("kind"))
+        return decision
 
     def _revive(self, graph: TaskGraph) -> bool:
         """Prepare the graph for another recovery pass.
@@ -438,12 +427,33 @@ class AutonomousAgent:
 
                 # B) retry with corrected args (missing-parameter repair)
                 corrected, note = _diagnose(err, task)
+                decision = None
                 if corrected is None:
                     # B2) genuine LLM diagnosis (bounded once per task);
                     # the regex repair above stays as the fast path.
-                    fixed = self._llm_diagnose(task, err)
-                    if fixed is not None:
-                        corrected, note = fixed
+                    decision = self._llm_diagnose(task, err)
+                    if decision is not None:
+                        if decision["kind"] == "correct_args":
+                            corrected, note = (decision["args"],
+                                               decision.get("reason", ""))
+                        elif decision["kind"] == "switch_tool":
+                            # Registry-validated escape hatch: same task,
+                            # different live tool.
+                            task.tool = decision["tool"]
+                            task.server = decision.get("server", task.server)
+                            task.attempts = 0
+                            self._emit("REPAIRING",
+                                       "agent.repair_succeeded",
+                                       task=task.id,
+                                       note=decision.get("reason", ""))
+                            continue
+                        else:  # give_up — honest failure with a reason
+                            task.error = decision.get(
+                                "reason", "model judged unrecoverable")
+                            graph.mark_failed(task.id, task.error,
+                                              _error_signature(task.error))
+                            state.record_failure(task.name, task.error)
+                            return
                 if corrected is not None:
                     task.args = corrected
                     args = _resolve_args(task, graph)
@@ -500,6 +510,14 @@ class AutonomousAgent:
                     graph.mark_failed(task.id, vres.note, sig)
                     state.record_failure(task.name, vres.note)
                     return
+                # Verification failure is ALSO a diagnosis trigger: let the
+                # model propose corrected args (bounded once per task).
+                vfix = self._llm_diagnose(task, vres.note, phase="verify")
+                if vfix is not None and vfix["kind"] == "correct_args":
+                    task.args = vfix["args"]
+                    args = _resolve_args(task, graph)
+                    time.sleep(min(self.backoff_base, self.max_backoff))
+                    continue
                 time.sleep(min(self.backoff_base, self.max_backoff))
                 continue
 

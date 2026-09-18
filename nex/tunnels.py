@@ -283,6 +283,66 @@ def json_dumps(obj: Any) -> str:
 
 _TUNNELS: Optional[TunnelRegistry] = None
 
+# ---------------------------------------------------------------------------
+# User-added MCP servers persist across restarts (~/.nex/tunnels.json).
+# The + Add MCP Server UI writes here via POST /api/tunnels; DELETE
+# /api/tunnels/<name> removes from here. Env-derived defaults always load
+# too; saved user servers are appended on every (re)load.
+# ---------------------------------------------------------------------------
+
+
+def _user_tunnels_path() -> str:
+    import os
+    base = os.environ.get("NEX_USER_TUNNELS_FILE")
+    if base:
+        return base
+    return os.path.join(os.path.expanduser("~"), ".nex", "tunnels.json")
+
+
+def load_user_tunnels() -> List[Dict[str, Any]]:
+    """Saved user-added MCP server configs (never the env defaults)."""
+    import json as _json
+    try:
+        with open(_user_tunnels_path(), "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if isinstance(data, list):
+            return [c for c in data if isinstance(c, dict) and c.get("name")]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def save_user_tunnels(entries: List[Dict[str, Any]]) -> bool:
+    import json as _json
+    import os
+    path = _user_tunnels_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(entries, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def add_user_tunnel(entry: Dict[str, Any]) -> bool:
+    """Persist one user-added server (replaces same-name entry)."""
+    entries = [c for c in load_user_tunnels()
+               if c.get("name") != entry.get("name")]
+    entries.append(entry)
+    return save_user_tunnels(entries)
+
+
+def remove_user_tunnel(name: str) -> bool:
+    """Drop a saved server by name. Returns True if it was saved here."""
+    entries = load_user_tunnels()
+    kept = [c for c in entries if c.get("name") != name]
+    if len(kept) == len(entries):
+        return False
+    return save_user_tunnels(kept)
+
 
 def get_tunnels() -> TunnelRegistry:
     global _TUNNELS
@@ -312,9 +372,11 @@ def reload_tunnels(extra: Optional[List[Dict[str, Any]]] = None,
         if not replace:
             cfg += DEFAULT_TUNNELS
         cfg += _parse_extra_tunnels()
+        cfg += load_user_tunnels()
         cfg += list(extra or [])
     else:
-        cfg = list(DEFAULT_TUNNELS) + _parse_extra_tunnels()
+        cfg = (list(DEFAULT_TUNNELS) + _parse_extra_tunnels()
+               + load_user_tunnels())
     upstreams = []
     for c in cfg:
         url = c.get("url") or _stdio_url_for(c)

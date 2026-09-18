@@ -189,6 +189,13 @@
     </div>
   </div>
 
+  <!-- Servers YOU added via the form. Persisted across restarts. -->
+  <div id="user-servers" style="max-width: 920px; margin-top: 24px;">
+    <h2 style="font-size:14px; font-weight:600; margin:0 0 8px 0;">Your MCP servers</h2>
+    <div class="grid" id="user-grid" style="max-width:none;"></div>
+    <div class="meta" id="user-empty" style="margin-top:6px;">No user-added servers yet — add one above.</div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
@@ -215,6 +222,53 @@
     return c;
   }
 
+  function renderUserServers(registered) {
+    const ugrid = document.getElementById('user-grid');
+    const empty = document.getElementById('user-empty');
+    if (!ugrid) return;
+    ugrid.innerHTML = '';
+    const userRows = Object.values(registered).filter(r => r.user_added);
+    empty.style.display = userRows.length ? 'none' : '';
+    for (const r of userRows) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const head = document.createElement('div');
+      head.className = 'row';
+      const h2 = document.createElement('h2');
+      h2.textContent = r.label || r.name;
+      const d = dot(r.online ? 'online' : (r.last_error ? 'offline' : 'offline'));
+      head.appendChild(h2);
+      head.appendChild(d);
+      card.appendChild(head);
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const kind = (r.url || '').startsWith('stdio://') ? 'stdio' : 'http';
+      meta.textContent = kind + ' · ' + (r.online
+        ? (r.tools_count + ' tools discovered')
+        : (r.last_error ? ('error: ' + r.last_error) : 'not connected'));
+      card.appendChild(meta);
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const rm = document.createElement('button');
+      rm.textContent = 'Remove';
+      rm.onclick = async () => {
+        rm.disabled = true;
+        try {
+          await fetch('/api/tunnels/' + encodeURIComponent(r.name),
+                      { method: 'DELETE' });
+          showToast(r.name + ' removed', false);
+          refresh();
+        } catch (e) {
+          rm.disabled = false;
+          showToast('remove failed: ' + e, true);
+        }
+      };
+      actions.appendChild(rm);
+      card.appendChild(actions);
+      ugrid.appendChild(card);
+    }
+  }
+
   async function refresh() {
     let res;
     try {
@@ -226,6 +280,7 @@
     platform = res.platform || null;
     const registered = {};  // name → row
     for (const r of (res.registered || [])) registered[r.name] = r;
+    renderUserServers(registered);
     grid.innerHTML = '';
     for (const c of (res.catalog || [])) {
       const card = document.createElement('div');

@@ -445,11 +445,15 @@
       'Autonomous build — sends the input as a goal to the agent (model-driven plan + judges)'));
     agentRow.appendChild(makeBtn('Plan', 'agent', 'plan',
       'Plan only — generate + show a goal-specific plan without executing'));
+    const campBtn = makeBtn('Campaign', 'campaign', 'campaign',
+      'Long-running autonomous campaign — the model splits the goal into milestones and builds them one by one (checkpoints + resume)');
+    agentRow.appendChild(campBtn);
     dev.appendChild(agentRow);
 
     dev.querySelectorAll('button[data-agent]').forEach(b => {
       b.addEventListener('click', () => runAgent(b.dataset.agent));
     });
+    campBtn.addEventListener('click', runCampaign);
   }
 
   function makeBtn(label, kind, value, title) {
@@ -480,6 +484,95 @@
     }).catch(e => {
       agentPanel().innerHTML += '<div class="agent-status err">network error</div>';
     });
+  }
+
+  function runCampaign() {
+    const goal = (devInput.value || '').trim();
+    if (!goal) { devInput.focus(); return; }
+    anim.setState({ state: 'THINKING', params: { source: 'campaign' } });
+    const p = ensureAgentPanel();
+    p.innerHTML = '<div class="agent-title">Campaign</div>'
+      + '<div class="agent-sub">goal: ' + escapeHtml(goal) + '</div>'
+      + '<div class="agent-status">drafting milestone roadmap…</div>';
+    fetch('/api/agent/campaign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: goal }),
+    }).then(r => r.json()).then(j => {
+      if (!j || !j.ok) {
+        p.innerHTML += '<div class="agent-status err">'
+          + (j && j.error ? j.error : 'failed to start campaign') + '</div>';
+      }
+    }).catch(() => {
+      p.innerHTML += '<div class="agent-status err">network error</div>';
+    });
+  }
+
+  // Campaign milestone list — one row per milestone with a live progress
+  // bar; rows animate in as the campaign advances (agent.milestone_*).
+  let campaignRows = null;
+
+  function renderCampaignStart(milestones) {
+    const p = ensureAgentPanel();
+    campaignRows = {};
+    let html = '<div class="agent-title">Campaign milestones</div>';
+    html += '<div class="campaign-bar"><i></i></div>';
+    (milestones || []).forEach((m, i) => {
+      html += '<div class="campaign-ms" data-ms="' + i + '">'
+        + '<span class="ms-state">·</span>'
+        + '<span class="ms-title">' + escapeHtml(m.title || m.goal || '?')
+        + '</span>'
+        + '<span class="ms-status">queued</span></div>';
+      campaignRows[i] = m.title || m.goal;
+    });
+    const block = document.createElement('div');
+    block.innerHTML = html;
+    p.innerHTML = '';
+    p.appendChild(block);
+  }
+
+  function campaignUpdate(index, status, label) {
+    const p = agentPanel();
+    const row = p.querySelector('.campaign-ms[data-ms="' + index + '"]');
+    if (!row) return;
+    const bar = p.querySelector('.campaign-bar > i');
+    if (status === 'running') {
+      row.className = 'campaign-ms running';
+      row.querySelector('.ms-state').textContent = '◐';
+      row.querySelector('.ms-status').textContent = label || 'building';
+    } else if (status === 'COMPLETED') {
+      row.className = 'campaign-ms done';
+      row.querySelector('.ms-state').textContent = '✓';
+      row.querySelector('.ms-status').textContent = 'done';
+      faceCelebrate();
+    } else if (status === 'resumed') {
+      row.className = 'campaign-ms done';
+      row.querySelector('.ms-state').textContent = '✓';
+      row.querySelector('.ms-status').textContent = 'resumed';
+    } else {
+      row.className = 'campaign-ms failed';
+      row.querySelector('.ms-state').textContent = '✗';
+      row.querySelector('.ms-status').textContent = label || status || 'failed';
+    }
+    if (bar) {
+      const total = p.querySelectorAll('.campaign-ms').length || 1;
+      const done = p.querySelectorAll('.campaign-ms.done, .campaign-ms.failed').length;
+      bar.style.width = Math.round((done / total) * 100) + '%';
+    }
+  }
+
+  function faceCelebrate() {
+    document.body.classList.remove('face-celebrate');
+    void document.body.offsetWidth;  // restart the animation
+    document.body.classList.add('face-celebrate');
+    setTimeout(() => document.body.classList.remove('face-celebrate'), 950);
+  }
+
+  function faceTrouble() {
+    document.body.classList.remove('face-trouble');
+    void document.body.offsetWidth;
+    document.body.classList.add('face-trouble');
+    setTimeout(() => document.body.classList.remove('face-trouble'), 750);
   }
 
   function agentPanel() {
@@ -740,6 +833,43 @@
         // A model reply contained a JSON plan. Show a confirm banner
         // so the user can approve / cancel destructive steps.
         showPlanBanner(evt.plan);
+      } else if (evt.type === 'agent.campaign_started') {
+        renderCampaignStart(evt.milestones);
+      } else if (evt.type === 'agent.milestone_started') {
+        campaignUpdate(evt.index, 'running',
+          'milestone ' + (evt.milestone || '?') + '/' + (evt.of || '?'));
+        anim.setState({ state: 'FOCUSED', params: { source: 'campaign' } });
+      } else if (evt.type === 'agent.milestone_completed') {
+        campaignUpdate(evt.index, evt.status || evt.result && evt.result.status,
+          evt.status === 'COMPLETED' ? 'done' : (evt.status || 'failed'));
+        if (evt.status !== 'COMPLETED') faceTrouble();
+      } else if (evt.type === 'agent.campaign_done') {
+        const s = evt.summary || {};
+        const p = ensureAgentPanel();
+        p.innerHTML += '<div class="agent-title">Campaign result</div>'
+          + '<div class="agent-status">' + s.milestones_completed + '/'
+          + s.milestones_total + ' milestones completed — '
+          + escapeHtml(s.status || '?') + '</div>';
+        if (s.status === 'COMPLETED') {
+          anim.setState({ state: 'PROUD', params: { source: 'campaign' } });
+          faceCelebrate();
+        } else {
+          faceTrouble();
+        }
+      } else if (evt.type === 'agent.verification_passed') {
+        // Light-touch flourish: a sparkle line in the panel + soft glow.
+        const p = ensureAgentPanel();
+        const tick = document.createElement('div');
+        tick.className = 'agent-status';
+        tick.innerHTML = '<span class="verify-tick">✓</span>verified '
+          + escapeHtml(evt.task || '');
+        p.appendChild(tick);
+        if (p.querySelectorAll('.verify-tick').length % 3 === 1) faceCelebrate();
+      } else if (evt.type === 'agent.tool_failed') {
+        const p = agentPanel();
+        p.classList.remove('shake');
+        void p.offsetWidth;
+        p.classList.add('shake');
       } else if (evt.type === 'agent.plan_ready') {
         // The agent produced a goal-specific plan (model-driven or
         // capability fallback). Show it in the agent panel.

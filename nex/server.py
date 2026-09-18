@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
@@ -390,6 +391,10 @@ class EventBus:
                 q.put_nowait(event)
             except queue.Full:
                 pass
+
+    # The agent layers take `bus` as a CALLABLE (bus(event)); make the
+    # singleton satisfy that contract directly so injected events flow.
+    __call__ = publish
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=128)
@@ -1115,6 +1120,9 @@ class NexHandler(BaseHTTPRequestHandler):
         if path == "/api/agent/run":
             self._handle_agent_run()
             return
+        if path == "/api/agent/campaign":
+            self._handle_agent_campaign()
+            return
         if path == "/api/reset":
             with HISTORY_LOCK:
                 HISTORY.clear()
@@ -1164,7 +1172,16 @@ class NexHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "tunnels must be a list"})
                 return
             fresh = reload_tunnels(extra=extra, replace=replace)
-            self._send_json(200, fresh.summary())
+            # Persist user-added servers so they survive restarts.
+            if not replace:
+                from tunnels import add_user_tunnel
+                saved = []
+                for entry in extra:
+                    if isinstance(entry, dict) and entry.get("name"):
+                        add_user_tunnel(entry)
+                        saved.append(entry.get("name"))
+            self._send_json(200, dict(fresh.summary(),
+                                      persisted=saved if not replace else []))
             return
         if path.startswith("/api/tunnels/"):
             # /api/tunnels/<name> DELETE removes the named tunnel,
@@ -1175,16 +1192,7 @@ class NexHandler(BaseHTTPRequestHandler):
             if "/" in name:
                 self.send_error(404, "Not Found"); return
             if self.command == "DELETE":
-                reg = get_tunnels()
-                before = [u.name for u in reg._upstreams]
-                reg._upstreams[:] = [u for u in reg._upstreams
-                                     if u.name != name]
-                self._send_json(200,
-                                {"removed": name,
-                                 "platforms": [u.name for u in
-                                               reg._upstreams]
-                                 if list(reg._upstreams) == reg._upstreams
-                                 else before})
+                self._handle_tunnel_delete(name)
                 return
             if self.command == "POST":
                 for u in get_tunnels()._upstreams:
@@ -1262,6 +1270,8 @@ class NexHandler(BaseHTTPRequestHandler):
                 "description": _tunnel_blurb(c),
             }
             catalog.append(entry)
+        from tunnels import load_user_tunnels
+        user_names = {c.get("name") for c in load_user_tunnels()}
         registered = []
         for u in reg._upstreams:
             online = bool(getattr(u, "_initialized", False))
@@ -1272,6 +1282,7 @@ class NexHandler(BaseHTTPRequestHandler):
             registered.append({
                 "name": u.name,
                 "label": u.label or u.name,
+                "user_added": u.name in user_names,
                 "online": online,
                 "server_info": u._server_info if online else {},
                 "tools_count": len(tools),
@@ -1285,6 +1296,29 @@ class NexHandler(BaseHTTPRequestHandler):
             "platform": sys.platform,
             "ts": time.time(),
         })
+
+    def _handle_tunnel_delete(self, name: str) -> None:
+        """DELETE /api/tunnels/<name> — unregister now + un-persist."""
+        from tunnels import get_tunnels, remove_user_tunnel
+        reg = get_tunnels()
+        reg._upstreams[:] = [u for u in reg._upstreams if u.name != name]
+        was_saved = remove_user_tunnel(name)
+        self._send_json(200, {
+            "removed": name,
+            "was_saved": was_saved,
+            "platforms": [u.name for u in reg._upstreams],
+        })
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        """DELETE support (settings page removes user-added MCP servers)."""
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path.startswith("/api/tunnels/"):
+            name = path[len("/api/tunnels/"):]
+            if name and "/" not in name:
+                self._handle_tunnel_delete(name)
+                return
+        self.send_error(404, "Not Found")
 
     def _handle_settings_connect(self) -> None:
         """Connect an editor on demand.
@@ -2295,6 +2329,49 @@ class NexHandler(BaseHTTPRequestHandler):
             raise
 
     # ----- chat ------------------------------------------------------------
+
+    def _handle_agent_campaign(self) -> None:
+        """Kick off a LONG-RUNNING autonomous campaign for a goal.
+
+        The model splits the goal into milestones; each milestone runs the
+        canonical pipeline (plan -> TaskGraph -> verify -> judge), and
+        progress is checkpointed after every milestone so a restart RESUMES
+        instead of starting over. Streams agent.campaign_started /
+        agent.milestone_started / agent.milestone_completed /
+        agent.campaign_done on SSE. The HTTP call returns immediately.
+
+        Body: { "goal": "...", "max_milestones": 6, "resume": true }
+        """
+        body = self._read_json_body() or {}
+        goal = (body.get("goal") or "").strip()
+        if not goal:
+            self._send_json(400, {"ok": False, "error": "missing 'goal'"})
+            return
+        max_milestones = int(body.get("max_milestones") or 6)
+        resume = bool(body.get("resume", True))
+
+        def _runner() -> None:
+            try:
+                from agent.campaign import run_campaign
+                summary = run_campaign(
+                    goal, bus=BUS, llm_call=model_chat,
+                    llm_reachable=model_reachable(),
+                    max_milestones=max_milestones, resume=resume)
+                BUS.publish({"type": "agent.report", "result": {
+                    "mode": "campaign", "campaign": summary,
+                }, "ts": time.time()})
+            except Exception as exc:  # noqa: BLE001
+                BUS.publish({"type": "agent.error",
+                             "source": "campaign", "error": repr(exc),
+                             "ts": time.time()})
+
+        threading.Thread(target=_runner, daemon=True).start()
+        self._send_json(202, {
+            "ok": True,
+            "campaign": goal,
+            "note": "campaign started; stream /api/events for "
+                    "agent.campaign_* / agent.milestone_* events",
+        })
 
     def _handle_agent_run(self) -> None:
         """Kick off an autonomous agent run for a goal.

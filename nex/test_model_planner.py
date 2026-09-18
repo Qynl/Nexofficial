@@ -265,8 +265,8 @@ def test_llm_repair_used_when_regex_fails():
             "LLM repair recovers the task, got %r" % report.status)
     _expect(len(repair_prompts) == 1,
             "LLM repair bounded to one attempt, ran %d" % len(repair_prompts))
-    _expect("tool-repair agent" in repair_prompts[0][0]["content"],
-            "repair prompt is a tool-repair prompt")
+    _expect("failure-diagnosis agent" in repair_prompts[0][0]["content"],
+            "repair prompt is a diagnosis prompt")
     # llm_diagnosed flag recorded on the task
     _expect(g.get("t1").llm_diagnosed is True, "llm_diagnosed flag recorded")
     _expect(g.get("t1").args.get("fixed") is True, "corrected args applied")
@@ -322,6 +322,220 @@ def test_reconcile_on_resume():
                 "failed re-verify demotes completed task to pending/redo")
 
 
+def test_diagnose_decisions():
+    """Structured LLM failure diagnosis: parse + registry-validate."""
+    from agent.diagnose import parse_decision, apply_decision, diagnose
+    reg = _registry()
+
+    # Minimal legacy protocol still works.
+    d = parse_decision('{"args": {"path": "x"}}')
+    _expect(d and d["action"] == "correct_args", "legacy args-only parsed")
+    out = apply_decision(d, type("T", (), {"args": {}, "tool": "create_asset"})(), reg)
+    _expect(out and out["kind"] == "correct_args", "legacy decision applied")
+
+    # Structured: switch_tool must exist in the live registry.
+    d2 = parse_decision('{"action": "switch_tool", "tool": "import_asset", "reason": "create failed"}')
+    t = type("T", (), {"args": {}, "tool": "create_asset"})()
+    out2 = apply_decision(d2, t, reg)
+    _expect(out2 and out2["kind"] == "switch_tool" and out2["tool"] == "import_asset",
+            "switch_tool to a live tool accepted")
+
+    # Hallucinated escape hatch rejected.
+    d3 = parse_decision('{"action": "switch_tool", "tool": "magic_fix_all"}')
+    _expect(apply_decision(d3, t, reg) is None,
+            "switch_tool to a hallucinated tool rejected")
+
+    # give_up passes through with its reason.
+    d4 = parse_decision('{"action": "give_up", "reason": "editor offline"}')
+    out4 = apply_decision(d4, t, reg)
+    _expect(out4 and out4["kind"] == "give_up" and out4["reason"] == "editor offline",
+            "give_up carries the model's reason")
+
+    # Garbage -> None.
+    _expect(parse_decision("I am not json") is None, "garbage reply rejected")
+
+    # End-to-end bounded diagnose() with a fake llm.
+    calls = []
+    def llm(messages):
+        calls.append(messages)
+        return '{"action": "correct_args", "args": {"name": "renamed"}}'
+    task = type("T", (), {"args": {}, "tool": "create_asset",
+                          "server": "asset_mcp", "name": "t"})()
+    dec = diagnose(task, "missing name", reg, llm)
+    _expect(dec and dec["args"] == {"name": "renamed"}, "diagnose end-to-end")
+    _expect(diagnose(task, "x", reg, lambda m: "garbage") is None,
+            "garbage llm -> None")
+
+
+def test_llm_switch_tool_recovery():
+    """When args can't be fixed, the model can switch to a live tool."""
+    import json as _json
+
+    class StrictMock(mock_mcp.MockMCPServer):
+        def call(self, tool, args):
+            if tool == "create_animation" and "rig" not in (args or {}):
+                return {"error": "absolute requirement missing"}
+            return {"result": {"id": "ok_%s" % tool}}
+
+    tools = [
+        {"name": "create_animation", "description": "needs rig",
+         "inputSchema": {}},
+        {"name": "import_animation", "description": "import instead",
+         "inputSchema": {}},
+    ]
+    reg = CapabilityRegistry([mock_mcp.server_view(
+        "anim_mcp", StrictMock("anim_mcp", tools))])
+
+    def llm(messages):
+        return _json.dumps({"action": "switch_tool",
+                            "tool": "import_animation",
+                            "reason": "creation unsupported, import instead"})
+
+    from agent.task_graph import TaskGraph, Task
+    g = TaskGraph()
+    g.add(Task(id="a1", name="anim", stage="animation",
+               server="anim_mcp", tool="create_animation", args={}))
+    agent = agent_loop.AutonomousAgent(reg, llm=llm)
+    report = agent.run("animate", graph=g)
+    _expect(report.status == STATUS_COMPLETED,
+            "switch_tool recovers, got %r" % report.status)
+    t = g.get("a1")
+    _expect(t.tool == "import_animation",
+            "task now uses the switched tool, got %r" % t.tool)
+    _expect(t.llm_diagnosed is True, "diagnosis bounded to one shot")
+
+
+def test_verification_expect_criteria():
+    """Rich acceptance criteria gate results before success is claimed."""
+    from agent.verification import check_expect, _is_empty_result
+    _expect(_is_empty_result([]) is True, "empty list is trivial")
+    _expect(_is_empty_result([{}, ""]) is True, "list of empties is trivial")
+    _expect(_is_empty_result({"result": None}) is True, "envelope-of-nothing")
+    _expect(_is_empty_result({"ok": True, "id": "a1"}) is False,
+            "payload-bearing dict is non-trivial")
+
+    ok, _ = check_expect({"id": "a1", "name": "x"},
+                         {"keys": ["id", "name"]})
+    _expect(ok, "keys criteria pass")
+    ok, note = check_expect({"id": "a1"}, {"keys": ["id", "sprite"]})
+    _expect(not ok and "sprite" in note, "missing key fails with note")
+    ok, _ = check_expect("path/to/thing.png", {"contains": ".png"})
+    _expect(ok, "contains criteria pass")
+    ok, _ = check_expect(["a", "b", "c"], {"min_len": 3})
+    _expect(ok, "min_len criteria pass")
+    ok, _ = check_expect([1], {"min_len": 3})
+    _expect(not ok, "min_len criteria fail")
+    ok, _ = check_expect({"v": 1}, {"is": {"v": 1}})
+    _expect(ok, "equals criteria pass")
+    ok, _ = check_expect("", "a screenshot of the scene")
+    _expect(not ok, "string expect still rejects trivial results")
+
+    # verify_task honors expect before the verifier runs.
+    from agent.verification import verify_task
+    reg = _registry()
+
+    class T:
+        verify_tool = None
+        expect = {"keys": ["id"]}
+    res = verify_task(T(), reg, {"id": "a1"})
+    _expect(res.ok, "expect met -> ok without verifier")
+    res = verify_task(T(), reg, {"nope": 1})
+    _expect(not res.ok, "expect unmet -> rejected even though non-empty")
+
+
+def test_relevance_filtering():
+    """Huge catalogs are relevance-filtered for the planning prompt."""
+    reg = _registry()
+    tools = [{"name": t, "description": "does %s things" % t.split("_")[0],
+              "inputSchema": {}}
+             for t in ["animate_walk", "bake_light", "build_mesh",
+                       "paint_texture", "rig_bones", "render_frame",
+                       "export_fbx", "import_fbx"]]
+    tools += [{"name": "filler_%d" % i, "description": "misc",
+               "inputSchema": {}} for i in range(60)]
+    big = CapabilityRegistry([mock_mcp.server_view(
+        "big_mcp", mock_mcp.MockMCPServer("big_mcp", tools))])
+    sel, omitted = big.relevant_tools(
+        "animate a walk cycle for the character", limit=10)
+    names = [t.name for t in sel]
+    _expect(omitted == 58, "58 tools omitted, got %d" % omitted)
+    _expect(names[0] == "animate_walk",
+            "most relevant tool ranked first, got %s" % names[0])
+    # Small catalogs are returned unfiltered.
+    sel2, omitted2 = reg.relevant_tools("anything", limit=40)
+    _expect(omitted2 == 0, "small catalog unfiltered")
+    # Planner prompt uses the filtered catalog with an honest trailer.
+    from agent.model_planner import _catalog
+    cat = _catalog(big, goal="animate a walk cycle", max_catalog=10)
+    _expect("(+58 more tools available" in cat, "catalog trailer present")
+    _expect("animate_walk" in cat, "relevant tool present in catalog")
+
+
+def test_campaign_runs_milestones_and_resumes():
+    """Campaign: LLM roadmap -> per-milestone canonical runs -> checkpoint
+    -> resume skips completed milestones."""
+    import agent.campaign as campaign
+    from agent.events import STATUS_COMPLETED
+
+    roadmap_llm = json.dumps({"milestones": [
+        {"title": "m1 blocks", "goal": "make blockout",
+         "done_when": "a project exists"},
+        {"title": "m2 animate", "goal": "add animation",
+         "done_when": "an animation exists"},
+    ]})
+
+    def roadmap_only_llm(messages):
+        return roadmap_llm
+
+    events = []
+    ran_goals = []
+
+    def fake_run_agent_goal(mgoal, bus=None, llm_call=None,
+                            llm_reachable=False, mode="build", **kw):
+        ran_goals.append(mgoal)
+        if bus:
+            bus({"type": "agent.plan_ready", "goal": mgoal})
+        return {"mode": "build", "report": {"status": STATUS_COMPLETED,
+                                            "missing": []}}
+
+    orig = campaign.run_campaign  # keep
+    import agent.server_run as sr
+    patched = sr.run_agent_goal
+    sr.run_agent_goal = fake_run_agent_goal
+    try:
+        camp_file = campaign.CHECKPOINT_FILE
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            campaign.CHECKPOINT_FILE = os.path.join(td, "camp.json")
+            summary = campaign.run_campaign(
+                "make a tiny game", bus=events.append,
+                llm_call=roadmap_only_llm, llm_reachable=True)
+            _expect(summary["milestones_total"] == 2, "2 milestones planned")
+            _expect(summary["status"] == "COMPLETED", "both completed")
+            _expect(len(ran_goals) == 2, "each milestone ran the pipeline")
+            _expect(any(e["type"] == "agent.campaign_started" for e in events),
+                    "campaign_started emitted")
+            _expect(sum(1 for e in events
+                        if e["type"] == "agent.milestone_completed") == 2,
+                    "milestone_completed emitted twice")
+
+            # Resume: fresh call, same goal, milestone results loaded from
+            # the checkpoint -> nothing re-runs.
+            ran_goals.clear()
+            events.clear()
+            summary2 = campaign.run_campaign(
+                "make a tiny game", bus=events.append,
+                llm_call=roadmap_only_llm, llm_reachable=True, resume=True)
+            _expect(len(ran_goals) == 0, "resume re-runs nothing")
+            _expect(summary2["status"] == "COMPLETED", "resume still complete")
+            _expect(any(e.get("resumed") for e in events
+                        if e["type"] == "agent.milestone_completed"),
+                    "resumed milestones flagged")
+    finally:
+        sr.run_agent_goal = patched
+        campaign.run_campaign = orig
+
+
 if __name__ == "__main__":
     test_model_planner_basic()
     test_model_planner_drops_hallucinated()
@@ -332,4 +546,9 @@ if __name__ == "__main__":
     test_agent_uses_llm_planner_canonically()
     test_llm_repair_used_when_regex_fails()
     test_reconcile_on_resume()
+    test_diagnose_decisions()
+    test_llm_switch_tool_recovery()
+    test_verification_expect_criteria()
+    test_relevance_filtering()
+    test_campaign_runs_milestones_and_resumes()
     print("\nAll model-planner + judge tests passed.")

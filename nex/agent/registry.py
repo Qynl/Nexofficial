@@ -94,6 +94,52 @@ class CapabilityRegistry:
         return s.call(tool, args)
 
     # ----- compact capability summary (STAGE 26) --------------------------
+    def relevant_tools(self, goal: str, limit: int = 40
+                       ) -> "tuple[List[ToolView], int]":
+        """Relevance-filtered view for huge MCP catalogs.
+
+        When many servers with many tools are connected, dumping the whole
+        catalog into a planning prompt both wastes context and buries the
+        useful tools. This scores every tool against the goal with simple
+        lexical overlap (goal words vs tool name + description + category)
+        and returns the top `limit` plus the omitted count:
+        (tools, omitted).
+
+        Scoring is intentionally dumb-but-honest — it FILTERS, it never
+        invents. Validation (validate_plan_deep) always runs against the
+        FULL registry, so a filtered-out tool remains usable if the model
+        names it anyway.
+        """
+        import re as _re
+        words = [w for w in _re.findall(r"[a-z0-9]+", (goal or "").lower())
+                 if len(w) > 2]
+        stop = {"the", "and", "for", "with", "that", "this", "into", "from",
+                "make", "create", "build", "game", "using", "then", "add"}
+        words = [w for w in words if w not in stop] or words
+
+        def _score(tv: ToolView) -> int:
+            name = tv.name.lower()
+            desc = (tv.description or "").lower()
+            cat = (tv.capability.category if tv.capability else "").lower()
+            score = 0
+            for w in words:
+                if w in name:
+                    score += 3          # name hits weigh most
+                elif w in name.replace("_", ""):
+                    score += 2
+                if w in desc:
+                    score += 1
+                if w == cat:
+                    score += 1
+            return score
+
+        tools = self.all_tools()
+        if len(tools) <= limit:
+            return tools, 0
+        scored = sorted(tools, key=lambda tv: (_score(tv), tv.full_name),
+                        reverse=True)
+        return scored[:limit], len(tools) - limit
+
     def compact_summary(self) -> Dict[str, Any]:
         return {
             "servers": [

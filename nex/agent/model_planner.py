@@ -61,12 +61,24 @@ PLAN_SYSTEM = (
 )
 
 
-def _catalog(registry) -> str:
+def _catalog(registry, goal: str = "", max_catalog: int = 80) -> str:
+    """Capability-filtered tool catalog for the planning prompt.
+
+    With huge MCP catalogs the full dump is context poison, so tools are
+    ranked by lexical relevance to the goal and the top max_catalog are
+    listed, with an honest "(+N more available)" trailer. The model is
+    told it may name ANY tool — validation runs against the FULL registry.
+    """
+    tools, omitted = registry.relevant_tools(goal, limit=max_catalog)
     lines: List[str] = []
-    for t in registry.all_tools():
+    for t in tools:
         cat = (t.capability.category if t.capability else "unknown")
         lines.append("- %s (server=%s, category=%s): %s" % (
             t.full_name, t.server, cat, (t.description or "")[:140]))
+    if omitted > 0:
+        lines.append("(+%d more tools available on connected servers — you "
+                     "may reference any of them by name; use the most "
+                     "fitting one)" % omitted)
     return "\n".join(lines)
 
 
@@ -179,6 +191,7 @@ def plan_to_graph(plan: Dict[str, Any], registry) -> TaskGraph:
             tool=tv.name,
             args=dict(s.get("args", {})),
             deps=deps,
+            expect=s.get("expect"),
         ))
         name_to_id[s.get("name", tid)] = tid
         order.append(tid)
@@ -222,9 +235,7 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
     if llm is None:
         return fallback(goal, registry), None
 
-    catalog = _catalog(registry)
-    if max_catalog and len(catalog) > max_catalog * 3:  # crude length guard
-        catalog = "\n".join(catalog.splitlines()[:max_catalog])
+    catalog = _catalog(registry, goal=goal, max_catalog=max_catalog)
     user_msg = "Goal: %s\n\nProduce the plan JSON now." % goal
     if feedback:
         user_msg += ("\n\nA previous attempt scored low. Address these concrete "
