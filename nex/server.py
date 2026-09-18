@@ -344,8 +344,7 @@ def _NEX_META_TOOL_HANDLERS() -> Dict[str, Any]:
 
 
 def _boundary_router(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """The ONLY local routing on the gateway: MCP introspection, plus
-    bare-name Amazon Music controls (their connector owns the rest).
+    """The ONLY local routing on the gateway: MCP introspection.
     Everything else is not a capability — refused, not policy-checked."""
     handler = _NEX_META_TOOL_HANDLERS().get(name)
     if handler is not None:
@@ -358,23 +357,12 @@ def _boundary_router(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                              "text": json.dumps(payload, indent=2,
                                                 default=str)}],
                 "isError": "error" in payload}
-    if name.startswith("am_"):
-        try:
-            from music_amazon import call_tool as _am_call
-            payload = _am_call(name, args or {})
-        except Exception as exc:  # noqa: BLE001
-            return {"isError": True,
-                    "content": [{"type": "text", "text": repr(exc)}]}
-        return {"content": [{"type": "text",
-                             "text": json.dumps(payload, indent=2,
-                                                default=str)}],
-                "isError": "error" in payload}
     return {"isError": True,
             "content": [{"type": "text",
                          "text": (
                              "'%s' is not a Nex capability. Nex acts only "
-                             "through explicitly connected MCP servers and "
-                             "the Amazon Music connector." % name)}]}
+                             "through explicitly connected MCP servers."
+                             % name)}]}
 
 
 def _read_log_file(tail_bytes: int = 200_000) -> str:
@@ -1221,15 +1209,19 @@ class NexHandler(BaseHTTPRequestHandler):
                                   "mode": "design"})
             return
         if path.startswith("/api/project/") and path.endswith("/build"):
-            # Approve + build a designed project (loads its persisted
-            # state: design doc, locked decisions, critique memory).
+            # Approve + build a designed project. The APPROVED plan
+            # (Plan A, persisted at design time) is rebuilt and executed
+            # EXACTLY — no silent re-planning between approval and work.
+            # Only a critic REPLAN creates the next plan deliberately.
             pid = path[len("/api/project/"):-len("/build")]
-            from agent.projects_store import load_project_state
+            from agent.projects_store import (load_project_state,
+                                              load_approved_graph)
             st = load_project_state(pid)
             if st is None:
                 self._send_json(404, {"ok": False,
                                       "error": "unknown project"})
                 return
+            approved_graph = load_approved_graph(pid)
 
             def _builder() -> None:
                 try:
@@ -1237,7 +1229,8 @@ class NexHandler(BaseHTTPRequestHandler):
                     result = run_agent_goal(st.goal or pid, bus=BUS,
                                             llm_call=model_chat,
                                             llm_reachable=model_reachable(),
-                                            mode="build", state=st)
+                                            mode="build", state=st,
+                                            graph=approved_graph)
                     BUS.publish({"type": "agent.report", "result": result,
                                  "ts": time.time()})
                 except Exception as exc:  # noqa: BLE001
@@ -1246,7 +1239,8 @@ class NexHandler(BaseHTTPRequestHandler):
 
             threading.Thread(target=_builder, daemon=True).start()
             self._send_json(200, {"ok": True, "queued": True,
-                                  "project_id": pid, "mode": "build"})
+                                  "project_id": pid, "mode": "build",
+                                  "approved_plan": approved_graph is not None})
             return
         if path == "/api/agent/run":
             self._handle_agent_run()
@@ -2009,7 +2003,7 @@ class NexHandler(BaseHTTPRequestHandler):
         """Aggregate meta + local + upstream tools."""
         from tunnels import get_tunnels
         # THE CAPABILITY SURFACE: MCP introspection + everything from
-        # explicitly connected servers (incl. the amazon-music connector).
+        # explicitly connected servers.
         # No sandbox/filesystem/shell/host tools — Nex infrastructure is
         # not Nex's AI capability surface.
         meta = _NEX_META_TOOL_DEFS()
@@ -2038,9 +2032,8 @@ class NexHandler(BaseHTTPRequestHandler):
                         arguments: Dict[str, Any]) -> Dict[str, Any]:
         # ---- THE BOUNDARY (architecture invariant) --------------------------
         # ALWAYS enforced — there is no environment switch that turns the
-        # boundary off. Any action that is not a connected MCP tool or an
-        # Amazon Music control is rejected here; this is a real gate,
-        # not a prompt instruction.
+        # boundary off. Any action that is not a connected MCP tool is
+        # rejected here; this is a real gate, not a prompt instruction.
         from mcp.policy import authorize, current_policy
         from mcp.capability import ToolCapability
         server = name.split(".", 1)[0] if "." in name else None
@@ -2078,9 +2071,8 @@ class NexHandler(BaseHTTPRequestHandler):
                                 json.dumps(payload, ensure_ascii=False,
                                            sort_keys=True, indent=2)}],
                     "isError": False}
-        # BOUNDARY: prefixed names route to their upstream (or the
-        # amazon-music connector); bare names only pass if they are MCP
-        # introspection or Amazon Music controls. Sandbox/filesystem/
+        # BOUNDARY: prefixed names route to their upstream; bare names
+        # only pass if they are MCP introspection. Sandbox/filesystem/
         # shell tools are infrastructure, NOT callable here.
         from tunnels import get_tunnels
         try:
@@ -2165,7 +2157,7 @@ class NexHandler(BaseHTTPRequestHandler):
                 "kind": "mcp-aggregator",
                 "capability_boundary": (
                     "Nex acts ONLY through explicitly connected MCP "
-                    "servers and the Amazon Music connector. Filesystem, "
+                    "servers. Filesystem, "
                     "shell, host-state, and log access are not AI "
                     "capabilities and are not exposed as resources."),
                 "connected_mcp_servers": tunnels,
@@ -2790,18 +2782,12 @@ def configure_for_stdio() -> None:
         emotion_set=EMOTION_STATES,
     )
     try:
-        # Amazon Music connector -> UI renderer events (play/pause/volume).
-        import music_amazon as _music
-        _music.set_notifier(BUS.publish)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
         from tunnels import get_tunnels
         from tools import tool_definitions, call_tool  # type: ignore
         reg = get_tunnels()
         # BOUNDARY: the stdio MCP client sees MCP introspection only
-        # (upstream tools arrive via their own upstreams; Amazon Music
-        # rides its connector). No sandbox/filesystem/shell tools.
+        # (upstream tools arrive via their own upstreams). No sandbox/
+        # filesystem/shell tools.
         def _combined_provider():
             return list(_NEX_META_TOOL_DEFS())
         # Router dispatches meta tools to their in-process handlers and
@@ -2934,12 +2920,6 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print("Tools: NOT configured (%s)" % exc)
 
-    try:
-        # Amazon Music connector -> UI renderer events (play/pause/volume).
-        import music_amazon as _music
-        _music.set_notifier(BUS.publish)
-    except Exception:  # noqa: BLE001
-        pass
 
     # Start the autonomous observer in a background thread. It watches
     # the Nex activity log and emits speak events when there's something

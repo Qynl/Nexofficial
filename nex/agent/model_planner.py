@@ -63,12 +63,12 @@ PLAN_SYSTEM = (
 
 # THE CAPABILITY BOUNDARY, stated to the planner verbatim.
 PLAN_BOUNDARY = (
-    "HARD CAPABILITY BOUNDARY: you can act ONLY through (1) tools exposed "
-    "by explicitly connected MCP servers and (2) the Amazon Music controls "
-    "(am_*). You have NO filesystem, shell, operating-system, or arbitrary "
-    "network access — those tools do not exist for you. If a goal truly "
-    "requires something outside this boundary, say so plainly in the plan's "
-    "'assumptions' and stop; never invent or simulate such a step."
+    "HARD CAPABILITY BOUNDARY: you can act ONLY through tools exposed "
+    "by explicitly connected MCP servers. You have NO filesystem, shell, "
+    "operating-system, or arbitrary network access — those tools do not "
+    "exist for you. If a goal truly requires something outside this "
+    "boundary, say so plainly in the plan's 'assumptions' and stop; "
+    "never invent or simulate such a step."
 )
 
 

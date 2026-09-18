@@ -28,25 +28,15 @@ from mcp.capability import (
 )
 
 
-# THE CAPABILITY BOUNDARY. Nex's AI can act ONLY through:
-#   1. explicitly connected MCP servers (authorized via `server`), and
-#   2. the explicitly implemented Amazon Music connector (server
-#      "amazon-music", an allowlisted pseudo-upstream).
-# These internal names are MCP-protocol introspection (part of the MCP
-# layer itself). EVERYTHING else internal — filesystem, shell, host
-# scanning, compile/validate helpers — is NOT an AI capability, even
-# though the code exists as Nex infrastructure. Not policy-gated:
-# structurally absent from the boundary.
+# THE CAPABILITY BOUNDARY. Nex's AI can act ONLY through explicitly
+# connected MCP servers (authorized via `server`). These internal names
+# are MCP-protocol introspection (part of the MCP layer itself).
+# EVERYTHING else internal — filesystem, shell, host scanning,
+# compile/validate helpers — is NOT an AI capability, even though the
+# code exists as Nex infrastructure. Not policy-gated: structurally
+# absent from the boundary.
 INTERNAL_ALLOWED = frozenset({
     "who_am_i", "list_platforms", "tunnel_status", "tunnel_probe",
-})
-
-# Amazon Music controls (server "amazon-music"). The connector is a
-# pseudo-upstream, so these authorize through the normal server path;
-# listed here for the bare-name (unprefixed) call form.
-MUSIC_ALLOWED = frozenset({
-    "am_play", "am_pause", "am_toggle", "am_next", "am_previous",
-    "am_volume", "am_search_play",
 })
 
 # Tools that are ALWAYS treated as external/unsafe (never auto-allowed).
@@ -133,9 +123,6 @@ def authorize(server: Optional[str], tool: str,
         if tool in INTERNAL_ALLOWED:
             return Decision(True, False,
                             "internal Nex tool (MCP introspection)", cat)
-        if tool in MUSIC_ALLOWED:
-            return Decision(True, False,
-                            "Amazon Music control (explicit allowlist)", cat)
         # THE BOUNDARY: everything else internal is infrastructure —
         # impossible, not merely discouraged.
         return Decision(False, False,

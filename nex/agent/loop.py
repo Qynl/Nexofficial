@@ -470,6 +470,16 @@ class AutonomousAgent:
                            note="critic asked for changes but no "
                                 "improvement plan was possible")
                 return current
+            # The new plan (Plan B) is deliberate: persist it as the
+            # project's current approved plan so resume/inspect see the
+            # plan Nex is ACTUALLY working from.
+            if self.persist:
+                try:
+                    from agent.projects_store import save_project
+                    save_project(state, graph=g2,
+                                 plan=getattr(g2, "_model_plan", None))
+                except Exception:  # noqa: BLE001
+                    pass
             self._run_passes(g2, state)
 
             # Merge outcomes.

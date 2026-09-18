@@ -65,12 +65,13 @@ def _design_goal(goal: str, reg, bus, llm_call, reachable: bool,
                               design=design, locked=locked)
     plan_steps = (plan or {}).get("steps", []) if isinstance(plan, dict)         else []
 
-    # Persist so START BUILD can resume exactly this project.
+    # Persist so START BUILD builds EXACTLY this plan (Plan A is stored
+    # with the project; approval is binding, not a suggestion).
     try:
         from agent.projects_store import save_project, new_project_id
         st.project_id = st.project_id or new_project_id(goal)
         st.phase = "PLANNING"
-        save_project(st)
+        save_project(st, graph=graph, plan=plan)
     except Exception:  # noqa: BLE001
         pass
 
@@ -129,7 +130,8 @@ def run_agent_goal(goal: str,
                    mode: str = "build",
                    judge_iterations: int = 1,
                    graph: Optional[Any] = None,
-                   state: Optional[Any] = None) -> Any:
+                   state: Optional[Any] = None,
+                   registry: Optional[Any] = None) -> Any:
     """Plan (and optionally build + judge) a goal against the live registry.
 
     `mode`:
@@ -154,7 +156,9 @@ def run_agent_goal(goal: str,
 
     if policy is not None:
         set_policy(policy)
-    reg = _registry()
+    # `registry` injection (tests / embedding); default: the LIVE
+    # registry built from the running tunnel registry.
+    reg = registry if registry is not None else _registry()
     pol = current_policy()
 
     if mode == "design":
@@ -198,7 +202,11 @@ def run_agent_goal(goal: str,
     # llm is attached so planning goes through the canonical model-driven
     # path (skeleton fallback) and failed tool calls get genuine LLM repair.
     # A pre-built graph (MC plan bridge) is still honored and runs as-is.
-    agent = AutonomousAgent(reg, bus=bus, policy=pol, llm=llm_call)
+    # max_critique_cycles=2: build -> critique -> improve -> RE-CRITIQUE.
+    # The improve round deserves a verification pass; the loop stays
+    # bounded inside the agent.
+    agent = AutonomousAgent(reg, bus=bus, policy=pol, llm=llm_call,
+                            max_critique_cycles=2)
     report = agent.run(goal, graph=graph, state=state)
 
     verdict = None

@@ -48,15 +48,6 @@ class TunnelRegistry:
     def __init__(self, upstreams: Optional[List[Upstream]] = None) -> None:
         # Copy so callers can't mutate our state.
         self._upstreams: List[Upstream] = list(upstreams or default_registry())
-        # The Amazon Music connector rides along on EVERY registry
-        # (explicit integration, allowlisted controls only).
-        try:
-            from music_amazon import MusicUpstream
-            if not any(getattr(u, "name", "") == "amazon-music"
-                       for u in self._upstreams):
-                self._upstreams.append(MusicUpstream())
-        except Exception:  # noqa: BLE001
-            pass
         # Reentrant: reads that call other reads (summary -> list_upstreams).
         # Snapshot reads: we copy the list under the lock, then touch the
         # upstreams OUTSIDE it so slow network I/O never serializes the
@@ -406,13 +397,6 @@ def reload_tunnels(extra: Optional[List[Dict[str, Any]]] = None,
                 c["command"], list(c.get("args") or []),
             )
         upstreams.append(u)
-    # The Amazon Music connector is an EXPLICIT integration (not a
-    # discovery target): always present, allowlisted controls only.
-    try:
-        from music_amazon import MusicUpstream
-        upstreams.append(MusicUpstream())
-    except Exception:  # noqa: BLE001
-        pass
     fresh = TunnelRegistry(upstreams)
     if _TUNNELS is not None and _TUNNELS._local_tools_fn is not None:
         fresh.bind_local(

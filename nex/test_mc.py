@@ -414,17 +414,17 @@ def _http(method, path, body=None):
 
 
 # Submit a plan via the live endpoint. Tools are from the BOUNDARY
-# surface: Amazon Music controls (safe) + a destructive-classified step
+# surface: MCP introspection (safe) + a destructive-classified step
 # to exercise the confirm gate.
 status, body = _http("POST", "/api/plan", {
     "plan": {
         "title": "test via http",
         "rationale": "verify the live endpoint",
         "steps": [
-            {"name": "play",
-             "tool": "am_play",
+            {"name": "who",
+             "tool": "who_am_i",
              "args": {},
-             "why": "start music", "expect": "played"},
+             "why": "introspect", "expect": "identity"},
             {"name": "destroy",
              "tool": "unreal-engine.delete_actor",
              "args": {"actor": "world"},
@@ -467,11 +467,10 @@ status, body = _http("POST", "/mcp",
 _expect(status == 200, "/mcp tools/list 200")
 names = [t["name"] for t in body["result"]["tools"]]
 
-# Amazon Music controls present (the explicit connector, namespaced
-# like every other server's tools).
-_expect("amazon-music.am_play" in names, "/tools/list includes amazon-music.am_play")
-_expect("amazon-music.am_volume" in names, "/tools/list includes amazon-music.am_volume")
-_expect("amazon-music.am_search_play" in names, "/tools/list includes amazon-music.am_search_play")
+# MCP-only: NO built-in music connector, no non-MCP capabilities.
+for gone in ("amazon-music.am_play", "amazon-music.am_pause",
+             "amazon-music.am_volume", "am_play", "am_pause"):
+    _expect(gone not in names, "/tools/list excludes %s (MCP-only)" % gone)
 
 # MCP introspection present.
 _expect("who_am_i" in names, "/tools/list includes who_am_i")
@@ -497,26 +496,21 @@ _expect(result.get("isError") is True,
 _expect("not a Nex capability" in result["content"][0]["text"],
         "refusal explains the boundary")
 
-# Amazon Music works through the same gateway (namespaced).
+# Music controls are gone entirely (MCP-only): prefixed name has no
+# upstream, bare name hits the boundary router.
 status, body = _http("POST", "/mcp",
                      {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                       "params": {"name": "amazon-music.am_play",
                                  "arguments": {}}})
-_expect(status == 200, "tools/call amazon-music.am_play 200")
-_expect(body["result"].get("isError") is not True,
-        "amazon-music.am_play executes")
-_expect("amazonmusic://" in body["result"]["content"][0]["text"],
-        "am_play result is an honest structured payload")
+_expect(status == 200 and body["result"].get("isError") is True,
+        "amazon-music.am_play refused (no such upstream)")
 
-# Bare-name music call also works.
 status, body = _http("POST", "/mcp",
                      {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                       "params": {"name": "am_volume",
                                  "arguments": {"level": 42}}})
-_expect(status == 200 and body["result"].get("isError") is not True,
-        "bare am_volume executes")
-_expect('"level": 42' in body["result"]["content"][0]["text"],
-        "am_volume level recorded")
+_expect(status == 200 and body["result"].get("isError") is True,
+        "bare am_volume refused at the boundary")
 
 
 # ---------- 11. live: invalid plan shape rejected ----------------------

@@ -38,8 +38,12 @@ Nothing is built until you approve.
 **The Plan Page.** `agent.design_ready` renders a real page in the UI:
 pillars, loop, systems, world, milestones, quality gates, honest
 dependency gaps, and the draft plan — with a START BUILD button
-(`POST /api/project/<id>/build`). Nex keeps the face visible while it
-works; it never becomes a soulless terminal.
+(`POST /api/project/<id>/build`). The approved plan is PERSISTED with
+the project, and START BUILD builds EXACTLY that plan — no silent
+re-planning between approval and execution. If the critic later says
+REPLAN, the next plan is created deliberately (Plan B), never by
+accident. Nex keeps the face visible while it works; it never becomes
+a soulless terminal.
 
 **Build -> critique -> improve (bounded).** After building, the critic
 (`agent/critic.py`) asks "is this actually good?" — technical
@@ -68,55 +72,17 @@ verdict, confused on a WEAK one — and calm the rest of the time.
 
 ## Capability boundary (hard invariant)
 
-Nex's AI acts ONLY through (1) explicitly connected MCP servers and
-(2) the Amazon Music connector. There is no flag, env var, or runtime
-call that turns this off (`mcp/policy.py` — `MCP_ONLY = True`).
+Nex's AI acts ONLY through explicitly connected MCP servers. There is
+no flag, env var, or runtime call that turns this off
+(`mcp/policy.py` — `MCP_ONLY = True`).
 
 - The model-visible MCP surface (`/mcp` `tools/list`) contains ONLY:
-  MCP introspection tools + every connected server's tools + the 7
-  Amazon Music controls. Filesystem/shell/host tools are server
-  infrastructure and are never exposed to the agent.
+  MCP introspection tools + every connected server's tools.
+  Filesystem/shell/host tools are server infrastructure and are never
+  exposed to the agent.
 - MCP `resources/` expose protocol metadata only (`nex://about`,
   `nex://tunnels`, per-server info, curated tool guides) — no
   filesystem, log, workspace, or host-state resources.
-
-## Amazon Music (official Web API)
-
-The connector (`music_amazon.py`) speaks the **official Amazon Music
-Web API** (https://developer.amazon.com/docs/music/) — Login With
-Amazon OAuth 2.0, `POST /v1/search/tracks`, `POST /v1/playback/sessions`,
-and the mandatory `/v1/playback/event` start/stop reporting.
-
-Setup (env):
-
-```
-NEX_AMZ_LWA_CLIENT_ID      # amzn1.application-oa2-client....
-NEX_AMZ_LWA_CLIENT_SECRET
-NEX_AMZ_LWA_REFRESH_TOKEN  # long-term LWA refresh token
-NEX_AMZ_PROFILE_ID         # x-api-key: LWA *Security Profile ID*
-                           # (amzn1.application....) — NOT the client id
-NEX_AMZ_DEVICE_ID          # optional; stable id derived from hostname
-NEX_AMZ_API_BASE           # default https://api.music.amazon.dev
-```
-
-NOTE: the Amazon Music Web API is in **closed beta** — the Security
-Profile must be enabled by Amazon Music (developer forum / contact).
-Until access exists the connector stays honest about it and you can
-still drive the installed Amazon Music app:
-
-```
-NEX_MUSIC_BACKEND=auto     # default: web when credentials exist, else stub
-NEX_MUSIC_BACKEND=web      # force the official Web API
-NEX_MUSIC_BACKEND=link     # open amazonmusic:// deep links (desktop app)
-NEX_MUSIC_BACKEND=stub     # CI/sandbox: record commands only
-```
-
-The 7 allowlisted controls (`am_play am_pause am_toggle am_next
-am_previous am_volume am_search_play`) are the entire surface — on the
-Web API backend they map to catalog search, playback sessions, and
-event reporting; volume is client-side (the API has no volume
-endpoint). DRM-protected streams are rendered by the Nex UI when the
-browser can, and honestly reported as unrenderable otherwise.
 
 ## Files
 

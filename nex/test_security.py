@@ -182,10 +182,11 @@ try:
     _expect("not a Nex capability" in blob,
             "write_file refused via /mcp (boundary)")
 
-    # But Amazon Music — the one non-MCP capability — works.
+    # Music controls are gone too — MCP-only now. The prefixed name has
+    # no upstream to route to, so the call errors out.
     blob, inner = _mcp_tool(base, "amazon-music.am_pause", {})
-    _expect("amazonmusic://" in json.dumps(inner),
-            "amazon-music connector reachable via /mcp")
+    _expect('"isError": true' in blob,
+            "amazon-music refused via /mcp (MCP-only boundary)")
 finally:
     proc.terminate()
     proc.wait(timeout=3)

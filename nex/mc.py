@@ -255,11 +255,11 @@ AAA_SYSTEM_PROMPT = (
 
 # THE CAPABILITY BOUNDARY, stated to the model verbatim.
 AAA_BOUNDARY = (
-    "HARD CAPABILITY BOUNDARY: your tools are ONLY (1) what the explicitly "
-    "connected MCP servers expose and (2) the Amazon Music controls (am_*). "
-    "You have NO filesystem, shell, OS, or arbitrary network access. If a "
-    "request needs something outside this boundary, say so plainly and name "
-    "the missing capability — never pretend, never simulate."
+    "HARD CAPABILITY BOUNDARY: your tools are ONLY what the explicitly "
+    "connected MCP servers expose. You have NO filesystem, shell, OS, or "
+    "arbitrary network access. If a request needs something outside this "
+    "boundary, say so plainly and name the missing capability — never "
+    "pretend, never simulate."
 )
 
 

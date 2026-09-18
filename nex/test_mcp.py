@@ -100,14 +100,7 @@ status, body = _rpc("tools/list")
 _expect(status == 200, "/mcp tools/list 200")
 tools = body["result"]["tools"]
 names = [t["name"] for t in tools]
-_expect(len(names) >= 10, "surface has the introspection + music tools")
-
-# Amazon Music connector (explicit allowlist, namespaced).
-for t in ("amazon-music.am_play", "amazon-music.am_pause",
-          "amazon-music.am_next", "amazon-music.am_previous",
-          "amazon-music.am_volume", "amazon-music.am_search_play",
-          "amazon-music.am_toggle"):
-    _expect(t in names, "surface includes %s" % t)
+_expect(len(names) >= 4, "surface has the introspection tools")
 
 # MCP introspection.
 for t in ("who_am_i", "list_platforms", "tunnel_status", "tunnel_probe"):
@@ -120,6 +113,9 @@ FORBIDDEN = (
     "detect_engines", "engine_info", "compile_check",
     "validate_assets", "json_path_query", "diff_files",
     "call_upstream", "log_event", "recent_events",
+    # MCP-ONLY: no music connector, no non-MCP capabilities at all.
+    "amazon-music.am_play", "amazon-music.am_pause",
+    "amazon-music.am_volume", "am_play", "am_pause", "am_next",
 )
 for t in FORBIDDEN:
     _expect(t not in names, "surface excludes %s (boundary)" % t)
@@ -159,36 +155,22 @@ _expect(status == 200 and body.get("isError") is True,
         "/api/tools/<name> enforces the boundary")
 
 
-# ---------- 3. Amazon Music through the same gateway --------------------------
+# ---------- 3. MCP-ONLY: no music connector, no side doors ----------
 
 status, body = _rpc("tools/call", {"name": "amazon-music.am_play",
                                    "arguments": {}})
-_expect(status == 200 and body["result"].get("isError") is not True,
-        "amazon-music.am_play executes")
-_expect("amazonmusic://" in body["result"]["content"][0]["text"],
-        "am_play returns an honest structured payload")
+_expect(status == 200 and body["result"].get("isError") is True,
+        "amazon-music.am_play refused (no such upstream)")
 
-status, body = _rpc("tools/call", {"name": "amazon-music.am_volume",
-                                   "arguments": {"level": 55}})
-_expect(status == 200 and body["result"].get("isError") is not True,
-        "amazon-music.am_volume executes")
-_expect('"level": 55' in body["result"]["content"][0]["text"],
-        "volume level carried through")
-
-status, body = _rpc("tools/call", {"name": "amazon-music.am_volume",
-                                   "arguments": {"level": 999}})
-_expect(body["result"].get("isError") is True,
-        "am_volume rejects out-of-range levels")
-
-status, body = _rpc("tools/call", {"name": "amazon-music.am_search_play",
-                                   "arguments": {"query": "lofi beats"}})
-_expect(status == 200 and body["result"].get("isError") is not True,
-        "amazon-music.am_search_play executes")
-
-# Bare-name music controls also work (convenience form).
 status, body = _rpc("tools/call", {"name": "am_next", "arguments": {}})
-_expect(status == 200 and body["result"].get("isError") is not True,
-        "bare am_next executes via the boundary router")
+_expect(status == 200 and body["result"].get("isError") is True,
+        "bare am_next refused at the boundary")
+
+# The /api/tools shims agree with the gateway.
+status, body = _http("POST", "/api/tools/call",
+                     {"name": "am_play", "arguments": {}})
+_expect(status == 200 and body.get("isError") is True,
+        "/api/tools/call refuses am_play (MCP-only)")
 
 
 # ---------- 4. resources: protocol metadata ONLY -----------------------------

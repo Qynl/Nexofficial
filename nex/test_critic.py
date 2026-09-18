@@ -255,7 +255,7 @@ def llm_pipeline(messages):
         CALLS["design"] += 1
         return "```json\n" + json.dumps(DESIGN_JSON) + "\n```"
     CALLS["plan"] += 1
-    return "```json\n" + json.dumps(PLAN_JSON) + "\n```"
+    return "```json\n" + json.dumps({"plan": PLAN_JSON}) + "\n```"
 
 
 def _llm_pipeline_old(messages):
@@ -269,7 +269,7 @@ def _llm_pipeline_old(messages):
                            "findings": [], "verdict": "PASS",
                            "note": "coherent"})
     CALLS["plan"] += 1
-    return "```json\n" + json.dumps(PLAN_JSON) + "\n```"
+    return "```json\n" + json.dumps({"plan": PLAN_JSON}) + "\n```"
 
 
 asset_tools = [
@@ -354,7 +354,7 @@ def llm_improve(messages):
         return json.dumps({"technical": 9, "design": 8, "quality": 9,
                            "findings": [], "verdict": "PASS",
                            "note": "good now"})
-    return "```json\n" + json.dumps(PLAN_JSON) + "\n```"
+    return "```json\n" + json.dumps({"plan": PLAN_JSON}) + "\n```"
 
 
 servers2 = [
@@ -393,7 +393,7 @@ def llm_always_weak(messages):
                                          "message": "still weak",
                                          "severity": "minor"}],
                            "verdict": "WEAK", "note": "never good"})
-    return "```json\n" + json.dumps(PLAN_JSON) + "\n```"
+    return "```json\n" + json.dumps({"plan": PLAN_JSON}) + "\n```"
 
 
 servers3 = [
@@ -409,6 +409,120 @@ agent3 = agent_loop.AutonomousAgent(
 report3 = agent3.run("mechanism puzzle box")
 _expect(agent3.last_critique.cycle == 2,
         "critique loops are BOUNDED (stops at max_critique_cycles)")
+
+
+# ---------------------------------------------------------------------------
+# 7b. EXACT-PLAN APPROVAL: design persists Plan A; build executes Plan A
+# exactly (no silent re-planning); REPLAN persists Plan B deliberately.
+# ---------------------------------------------------------------------------
+
+from agent.server_run import run_agent_goal  # noqa: E402
+from agent.projects_store import (load_approved,   # noqa: E402
+                                  load_approved_graph,
+                                  load_project_state)
+
+PLAN_B_JSON = {
+    "title": "mechanism puzzle box — plan B",
+    "rationale": "polish pass",
+    "steps": [
+        {"name": "polish frame", "tool": "create_asset",
+         "args": {}, "why": "finish", "expect": "polished"},
+    ],
+}
+
+plan_calls = {"build": 0, "pre_critique": 0}
+STATES_B = {"critiques": 0}
+
+
+def llm_design_critique_only(messages):
+    prompt = messages[-1]["content"]
+    if "quality critic" in prompt.lower():
+        STATES_B["critiques"] += 1
+        STATES_B["critique_seen"] = True
+        if STATES_B["critiques"] == 1:
+            return json.dumps({"technical": 6, "design": 5, "quality": 5,
+                               "findings": [{"kind": "quality",
+                                             "message": "rough edges",
+                                             "severity": "minor"}],
+                               "verdict": "WEAK", "note": "polish"})
+        return json.dumps({"technical": 9, "design": 8, "quality": 9,
+                           "findings": [], "verdict": "PASS",
+                           "note": "good"})
+    if "design lead" in prompt.lower():
+        return "```json\n" + json.dumps(DESIGN_JSON) + "\n```"
+    if "review it now" in prompt.lower():
+        # The post-build quality judge (pre-existing behavior) — not the
+        # planner. Give it a passing review in the judge's own schema.
+        return json.dumps({"fun": 9, "quality": 9, "playability": 9,
+                           "suggestions": []})
+    # The PLANNER must never be called BEFORE the first critique (that
+    # would mean the build is not executing the approved plan). A planner
+    # call AFTER a WEAK critique is the deliberate Plan B. Plan A is
+    # served before any critique (the design draft); Plan B after.
+    plan_calls["build"] += 1
+    if not STATES_B.get("critique_seen"):
+        plan_calls["pre_critique"] += 1
+        return "```json\n" + json.dumps({"plan": PLAN_JSON}) + "\n```"
+    return "```json\n" + json.dumps({"plan": PLAN_B_JSON}) + "\n```"
+
+
+with tempfile.TemporaryDirectory() as td:
+    os.environ["NEX_PROJECTS_DIR"] = td
+    # --- design phase: persist Plan A ---
+    res = run_agent_goal("mechanism puzzle box", bus=None,
+                         llm_call=llm_design_critique_only,
+                         llm_reachable=True, mode="design",
+                         registry=registry)
+    _expect(res.get("ok") is True and res.get("project_id"),
+            "design phase returns a persisted project id")
+    pid = res["project_id"]
+
+    # Reset counters: only the BUILD phase is under scrutiny now. (The
+    # design phase legitimately drafted Plan A once.)
+    plan_calls["build"] = 0
+    plan_calls["pre_critique"] = 0
+    STATES_B["critique_seen"] = False
+
+    approved = load_approved(pid)
+    _expect(approved and approved.get("plan", {}).get("title")
+            == "mechanism puzzle box",
+            "Plan A (the plan the Plan Page showed) is persisted")
+    g_a = load_approved_graph(pid)
+    _expect(g_a is not None
+            and [t.name for t in g_a.all()]
+            == [s["name"] for s in PLAN_JSON["steps"]],
+            "approved TaskGraph rebuilds to the exact approved steps")
+
+    # --- build phase: EXACTLY Plan A, no re-planning ---
+    st_a = load_project_state(pid)
+    events_b = []
+    agent_b_runs = run_agent_goal("mechanism puzzle box", bus=events_b.append,
+                                  llm_call=llm_design_critique_only,
+                                  llm_reachable=True, mode="build",
+                                  state=st_a, graph=g_a,
+                                  registry=registry)
+    _expect(plan_calls["pre_critique"] == 0,
+            "START BUILD executes Plan A — no planning before the critic")
+    executed = agent_b_runs["report"]["completed"]
+    _expect(executed[:len(PLAN_JSON["steps"])]
+            == [s["name"] for s in PLAN_JSON["steps"]],
+            "executed tasks are exactly the approved Plan A steps")
+    _expect(plan_calls["build"] == 1,
+            "exactly one deliberate re-plan (the improve round)")
+    _expect("polish frame" in agent_b_runs["report"]["completed"],
+            "Plan B's step executed after the WEAK critique")
+    _expect(STATES_B["critiques"] >= 2
+            and agent_b_runs["report"]["status"] == "COMPLETED",
+            "critic ran; WEAK -> improve -> re-critique PASS (bounded)")
+    # Plan B persisted deliberately after the improve round.
+    approved2 = load_approved(pid)
+    if not (approved2 and (approved2.get("plan") or {}).get("title")
+            == "mechanism puzzle box — plan B"):
+        print("DEBUG approved2:", json.dumps(approved2)[:200])
+    _expect(approved2 and (approved2.get("plan") or {}).get("title")
+            == "mechanism puzzle box — plan B",
+            "REPLAN/POLISH round persists Plan B as the current plan")
+    os.environ.pop("NEX_PROJECTS_DIR", None)
 
 
 # ---------------------------------------------------------------------------

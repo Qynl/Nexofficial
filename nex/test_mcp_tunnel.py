@@ -201,8 +201,8 @@ _expect(status == 200, "POST /api/tunnels returns 200")
 names_after = [t["name"] for t in body["tunnels"]]
 _expect("fake-roblox" in names_after,
         "registry replaced: fake tunnel present")
-_expect("amazon-music" in names_after,
-        "built-in amazon-music connector survives replace (explicit capability)")
+_expect("amazon-music" not in names_after,
+        "no built-in music connector (tunnels are user-connected only)")
 
 
 try:
