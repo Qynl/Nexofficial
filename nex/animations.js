@@ -39,6 +39,7 @@
     outCubic:     t => 1 - Math.pow(1-t, 3),
     inQuad:       t => t*t,
     outQuad:      t => 1 - (1-t)*(1-t),
+    inOutQuad:    t => t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2,
     outBack:      t => {
       const c1 = 1.70158, c3 = c1 + 1;
       return 1 + c3 * Math.pow(t-1, 3) + c1 * Math.pow(t-1, 2);
@@ -552,6 +553,80 @@
       },
     };
 
+    // ---- Campaign-era additions: still calm, still rare ----------------
+
+    // DOUBLE BLINK — a quick pair of blinks. Reads as mild interest.
+    B.doubleBlink = {
+      name: 'doubleBlink',
+      category: 'BLINK',
+      tier: 'UNCOMMON',
+      cooldown: 14.0,
+      weight: 0.5,
+      duration: 0.42,
+      run(ctx) {
+        // Two closes: peaks at t=0.22 and t=0.72 of the timeline.
+        const close1 = Math.exp(-Math.pow((ctx.t - 0.22) / 0.07, 2));
+        const close2 = Math.exp(-Math.pow((ctx.t - 0.72) / 0.08, 2));
+        const k = clamp(close1 + close2, 0, 1);
+        ctx.emit({ eyeLeft: { scaleY: 1 - k * 0.92 }, eyeRight: { scaleY: 1 - k * 0.92 } });
+      },
+    };
+
+    // CONTENT SQUINT — brief happy narrowing (like a small smile for eyes).
+    B.contentSquint = {
+      name: 'contentSquint',
+      category: 'RARE',
+      tier: 'VERY_RARE',
+      cooldown: 26.0,
+      weight: 0.35,
+      duration: 1.1,
+      run(ctx) {
+        const env = Easing.outCubic(Math.sin(ctx.t * Math.PI));
+        ctx.emit({
+          eyeLeft:  { scaleY: 1 - env * 0.18, offsetY: env * 0.004 },
+          eyeRight: { scaleY: 1 - env * 0.18, offsetY: env * 0.004 },
+          asymmetry: env * 0.08,
+        });
+      },
+    };
+
+    // DRIFT GAZE — a slow, unhurried wander of attention (never a snap).
+    B.driftGaze = {
+      name: 'driftGaze',
+      category: 'LOOK',
+      tier: 'UNCOMMON',
+      cooldown: 16.0,
+      weight: 0.7,
+      duration: 3.2,
+      run(ctx) {
+        const a = ctx.t;
+        const ease = a < 0.25 ? Easing.inOutQuad(a / 0.25)
+                   : a > 0.75 ? 1 - Easing.inOutQuad((a - 0.75) / 0.25)
+                   : 1;
+        const x = Math.sin(a * Math.PI * 2 * 0.5) * 0.3;
+        const y = Math.sin(a * Math.PI + 0.7) * 0.10;
+        ctx.emit({ lookX: x * ease, lookY: y * ease });
+      },
+    };
+
+    // SETTLE — a tiny drop and recover, like getting comfortable.
+    B.settle = {
+      name: 'settle',
+      category: 'MOVEMENT',
+      tier: 'COMMON',
+      cooldown: 18.0,
+      weight: 0.5,
+      duration: 0.9,
+      run(ctx) {
+        const drop = Math.sin(ctx.t * Math.PI);
+        ctx.emit({
+          faceShiftY: -drop * 0.006,
+          eyeLeft:  { scaleY: 1 - drop * 0.05 },
+          eyeRight: { scaleY: 1 - drop * 0.05 },
+        });
+      },
+    };
+
     return B;
 
   }
@@ -560,8 +635,16 @@
 
   // Priority order (lowest first; higher overrides lower).
   const STATE_PRIORITY = {
-    IDLE: 0, MUSIC: 1, THINKING: 2, LISTENING: 3, SPEAKING: 3, HAPPY: 3, EXCITED: 3, CONFUSED: 3, FOCUSED: 3, FRUSTRATED: 3, SURPRISED: 3, CURIOUS: 3, AMUSED: 3, SLEEPY: 3, PROUD: 3, SUSPICIOUS: 3, ERROR: 5, RECOVERY: 4,
+    IDLE: 0, MUSIC: 1, THINKING: 2, LISTENING: 3, SPEAKING: 3, HAPPY: 3, EXCITED: 3, CONFUSED: 3, FOCUSED: 3, FRUSTRATED: 3, SURPRISED: 3, CURIOUS: 3, AMUSED: 3, SLEEPY: 3, PROUD: 3, SUSPICIOUS: 3, SCAN: 3, ERROR: 5, RECOVERY: 4,
   };
+
+  function hexToRgb(hex) {
+    const h = String(hex || '').replace('#', '');
+    const n = parseInt(h.length === 3
+      ? h.split('').map(c => c + c).join('') : h, 16);
+    return { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255,
+             b: (n & 255) / 255 };
+  }
 
   class NexAnim {
     constructor() {
@@ -613,6 +696,113 @@
       // Wake sequence.
       this.wakeActive = false;
       this.wakeStart = 0;
+
+      // One-shot event effects (celebration burst, light sweep, verify
+      // scan, accent flash). Each: { kind, t, dur, color, amt }.
+      this.effects = [];
+      // Pointer gaze target (set by app.js; blended into IDLE only).
+      this.gaze = { x: 0, y: 0, tx: 0, ty: 0 };
+      this._nextSaccadeAt = 0;
+    }
+
+    // ---------- one-shot event effects (public API) ------------------------
+
+    // Success flourish: radial burst + brief teal-green accent lift.
+    celebrate(dur) {
+      this.effects.push({ kind: 'burst', t: 0, dur: dur || 1.1 });
+      this.flash('#7be0a0', 0.5, 1.2);
+    }
+
+    // Trouble flicker: structured glitch bands + ember accent.
+    trouble(dur) {
+      this.effects.push({ kind: 'trouble', t: 0, dur: dur || 0.8 });
+      this.flash('#ff8a6b', 0.45, 0.8);
+    }
+
+    // Working sweep: light band across the eyes (plans / execution).
+    sweepOnce(dur) {
+      this.effects.push({ kind: 'sweep', t: 0, dur: dur || 1.6 });
+    }
+
+    // Continuous scanline while VERIFYING (driven by app.js state map).
+    scanOnce(dur) {
+      this.effects.push({ kind: 'scan', t: 0, dur: dur || 1.4 });
+    }
+
+    // Accent flash: tint + halo lift that attacks fast, decays calm.
+    flash(colorHex, amt, dur) {
+      const c = hexToRgb(colorHex || '#7be0a0');
+      this.effects.push({ kind: 'flash', t: 0, dur: dur || 1.0,
+                          color: c, amt: (amt == null ? 0.45 : amt) });
+    }
+
+    // Pointer gaze (normalized -1..1). Blended gently into IDLE only.
+    setGaze(x, y) {
+      this.gaze.tx = clamp(x, -1, 1);
+      this.gaze.ty = clamp(y, -1, 1);
+    }
+
+    _applyEffects(dt) {
+      const p = this.params;
+      for (let i = this.effects.length - 1; i >= 0; i--) {
+        const e = this.effects[i];
+        e.t += dt;
+        const a = clamp(e.t / e.dur, 0, 1);
+        if (typeof e.run === 'function') e.run(a);
+        if (e.kind === 'burst') {
+          p.burst = a;
+        } else if (e.kind === 'sweep') {
+          p.sweep = a;
+        } else if (e.kind === 'scan') {
+          p.scan = a;
+        } else if (e.kind === 'flash') {
+          // Fast attack (~15%), exponential decay.
+          const env = a < 0.15 ? (a / 0.15) : Math.pow(1 - (a - 0.15) / 0.85, 1.6);
+          p.accent.r = e.color.r; p.accent.g = e.color.g; p.accent.b = e.color.b;
+          p.accentAmt = Math.max(p.accentAmt, e.amt * env);
+        } else if (e.kind === 'trouble') {
+          const env = Math.sin(a * Math.PI);
+          p.glitch = Math.max(p.glitch, env * 0.5);
+        }
+        if (a >= 1) {
+          this.effects.splice(i, 1);
+          if (e.kind === 'burst') p.burst = 0;
+          if (e.kind === 'sweep') p.sweep = -1;
+          if (e.kind === 'scan') p.scan = -1;
+        }
+      }
+      // When no flash is active, drift the accent back to neutral.
+      if (!this.effects.some(e => e.kind === 'flash')) {
+        p.accentAmt = Math.max(0, p.accentAmt - dt * 0.8);
+        if (p.accentAmt <= 0.001) {
+          p.accentAmt = 0;
+          p.accent.r = 1; p.accent.g = 1; p.accent.b = 1;
+        }
+      }
+    }
+
+    // Micro-saccade: a tiny gaze flick — the eyes dart a few degrees and
+    // glide back. Runs OUTSIDE the behavior scheduler (it's reflexive, not
+    // a behavior), so it composes with breathing/blink.
+    _maybeSaccade() {
+      if (this.state !== 'IDLE' || this.currentBehavior) return;
+      if (this.timeNow < this._nextSaccadeAt) return;
+      this._nextSaccadeAt = this.timeNow + 2.5 + this.rng() * 3.5;
+      const sx = (this.rng() * 2 - 1) * 0.16;
+      const sy = (this.rng() * 2 - 1) * 0.07;
+      const self = this;
+      this.effects.push({
+        kind: 'saccade', t: 0, dur: 0.34,
+        run(a) {
+          // dart out (0..0.3), hold (0.3..0.55), glide home (0.55..1).
+          let k;
+          if (a < 0.3) k = Easing.outQuad(a / 0.3);
+          else if (a < 0.55) k = 1;
+          else k = 1 - Easing.inOutQuad((a - 0.55) / 0.45);
+          self.params.lookX = sx * k + self.gaze.x * 0.06;
+          self.params.lookY = sy * k + self.gaze.y * 0.04;
+        },
+      });
     }
 
     _freshParams() {
@@ -636,6 +826,13 @@
         eyeLeft:  { offsetX: 0, offsetY: 0, scaleX: 1, scaleY: 1 },
         eyeRight: { offsetX: 0, offsetY: 0, scaleX: 1, scaleY: 1 },
         prop: { kind: 0, opacity: 0, level: 0 },
+        // Atmosphere / event FX (consumed by the WebGL shader).
+        accent: { r: 1, g: 1, b: 1 },
+        accentAmt: 0,
+        burst: 0,
+        sweep: -1,   // <0 = off, else 0..1 position
+        scan: -1,    // <0 = off, else 0..1 position
+        dust: 1,
       };
     }
 
@@ -978,6 +1175,7 @@
         case 'SLEEPY':     return this._stateSleepy(t, dt);
         case 'PROUD':      return this._stateProud(t, dt);
         case 'SUSPICIOUS': return this._stateSuspicious(t, dt);
+        case 'SCAN':       return this._stateScan(t, dt);
         case 'MUSIC':      return this._stateMusic(t, dt);
         case 'ERROR':      return this._stateError(t, dt);
         case 'RECOVERY':   return this._stateRecovery(t, dt);
@@ -1420,6 +1618,27 @@
 
     // ---------- audio layer ----------------------------------------------
 
+    // SCAN — verification in progress: eyes narrow a touch, gaze sweeps
+    // left/right like reading, shader scanline + teal accent, calm.
+    _stateScan(t, dt) {
+      const p = this.params;
+      const breathe = Math.sin(t * 1.2) * 0.3;
+      p.breath = breathe;
+      // Reading sweep: two slow passes, then hold.
+      const sweep = t < 2.4 ? Math.sin(t * 2.6) : Math.sin(2.4 * 2.6);
+      p.lookX = sweep * 0.28;
+      p.lookY = -0.06;
+      p.eyeLeft.scaleY = 0.92; p.eyeRight.scaleY = 0.92;
+      p.eyeLeft.scaleX = 1.02; p.eyeRight.scaleX = 1.02;
+      p.motionIntensity = 0.25 + 0.1 * Math.sin(t * 3.1);
+      // Shader scanline: ping-pong 0->1->0 per pass.
+      const cycle = (t * 0.8) % 1.0;
+      p.scan = cycle;
+      p.accent.r = 0.48; p.accent.g = 0.88; p.accent.b = 0.78;
+      p.accentAmt = Math.max(p.accentAmt, 0.35);
+      this._decayTransient();
+    }
+
     _applyAudioLayer() {
       const p = this.params;
       const a = this.audio;
@@ -1475,6 +1694,13 @@
       // Apply state behavior (writes into p).
       this._applyStateBehavior(dt);
 
+      // Pointer gaze blending (IDLE only, gentle) + reflexive saccades.
+      this._applyGaze(dt);
+      this._maybeSaccade();
+
+      // One-shot event effects (burst / sweep / scan / flash / trouble).
+      this._applyEffects(dt);
+
       // Apply audio layer on top.
       this._applyAudioLayer();
 
@@ -1487,6 +1713,23 @@
       if (Math.abs(p.faceShiftY) < 1e-4) p.faceShiftY = 0;
 
       return p;
+    }
+
+    _applyGaze(dt) {
+      // Smooth-follow the pointer target; only IDLE blends it into the
+      // actual look (states own the gaze while they're active).
+      const g = this.gaze;
+      const k = Math.min(1, dt * 3.0);
+      g.x += (g.tx - g.x) * k;
+      g.y += (g.ty - g.y) * k;
+      if (this.state === 'IDLE' && !this.currentBehavior
+          && !this.effects.some(e => e.kind === 'saccade')) {
+        // Gentle bounded pull toward the pointer (never more than ±0.06
+        // of extra look — the eyes acknowledge the cursor, they don't
+        // chase it).
+        this.params.lookX += (g.x * 0.06 - this.params.lookX) * 0.10;
+        this.params.lookY += (g.y * 0.04 - this.params.lookY) * 0.10;
+      }
     }
 
     _updateProp(dt) {

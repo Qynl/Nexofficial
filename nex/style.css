@@ -1,11 +1,26 @@
-/* NEX — minimal CSS. Everything is black except the face and a few UI affordances. */
+/* NEX — design system.
+   Black canvas, one white face, a few precise UI affordances.
+   Everything animates with purpose: rise in, settle, get out of the way. */
 
 :root {
   --bg: #000;
   --fg: #fff;
   --dim: rgba(255, 255, 255, 0.35);
+  --dimmer: rgba(255, 255, 255, 0.18);
   --panel: rgba(255, 255, 255, 0.04);
+  --panel-strong: rgba(10, 10, 10, 0.72);
   --border: rgba(255, 255, 255, 0.12);
+  --border-bright: rgba(255, 255, 255, 0.28);
+  --accent: #4ec9b0;
+  --accent-soft: rgba(78, 201, 176, 0.16);
+  --good: #7be0a0;
+  --warn: #ffc46b;
+  --bad: #ff8a8a;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 10px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 * { box-sizing: border-box; }
@@ -22,6 +37,8 @@ html, body {
   cursor: default;
 }
 
+::selection { background: rgba(78, 201, 176, 0.35); }
+
 #nex {
   position: fixed;
   inset: 0;
@@ -29,8 +46,50 @@ html, body {
   height: 100vh;
   display: block;
   background: var(--bg);
-  /* Subtle cursor hint near the face */
   cursor: default;
+}
+
+/* --- buttons: precise micro-interactions -------------------------------- */
+
+button {
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  cursor: pointer;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: var(--radius-sm);
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out),
+              transform 120ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+button:hover {
+  background: rgba(255,255,255,0.07);
+  border-color: var(--border-bright);
+  transform: translateY(-1px);
+}
+button:active { transform: translateY(0) scale(0.97); }
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button.active {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+  box-shadow: 0 0 14px rgba(255,255,255,0.18);
+}
+
+input, select {
+  font: inherit;
+  transition: border-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+input:focus-visible, select:focus-visible {
+  outline: none;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 /* --- speech bubble ------------------------------------------------------ */
@@ -43,19 +102,152 @@ html, body {
   max-width: min(560px, 80vw);
   padding: 14px 18px;
   border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.85);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
   color: var(--fg);
   font-size: 14px;
   line-height: 1.5;
   letter-spacing: 0.01em;
   white-space: pre-wrap;
   opacity: 0;
-  transition: opacity 240ms ease;
+  transform: translateX(-50%) translateY(10px);
+  transition: opacity 240ms var(--ease-out), transform 240ms var(--ease-out);
+  pointer-events: auto;
+}
+#bubble.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#bubble button { margin-top: 8px; }
+
+/* --- typing indicator ---------------------------------------------------- */
+
+#typing {
+  position: fixed;
+  left: 50%;
+  bottom: calc(7vh + 76px);
+  transform: translateX(-50%);
+  display: flex;
+  gap: 5px;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-strong);
+  backdrop-filter: blur(8px);
+  animation: typingIn 0.35s var(--ease-spring) both;
+  pointer-events: none;
+  z-index: 30;
+}
+#typing i {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--dim);
+  animation: typingBounce 1.2s ease-in-out infinite;
+}
+#typing i:nth-child(2) { animation-delay: 0.15s; }
+#typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+@keyframes typingIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* --- toasts --------------------------------------------------------------- */
+
+#toasts {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 60;
   pointer-events: none;
 }
-#bubble.show { opacity: 1; }
+.toast {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-strong);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  opacity: 0;
+  transform: translateY(-10px) scale(0.96);
+  transition: opacity 0.3s var(--ease-out), transform 0.3s var(--ease-spring);
+}
+.toast.in { opacity: 1; transform: translateY(0) scale(1); }
+.toast.out { opacity: 0; transform: translateY(-8px) scale(0.96); }
+.toast.ok  { border-color: rgba(123, 224, 160, 0.45); color: var(--good); }
+.toast.err { border-color: rgba(255, 138, 138, 0.45); color: var(--bad); }
 
-/* --- debug panel -------------------------------------------------------- */
+/* --- connection pill ------------------------------------------------------ */
+
+#conn-pill {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--panel-strong);
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+  z-index: 25;
+  box-shadow: var(--shadow);
+}
+.pill-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.pill-dot.on {
+  background: var(--accent);
+  animation: pillPulse 2.4s ease-in-out infinite;
+}
+.pill-dot.off { background: var(--dimmer); }
+@keyframes pillPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(78, 201, 176, 0.5); }
+  50% { box-shadow: 0 0 0 5px rgba(78, 201, 176, 0); }
+}
+
+/* --- boot hint ------------------------------------------------------------ */
+
+#boot-hint {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  animation: hintIn 0.8s var(--ease-out) 0.6s both, hintBreathe 4s ease-in-out 1.4s infinite;
+  transition: opacity 1.2s ease;
+  z-index: 15;
+  pointer-events: none;
+}
+#boot-hint.fade { opacity: 0; }
+@keyframes hintIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 0.85; transform: translateX(-50%) translateY(0); }
+}
+@keyframes hintBreathe {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 0.45; }
+}
+
+/* --- debug panel ---------------------------------------------------------- */
 
 #dev {
   position: fixed;
@@ -64,8 +256,10 @@ html, body {
   width: min(420px, 92vw);
   padding: 12px 14px;
   border: 1px solid var(--border);
-  background: var(--panel);
-  backdrop-filter: blur(8px);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
   font-size: 12px;
   letter-spacing: 0.04em;
   user-select: none;
@@ -86,21 +280,6 @@ html, body {
   gap: 6px;
 }
 
-button {
-  font: inherit;
-  font-size: 11px;
-  color: var(--fg);
-  background: transparent;
-  border: 1px solid var(--border);
-  padding: 5px 9px;
-  cursor: pointer;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-button:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.25); }
-button.active { background: var(--fg); color: var(--bg); border-color: var(--fg); }
-
 #dev-input {
   flex: 1;
   min-width: 100px;
@@ -109,6 +288,7 @@ button.active { background: var(--fg); color: var(--bg); border-color: var(--fg)
   background: transparent;
   color: var(--fg);
   border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   padding: 6px 8px;
   outline: none;
 }
@@ -131,7 +311,7 @@ button.active { background: var(--fg); color: var(--bg); border-color: var(--fg)
 .dev-status #dev-next,
 .dev-status #dev-recent { color: var(--fg); font-variant-numeric: tabular-nums; }
 
-/* --- autonomous agent panel (Plan / Build / Judges) --------------------- */
+/* --- autonomous agent panel ---------------------------------------------- */
 
 #agent-panel {
   position: fixed;
@@ -142,21 +322,22 @@ button.active { background: var(--fg); color: var(--bg); border-color: var(--fg)
   overflow-y: auto;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  background: var(--panel);
-  backdrop-filter: blur(8px);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
   font-size: 12px;
   line-height: 1.45;
   z-index: 20;
+  animation: panelRise 0.4s var(--ease-out) both;
+  scrollbar-width: thin;
+  scrollbar-color: var(--dimmer) transparent;
 }
 #agent-panel[hidden] { display: none; }
-#agent-panel {
-  animation: panelRise 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
 @keyframes panelRise {
   from { opacity: 0; transform: translateY(14px) scale(0.98); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-/* Shake when a tool fails — brief, event-driven, then gone. */
 #agent-panel.shake { animation: panelShake 0.4s ease; }
 @keyframes panelShake {
   0%, 100% { transform: translateX(0); }
@@ -165,12 +346,64 @@ button.active { background: var(--fg); color: var(--bg); border-color: var(--fg)
   75% { transform: translateX(-2px); }
 }
 
-/* Verification sparkle: a tiny tick that pops in on agent.verification_passed */
+/* rows slide in (plan steps, ticks, results) */
+.rowIn { animation: rowIn 0.35s var(--ease-out) both; }
+@keyframes rowIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.agent-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg);
+  margin: 8px 0 4px;
+}
+.agent-sub, .agent-status { color: var(--dim); margin: 2px 0; }
+.agent-status.err { color: var(--bad); }
+.agent-steps { margin: 4px 0 8px; padding-left: 18px; }
+.agent-steps li {
+  margin: 3px 0;
+  transition: opacity 0.3s ease;
+  list-style-position: outside;
+}
+.agent-steps li.running::marker { color: var(--warn); }
+.agent-steps li.running > b::after {
+  content: '…';
+  color: var(--warn);
+  animation: msPulse 1.1s ease-in-out infinite;
+}
+.agent-steps li.done { opacity: 0.62; }
+.agent-steps li.done::marker { content: '✓ '; color: var(--good); }
+.agent-steps li.failed::marker { content: '✗ '; color: var(--bad); }
+.agent-steps code {
+  color: rgba(255,255,255,0.7);
+  font-size: 11px;
+}
+.agent-why { color: var(--dim); font-size: 11px; }
+.agent-verdict { margin: 4px 0; padding: 4px 8px; border-radius: var(--radius-sm); font-weight: 600; }
+.verdict-pass { background: rgba(123, 224, 160, 0.15); color: var(--good); }
+.verdict-fail { background: rgba(255, 196, 107, 0.15); color: var(--warn); }
+.agent-scores, .agent-dims { color: rgba(255,255,255,0.7); margin: 4px 0; }
+.agent-dims .dim {
+  display: inline-block; margin: 2px 4px 2px 0; padding: 1px 7px;
+  border: 1px solid var(--border); border-radius: 999px; font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.agent-dims .dim.on { background: rgba(123, 224, 160, 0.18); color: var(--good); border-color: rgba(123, 224, 160, 0.4); }
+.agent-dims .dim.off { opacity: 0.5; }
+.agent-sugg { margin: 4px 0; }
+.agent-sugg ul { margin: 2px 0 0; padding-left: 16px; color: rgba(255,255,255,0.8); }
+.agent-failed { color: var(--bad); margin: 2px 0; }
+.agent-missing { color: var(--warn); margin: 2px 0; }
+
+/* Verification sparkle: pops in on agent.verification_passed */
 .verify-tick {
   display: inline-block;
   margin-right: 6px;
-  animation: tickPop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-  color: #7be0a0;
+  animation: tickPop 0.5s var(--ease-spring) both;
+  color: var(--good);
   font-weight: 700;
 }
 @keyframes tickPop {
@@ -179,16 +412,16 @@ button.active { background: var(--fg); color: var(--bg); border-color: var(--fg)
   to   { transform: scale(1); opacity: 1; }
 }
 
-/* Face celebration: soft glow halo around the WebGL canvas, event-driven. */
+/* Face celebration / trouble: DOM-side glow + dim over the canvas.
+   (The shader adds its own burst / glitch — these are the chrome.) */
 body.face-celebrate #nex {
   animation: faceGlow 0.9s ease-out both;
 }
 @keyframes faceGlow {
-  0%   { filter: drop-shadow(0 0 0 rgba(126, 224, 160, 0)); }
-  30%  { filter: drop-shadow(0 0 18px rgba(126, 224, 160, 0.45)); }
-  100% { filter: drop-shadow(0 0 0 rgba(126, 224, 160, 0)); }
+  0%   { filter: drop-shadow(0 0 0 rgba(123, 224, 160, 0)); }
+  30%  { filter: drop-shadow(0 0 18px rgba(123, 224, 160, 0.45)); }
+  100% { filter: drop-shadow(0 0 0 rgba(123, 224, 160, 0)); }
 }
-/* Face trouble: red flicker on error events. */
 body.face-trouble #nex {
   animation: faceDim 0.7s ease-out both;
 }
@@ -198,21 +431,37 @@ body.face-trouble #nex {
   100% { filter: none; }
 }
 
-/* --- campaign milestones (long-running builds) --------------------------- */
+/* --- campaign milestones --------------------------------------------------- */
+
 .campaign-bar {
   height: 4px;
   margin: 6px 0 10px;
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
+  position: relative;
 }
 .campaign-bar > i {
   display: block;
   height: 100%;
   width: 0%;
   border-radius: 2px;
-  background: linear-gradient(90deg, #4ec9b0, #7be0a0);
-  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  background: linear-gradient(90deg, var(--accent), var(--good));
+  transition: width 0.6s var(--ease-out);
+  position: relative;
+}
+.campaign-bar.working > i::after {
+  /* animated sheen while a milestone runs */
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent);
+  animation: barSheen 1.4s linear infinite;
+  background-size: 200% 100%;
+}
+@keyframes barSheen {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
 }
 .campaign-ms {
   display: flex;
@@ -221,7 +470,7 @@ body.face-trouble #nex {
   padding: 3px 0;
   opacity: 0.45;
   transform: translateX(-4px);
-  transition: opacity 0.4s ease, transform 0.4s ease;
+  transition: opacity 0.4s ease, transform 0.4s var(--ease-out);
 }
 .campaign-ms.running { opacity: 1; transform: translateX(0); }
 .campaign-ms.done { opacity: 0.9; transform: translateX(0); }
@@ -231,43 +480,22 @@ body.face-trouble #nex {
   width: 10px;
   text-align: center;
 }
-.campaign-ms.running .ms-state { color: #ffc46b; animation: msPulse 1.1s ease-in-out infinite; }
-.campaign-ms.done .ms-state { color: #7be0a0; animation: tickPop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
-.campaign-ms.failed .ms-state { color: #ff8a8a; }
+.campaign-ms.running .ms-state { color: var(--warn); animation: msPulse 1.1s ease-in-out infinite; }
+.campaign-ms.done .ms-state { color: var(--good); animation: tickPop 0.45s var(--ease-spring) both; }
+.campaign-ms.failed .ms-state { color: var(--bad); }
 @keyframes msPulse {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
 .campaign-ms .ms-title { flex: 1; }
 .campaign-ms .ms-status { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
-.agent-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--fg);
-  margin: 8px 0 4px;
+
+/* --- reduced motion: respect the user -------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
 }
-.agent-sub, .agent-status { color: var(--dim); margin: 2px 0; }
-.agent-status.err { color: #ff6b6b; }
-.agent-steps { margin: 4px 0 8px; padding-left: 18px; }
-.agent-steps li { margin: 3px 0; }
-.agent-steps code {
-  color: rgba(255,255,255,0.7);
-  font-size: 11px;
-}
-.agent-why { color: var(--dim); font-size: 11px; }
-.agent-verdict { margin: 4px 0; padding: 4px 8px; border-radius: 3px; font-weight: 600; }
-.verdict-pass { background: rgba(80,200,120,0.15); color: #7be0a0; }
-.verdict-fail { background: rgba(255,180,80,0.15); color: #ffc46b; }
-.agent-scores, .agent-dims { color: rgba(255,255,255,0.7); margin: 4px 0; }
-.agent-dims .dim {
-  display: inline-block; margin: 2px 4px 2px 0; padding: 1px 7px;
-  border: 1px solid var(--border); border-radius: 999px; font-size: 10px;
-  text-transform: uppercase; letter-spacing: 0.04em;
-}
-.agent-dims .dim.on { background: rgba(80,200,120,0.18); color: #7be0a0; border-color: rgba(80,200,120,0.4); }
-.agent-dims .dim.off { opacity: 0.5; }
-.agent-sugg { margin: 4px 0; }
-.agent-sugg ul { margin: 2px 0 0; padding-left: 16px; color: rgba(255,255,255,0.8); }
-.agent-failed { color: #ff8a8a; margin: 2px 0; }
-.agent-missing { color: #ffc46b; margin: 2px 0; }

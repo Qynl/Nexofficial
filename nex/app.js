@@ -65,6 +65,17 @@
     bindKeyboard();
     bindMouse();
     bindNetwork();
+    startConnPill();
+    showBootHint();
+
+    // Pointer gaze: the face quietly follows the cursor (blended only in
+    // IDLE by the animation engine — calm idle is untouched).
+    window.addEventListener('pointermove', (e) => {
+      if (!anim) return;
+      const nx = (e.clientX / window.innerWidth) * 2 - 1;
+      const ny = -((e.clientY / window.innerHeight) * 2 - 1);
+      anim.setGaze(nx * 0.9, ny * 0.7);
+    }, { passive: true });
 
     // Speech bubble fade handling.
     anim._origSetSpeech = anim.setSpeechText.bind(anim);
@@ -561,7 +572,22 @@
     }
   }
 
+  // Live plan-step progress: agent events carry task ids like "step_N"
+  // which map onto the rendered plan list items.
+  function markStep(taskId, status) {
+    if (!taskId) return;
+    const m = /step_(\d+)/.exec(String(taskId));
+    if (!m) return;
+    const li = agentPanel().querySelector('.agent-steps li[data-step="' + m[1] + '"]');
+    if (!li) return;
+    li.classList.remove('running', 'done', 'failed');
+    li.classList.add('rowIn', status);
+  }
+
   function faceCelebrate() {
+    // Shader burst + accent lift ...
+    if (anim && anim.celebrate) anim.celebrate();
+    // ... plus the DOM glow on the canvas.
     document.body.classList.remove('face-celebrate');
     void document.body.offsetWidth;  // restart the animation
     document.body.classList.add('face-celebrate');
@@ -569,10 +595,82 @@
   }
 
   function faceTrouble() {
+    if (anim && anim.trouble) anim.trouble();
     document.body.classList.remove('face-trouble');
     void document.body.offsetWidth;
     document.body.classList.add('face-trouble');
     setTimeout(() => document.body.classList.remove('face-trouble'), 750);
+  }
+
+  // ---- toasts -----------------------------------------------------------
+  function showToast(msg, kind) {
+    let wrap = document.getElementById('toasts');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = 'toasts';
+      document.body.appendChild(wrap);
+    }
+    const t = document.createElement('div');
+    t.className = 'toast ' + (kind || 'info');
+    t.textContent = msg;
+    wrap.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('in'));
+    setTimeout(() => {
+      t.classList.remove('in');
+      t.classList.add('out');
+      setTimeout(() => t.remove(), 400);
+    }, 3600);
+    // Cap the stack.
+    while (wrap.children.length > 4) wrap.firstChild.remove();
+  }
+
+  // ---- connection pill ---------------------------------------------------
+  let connTimer = null;
+  function refreshConnPill() {
+    fetch('/api/tunnels').then(r => r.json()).then(d => {
+      let pill = document.getElementById('conn-pill');
+      if (!pill) {
+        pill = document.createElement('button');
+        pill.id = 'conn-pill';
+        pill.title = 'MCP servers — click to manage';
+        pill.addEventListener('click', () =>
+          window.open('/settings.html', '_blank'));
+        document.body.appendChild(pill);
+      }
+      const online = d.online || 0, total = d.total || 0;
+      pill.innerHTML = '<span class="pill-dot ' + (online > 0 ? 'on' : 'off')
+        + '"></span>MCP ' + online + '/' + total;
+    }).catch(() => {});
+  }
+  function startConnPill() {
+    refreshConnPill();
+    if (connTimer) clearInterval(connTimer);
+    connTimer = setInterval(refreshConnPill, 15000);
+  }
+
+  // ---- boot hint ---------------------------------------------------------
+  function showBootHint() {
+    const h = document.createElement('div');
+    h.id = 'boot-hint';
+    h.textContent = 'press ` for controls';
+    document.body.appendChild(h);
+    setTimeout(() => h.classList.add('fade'), 3800);
+    setTimeout(() => h.remove(), 5600);
+  }
+
+  // ---- typing indicator ---------------------------------------------------
+  let typingEl = null;
+  function showTyping() {
+    if (typingEl) return;
+    typingEl = document.createElement('div');
+    typingEl.id = 'typing';
+    typingEl.innerHTML = '<i></i><i></i><i></i>';
+    document.body.appendChild(typingEl);
+  }
+  function hideTyping() {
+    if (!typingEl) return;
+    typingEl.remove();
+    typingEl = null;
   }
 
   function agentPanel() {
@@ -602,8 +700,9 @@
     const steps = (plan && plan.steps) || [];
     let html = '<div class="agent-title">Plan' + (plan && plan.title ? ' — ' + escapeHtml(plan.title) : '') + '</div>';
     html += '<ol class="agent-steps">';
+    let idx = 0;
     for (const s of steps) {
-      html += '<li><b>' + escapeHtml(s.name || '?') + '</b> '
+      html += '<li data-step="' + (s._idx != null ? s._idx : idx++) + '"><b>' + escapeHtml(s.name || '?') + '</b> '
         + '<code>' + escapeHtml(s.tool || '') + '</code>'
         + (s.depends_on && s.depends_on.length ? ' <i>← ' + escapeHtml(s.depends_on.join(', ')) + '</i>' : '')
         + (s.why ? '<br><span class="agent-why">' + escapeHtml(s.why) + '</span>' : '')
@@ -696,6 +795,8 @@
       body: JSON.stringify({ message: text }),
     }).catch(() => {});
     anim.setState({ state: 'LISTENING' });
+    showTyping();
+    setTimeout(hideTyping, 30000);  // safety net
   }
 
   function markButton(name, on) {
@@ -759,9 +860,11 @@
         // [STATE] tags before sending. We accept either `tts_text`
         // (preferred, fully cleaned) or `text` (legacy / direct POST).
         anim.setState({ state: 'SPEAKING', params: {} });
+        hideTyping();
         const shown = (evt.tts_text != null ? evt.tts_text : evt.text) || '';
         anim.setSpeechText(stripTagsClient(shown));
       } else if (evt.type === 'speak.delta') {
+        hideTyping();
         // Streaming: the bubble updates with each safe-boundary chunk.
         // The backend sends a complete, tag-stripped chunk. `text` is
         // the cumulative cleaned text; we use it directly so we never
@@ -818,12 +921,14 @@
         if (evt.agentState) {
           var AGENT_FACE = {
             PLANNING: 'THINKING', OBSERVING: 'LISTENING',
-            EXECUTING: 'FOCUSED', VERIFYING: 'CURIOUS',
+            EXECUTING: 'FOCUSED', VERIFYING: 'SCAN',
             REPAIRING: 'CONFUSED', WAITING: 'CALM',
             COMPLETED: 'PROUD', BLOCKED: 'SUSPICIOUS', ERROR: 'ERROR'
           };
           var face = AGENT_FACE[evt.agentState];
           if (face) anim.setState({ state: face, params: { source: 'agent' } });
+          if (evt.agentState === 'EXECUTING' && anim.sweepOnce) anim.sweepOnce(2.2);
+          if (evt.agentState === 'PLANNING' && anim.sweepOnce) anim.sweepOnce(1.4);
         }
         // Surface a short status line in the debug panel when available.
         if (dev && !dev.hidden && evt.agentState) {
@@ -833,6 +938,12 @@
         // A model reply contained a JSON plan. Show a confirm banner
         // so the user can approve / cancel destructive steps.
         showPlanBanner(evt.plan);
+      } else if (evt.type === 'agent.mcp_connected') {
+        showToast('MCP server connected: ' + (evt.server || 'server'), 'ok');
+        refreshConnPill();
+      } else if (evt.type === 'agent.mcp_disconnected') {
+        showToast('MCP server lost: ' + (evt.server || 'server'), 'err');
+        refreshConnPill();
       } else if (evt.type === 'agent.campaign_started') {
         renderCampaignStart(evt.milestones);
       } else if (evt.type === 'agent.milestone_started') {
@@ -857,19 +968,23 @@
           faceTrouble();
         }
       } else if (evt.type === 'agent.verification_passed') {
-        // Light-touch flourish: a sparkle line in the panel + soft glow.
+        // Light-touch flourish: sparkle line in the panel + face flash.
         const p = ensureAgentPanel();
         const tick = document.createElement('div');
-        tick.className = 'agent-status';
+        tick.className = 'agent-status rowIn';
         tick.innerHTML = '<span class="verify-tick">✓</span>verified '
           + escapeHtml(evt.task || '');
         p.appendChild(tick);
-        if (p.querySelectorAll('.verify-tick').length % 3 === 1) faceCelebrate();
+        if (anim && anim.flash) anim.flash('#7be0a0', 0.3, 0.7);
+        markStep(evt.task, 'done');
+      } else if (evt.type === 'agent.task_started') {
+        markStep(evt.task, 'running');
       } else if (evt.type === 'agent.tool_failed') {
         const p = agentPanel();
         p.classList.remove('shake');
         void p.offsetWidth;
         p.classList.add('shake');
+        markStep(evt.task, 'failed');
       } else if (evt.type === 'agent.plan_ready') {
         // The agent produced a goal-specific plan (model-driven or
         // capability fallback). Show it in the agent panel.

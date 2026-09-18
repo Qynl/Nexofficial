@@ -53,6 +53,7 @@ const expectedUniforms = [
   'u_asymmetry','u_distortion','u_motion',
   'u_audioLow','u_audioMid','u_audioHigh',
   'u_speech','u_listening','u_music','u_error','u_glitch',
+  'u_accent','u_accentAmt','u_burst','u_sweep','u_scan','u_dust',
   'u_left','u_right','u_prop',
 ];
 for (const u of expectedUniforms) {
@@ -106,6 +107,89 @@ for (const s of ['LISTENING','THINKING','SPEAKING','HAPPY','EXCITED','CALM','CON
   anim.setState({ state: s });
   anim.tick(0.05);
   assert(anim.state === s, 'setState ' + s);
+}
+
+// New calm behaviors present + runnable.
+for (const n of ['doubleBlink', 'contentSquint', 'driftGaze', 'settle']) {
+  const bh = anim.behaviors[n];
+  assert(!!bh, 'new behavior present: ' + n);
+  if (bh) {
+    assert(!!bh.category && typeof bh.cooldown === 'number'
+           && typeof bh.weight === 'number' && typeof bh.duration === 'number',
+           'new behavior metadata: ' + n);
+    try {
+      for (let i = 0; i < 10; i++) {
+        bh.run({ t: i / 9, dur: bh.duration, params: {}, emit: () => {} });
+      }
+      ok('new behavior runs: ' + n);
+    } catch (e) { bad('new behavior threw: ' + n + ' ' + e.message); }
+  }
+}
+
+// SCAN state honored + drives shader FX params.
+anim.setState({ state: 'SCAN' });
+anim.tick(0.05);
+assert(anim.state === 'SCAN', 'setState SCAN');
+let sawScan = false;
+for (let i = 0; i < 40; i++) {
+  const p = anim.tick(0.05);
+  if (p.scan >= 0 && p.scan <= 1) sawScan = true;
+}
+assert(sawScan, 'SCAN drives shader scan param');
+assert(anim.params.accentAmt > 0.1, 'SCAN carries accent tint');
+anim.setState({ state: 'IDLE' });
+
+// One-shot effects API.
+{
+  const a = new global.NexAnim();
+  a.start();
+  while (a.state === 'WAKE') a.tick(0.02);
+  a.setState({ state: 'IDLE' });
+  a.celebrate();
+  let peakBurst = 0;
+  for (let i = 0; i < 90; i++) {
+    const p = a.tick(0.02);
+    peakBurst = Math.max(peakBurst, p.burst);
+  }
+  ok('celebrate() drives burst (peak=' + peakBurst.toFixed(2) + ')', peakBurst > 0.5);
+  ok('burst settles back to 0', a.params.burst === 0);
+
+  a.sweepOnce(0.8);
+  let sawSweepPos = false, endedOff = false;
+  for (let i = 0; i < 60; i++) {
+    const p = a.tick(0.02);
+    if (p.sweep >= 0 && p.sweep <= 1) sawSweepPos = true;
+  }
+  endedOff = a.params.sweep === -1;
+  ok('sweepOnce() animates the band', sawSweepPos);
+  ok('sweep ends off', endedOff);
+
+  a.flash('#ff8a6b', 0.6, 0.6);
+  let peakAmt = 0;
+  for (let i = 0; i < 60; i++) {
+    const p = a.tick(0.02);
+    peakAmt = Math.max(peakAmt, p.accentAmt);
+  }
+  ok('flash() lifts accent then decays (peak=' + peakAmt.toFixed(2) + ')',
+     peakAmt >= 0.5 && a.params.accentAmt < 0.2);
+
+  a.trouble(0.5);
+  let peakGlitch = 0;
+  for (let i = 0; i < 40; i++) {
+    const p = a.tick(0.02);
+    peakGlitch = Math.max(peakGlitch, p.glitch);
+  }
+  ok('trouble() flickers glitch (peak=' + peakGlitch.toFixed(2) + ')', peakGlitch > 0.2);
+
+  // Pointer gaze blends gently into IDLE look.
+  a.setGaze(0.8, 0.4);
+  let maxLook = 0;
+  for (let i = 0; i < 120; i++) {
+    const p = a.tick(0.05);
+    maxLook = Math.max(maxLook, Math.abs(p.lookX));
+  }
+  ok('gaze follows pointer in IDLE (max=' + maxLook.toFixed(3) + ')',
+     maxLook > 0.02 && maxLook <= 0.2);
 }
 
 // Speech bubble text.
@@ -591,7 +675,7 @@ const gl = {
   useProgram() {},
   viewport() {},
   disable() {},
-  uniform1f() {}, uniform2f() {}, uniform4f() {},
+  uniform1f() {}, uniform2f() {}, uniform3f() {}, uniform4f() {},
   drawArrays() {},
 };
 const stubCanvas = {

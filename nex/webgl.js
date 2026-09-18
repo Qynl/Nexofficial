@@ -75,14 +75,19 @@
     uniform float u_error;        // 0..1
     uniform float u_glitch;       // 0..1 (transient)
 
+    // Atmosphere / event FX (all default to no-op).
+    uniform vec3  u_accent;     // accent tint color, rgb 0..1
+    uniform float u_accentAmt;  // 0..1 — how strongly the accent shows
+    uniform float u_burst;      // 0..1 — celebration burst progress
+    uniform float u_sweep;      // <0 off, else 0..1 light-sweep position
+    uniform float u_scan;       // <0 off, else 0..1 scanline position
+    uniform float u_dust;       // 0..1 — ambient dust visibility
+
     // Per-eye overrides (set from JS; default 0).
     uniform vec4  u_left;   // x: offsetX, y: offsetY, z: scaleX, w: scaleY
     uniform vec4  u_right;  // same layout
 
-    // Prop (headset / mic / etc.) — combined into a single uniform
-    // {kind, opacity, tilt, level, time}.
-    // kind: 0 = none, 1 = headset, 2 = microphone, 3 = controller,
-    //       4 = magnifier, 5 = code, 6 = notification.
+    // Prop (headset / mic / etc.)
     uniform vec4  u_prop;   // x: kind, y: opacity, z: tilt, w: level
 
     // --------------------------------------------------------------
@@ -94,49 +99,41 @@
       return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
     }
 
-    // Smooth min (used to merge/separate fields and to compute coverage).
     float smin(float a, float b, float k) {
       float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
       return mix(b, a, h) - k * h * (1.0 - h);
     }
 
-    // Pixel-grid AA factor based on canvas resolution.
     float aaScale() {
       return 1.5 / min(u_res.x, u_res.y);
     }
 
-    // Slight breathing displacement of a point around a center (used so the
-    // corners feel less rigid during long idle).
     vec2 organic(vec2 p, float t) {
       float n = sin(p.x * 3.1 + t * 1.3) * cos(p.y * 2.7 - t * 0.9);
       return p + vec2(0.0, n * 0.0008);
     }
 
-    // Build the SDF for a single eye shape at its center.
+    // Cheap hash for dust stars / burst ray variation / glitch bands.
+    float hash21(vec2 q) {
+      q = fract(q * vec2(123.34, 456.21));
+      q += dot(q, q + 45.32);
+      return fract(q.x * q.y);
+    }
+
     float sdEye(vec2 p, vec2 center, vec4 eyeLocal) {
-      // Apply face-level tilt + shift.
       float c = cos(u_faceTilt);
       float s = sin(u_faceTilt);
       vec2 q = p - center - vec2(u_faceShiftX, u_faceShiftY);
       q = mat2(c, -s, s, c) * q;
-
-      // Subtle organic noise (very low amplitude).
       q = organic(q, u_time);
-
-      // Local offsets / scale for this specific eye.
       q -= vec2(eyeLocal.x, eyeLocal.y);
 
-      // Base half-size with breath + pulse.
       float bw = u_baseW * eyeLocal.z;
       float bh = u_baseH * eyeLocal.w;
 
-      // Audio-driven wobble: low frequencies stretch horizontally a touch,
-      // high frequencies add micro jitter on the edges.
       bw *= 1.0 + u_audioLow * 0.04 + u_pulse * 0.03;
       bh *= 1.0 + u_audioLow * 0.02 + u_breath * 0.06 + u_pulse * 0.02;
 
-      // Edge distortion (audio + listening) — push the box slightly along
-      // its normal using noise so it looks alive instead of perfectly rigid.
       float edgePhase = atan(q.y, q.x);
       float noise =
         sin(edgePhase * 3.0 + u_time * 1.7) * 0.5 +
@@ -156,26 +153,17 @@
     // --------------------------------------------------------------
 
     float sdHeadset(vec2 p, float level) {
-      // Minimal headset: a thicker headband arc curving over the top of
-      // the face, plus two ear cups at the sides. The arc DOES NOT cover
-      // the eyes; it sits clearly above them.
       vec2 q = p;
       q = mat2(cos(u_faceTilt), -sin(u_faceTilt), sin(u_faceTilt), cos(u_faceTilt)) * q;
 
-      // The headband is a thick half-ring above the face. We mask out the
-      // bottom half so it only appears above the face.
-      float bandR    = 0.28 + level * 0.015;   // headband radius
-      float bandThk  = 0.018;                  // headband thickness
-      vec2 bandCenter = vec2(0.0, 0.06);        // sits just above face center
+      float bandR    = 0.28 + level * 0.015;
+      float bandThk  = 0.018;
+      vec2 bandCenter = vec2(0.0, 0.06);
 
-      // Distance to the ring around bandCenter.
       float dRing = abs(length(q - bandCenter) - bandR) - bandThk;
-      // Mask out everything below the face centerline.
-      float mask  = q.y - 0.00;               // negative -> below center
-      // Ring only where y > 0 (above the face).
+      float mask  = q.y - 0.00;
       float arc   = max(dRing, mask);
 
-      // Ear cups — small rounded squares to the sides of the face.
       float cupW = 0.045 + level * 0.005;
       float cupH = 0.075 + level * 0.005;
       float cupGap = u_gap * 0.5 + 0.180;
@@ -186,7 +174,6 @@
     }
 
     float sdMic(vec2 p, float level) {
-      // Minimal mic icon floating below-left of the face.
       vec2 q = p - vec2(-0.34, -0.28);
       q = mat2(cos(u_faceTilt), -sin(u_faceTilt), sin(u_faceTilt), cos(u_faceTilt)) * q;
 
@@ -215,7 +202,6 @@
 
     float sdCode(vec2 p, float level) {
       vec2 q = p - vec2(-0.30, 0.24);
-      // </>
       float lt = sdRoundedBox(q + vec2(0.02, 0.0), vec2(0.012, 0.035), 0.003);
       float slash = sdRoundedBox((q - vec2(0.0, 0.0)) * mat2(0.7071, -0.7071, 0.7071, 0.7071),
                                  vec2(0.045, 0.006), 0.003);
@@ -247,14 +233,9 @@
     // --------------------------------------------------------------
 
     void main() {
-      // Map v_uv (0..1) to centered coords in normalized units where
-      // the canvas height is 2.0. (Aspect handled implicitly via u_res.)
       vec2 p = (v_uv - 0.5);
-      p.x *= u_res.x / u_res.y;     // so things stay circular
-      p *= 1.0;                     // half-height = 1.0
+      p.x *= u_res.x / u_res.y;
 
-      // Look offsets shift shape centers (not the face itself) for natural
-      // gaze behavior. Limits keep it subtle.
       float lookRange = 0.045;
       vec2 leftCenter  = vec2(-u_gap + u_lookX * lookRange, u_lookY * lookRange);
       vec2 rightCenter = vec2( u_gap + u_lookX * lookRange, u_lookY * lookRange);
@@ -262,51 +243,127 @@
       float dL = sdEye(p, leftCenter,  u_left);
       float dR = sdEye(p, rightCenter, u_right);
 
-      // Merge the two fields. While idle they're separate; during music /
-      // certain emotional states they can briefly merge to feel unified.
       float dEyes = smin(dL, dR, 0.010);
 
-      // Prop field.
       float dProp = sdProp(p);
-      // Union (not smin) so the headset stays geometrically separate from
-      // the eyes. The smin around the eyes themselves stays for look states.
       float merged = min(dEyes, dProp);
 
-      // Anti-aliased coverage.
       float aa = aaScale();
       float cover = 1.0 - smoothstep(-aa, aa, merged);
 
-      // --- Soft inner shading (gives the flat pills dimensional life) ---
-      // depth: 0 at the very edge, ~1 deep inside the shape.
+      vec3 col = vec3(0.0);
+
+      // --- Ambient dust: two parallax star layers drifting behind the
+      // face. Extremely dim; gives the black depth without ever competing
+      // with the eyes. Parallax follows the gaze a touch.
+      if (u_dust > 0.001) {
+        for (int i = 0; i < 2; i++) {
+          float fi = float(i);
+          float scale = 7.0 + fi * 9.0;
+          vec2 drift = vec2(u_time * (0.010 + fi * 0.006),
+                            -u_time * (0.006 + fi * 0.004));
+          vec2 gp = (p - vec2(u_lookX, u_lookY) * 0.02 * (1.0 + fi)) * scale + drift;
+          vec2 cell = floor(gp);
+          vec2 f = fract(gp) - 0.5;
+          float h = hash21(cell + fi * 17.0);
+          vec2 soff = vec2(hash21(cell + 3.1), hash21(cell + 7.7)) - 0.5;
+          float star = smoothstep(0.16, 0.0, length(f - soff * 0.55));
+          float tw = 0.55 + 0.45 * sin(u_time * (0.6 + h * 1.9) + h * 40.0);
+          col += vec3(star * tw * u_dust * (0.045 - fi * 0.018));
+        }
+      }
+
+      // --- Face shading ---------------------------------------------------
       float depth = clamp(-merged / 0.05, 0.0, 1.0);
-      // Vertical gradient: very slightly brighter toward the top edge.
       float vgrad = 0.90 + 0.10 * clamp(p.y * 0.5 + 0.5, 0.0, 1.0);
-      // Soft gel falloff from the edge inward (so the center reads brightest).
       float gel = mix(0.88, 1.0, smoothstep(0.0, 1.0, depth));
-      // Faint top-left key light highlight for a porcelain/glass feel.
       float hl = 0.05 * smoothstep(0.55, 0.0, length(p - vec2(-0.16, 0.16)));
-      // Breathing subtly modulates brightness so idle "feels" alive.
       float shade = gel * vgrad + hl;
       shade *= 1.0 + u_breath * 0.05;
 
-      vec3 col = vec3(cover * shade);
+      // Glass glint per eye: a small specular highlight that slides
+      // AGAINST the gaze direction, so the eyes read as polished glass.
+      float depthL = clamp(-dL / 0.05, 0.0, 1.0);
+      float depthR = clamp(-dR / 0.05, 0.0, 1.0);
+      vec2 gOff = vec2(-u_lookX, -u_lookY) * 0.030;
+      vec2 gvecL = p - leftCenter - vec2(-0.085, 0.05) + gOff;
+      vec2 gvecR = p - rightCenter - vec2(-0.085, 0.05) + gOff;
+      float glintL = exp(-dot(gvecL, gvecL) * 900.0);
+      float glintR = exp(-dot(gvecR, gvecR) * 900.0);
+      shade += (glintL * depthL + glintR * depthR) * 0.30;
 
-      // --- Outer aura / glow: a soft halo hugging the shapes. ---
-      float halo = exp(-max(merged, 0.0) * 22.0);  // tight falloff outside
-      col += vec3(0.09 * halo * u_visibility);
+      // Bottom rim light: faint reflected light along the lower inner
+      // edge so the shapes are not lit from one side only.
+      float rimL = (1.0 - depthL) * depthL;
+      float rimR = (1.0 - depthR) * depthR;
+      float rimW = clamp(0.55 - (p.y - u_lookY * 0.02) * 3.0, 0.0, 1.0);
+      shade += (rimL + rimR) * rimW * 0.12;
+
+      // Working sweep: a soft vertical light band travelling across the
+      // eyes while Nex plans / executes. u_sweep < 0 means off.
+      if (u_sweep >= 0.0) {
+        float sx = mix(-0.55, 0.55, u_sweep);
+        float bx = (p.x - sx) * 9.0;
+        float band = exp(-bx * bx);
+        shade += band * depth * 0.55;
+      }
+
+      // Verify scan: a thin horizontal line travelling down the eyes
+      // while results are being checked. u_scan < 0 means off.
+      if (u_scan >= 0.0) {
+        float sy = mix(0.16, -0.16, u_scan);
+        float by = (p.y - sy) * 90.0;
+        float line = exp(-by * by);
+        shade += line * depth * 0.9;
+      }
+
+      // Accent tint: mostly-white face pulled toward the accent color.
+      vec3 faceCol = mix(vec3(1.0), u_accent, u_accentAmt * 0.6);
+      vec3 fcol = faceCol * clamp(shade, 0.0, 1.6) * cover;
+
+      // --- Halo: two-tier outer glow, tinted + boosted by the accent ------
+      float haloTight = exp(-max(merged, 0.0) * 22.0);
+      float haloWide  = exp(-max(merged, 0.0) * 6.5);
+      vec3 haloColor = mix(vec3(1.0), u_accent, u_accentAmt * 0.85);
+      vec3 hcol = haloColor *
+        ((haloTight * 0.09 + haloWide * 0.035) * (1.0 + u_accentAmt * 2.2))
+        * u_visibility;
+
+      // --- Celebration burst: radial rays + expanding ring. Driven by
+      // u_burst 0->1 once per success event; auto-fades as it grows.
+      if (u_burst > 0.001) {
+        float r = length(p);
+        float ang = atan(p.y, p.x);
+        float jitter = hash21(vec2(floor(ang * 1.9098), 3.0)) * 6.2831;
+        float spokes = sin(ang * 12.0 + jitter);
+        float rays = pow(max(spokes, 0.0), 8.0);
+        float rayMask = smoothstep(0.14, 0.5, r) * smoothstep(1.15, 0.55, r);
+        float ring = exp(-abs(r - u_burst * 0.95) * 26.0);
+        float env = u_burst * (1.0 - u_burst * 0.65);
+        col += (rays * rayMask * 0.30 + ring * 0.45) * env
+               * mix(vec3(1.0), u_accent, 0.55) * u_visibility;
+      }
+
+      // Compose: dust (already in col) + halo behind face + face on top.
+      col += hcol * (1.0 - cover);
+      col += fcol;
 
       // Tiny vignette so the face doesn't feel pasted onto the background.
       float vig = smoothstep(1.30, 0.42, length(p));
       col *= mix(0.93, 1.0, vig);
 
-      // Glitch: rare transient alpha shimmer.
-      float g = step(0.985, fract(sin(u_time * 11.3 + dot(v_uv, vec2(12.9898,78.233))) * 43758.5453));
-      cover = mix(cover, cover * (1.0 - 0.4 * u_glitch), g * u_glitch);
-      col *= mix(1.0, 1.0 - 0.4 * u_glitch, g * u_glitch);
+      // Glitch: horizontal slice dropouts (structured, not random snow).
+      float bandHash = hash21(vec2(floor((p.y + u_time * 3.0) * 24.0),
+                                   floor(u_time * 9.0)));
+      float band = step(0.93, bandHash);
+      col *= 1.0 - band * 0.45 * u_glitch;
+      col *= 1.0 - u_glitch * 0.12;
 
-      // WAKE: visibility scales everything in.
+      // Error: pull toward ember red.
+      float lum = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(col, vec3(lum) * vec3(1.5, 0.5, 0.45), u_error * 0.45);
+
       col *= u_visibility;
-
       gl_FragColor = vec4(col, 1.0);
     }
   `;
@@ -374,6 +431,7 @@
         'u_asymmetry','u_distortion','u_motion',
         'u_audioLow','u_audioMid','u_audioHigh',
         'u_speech','u_listening','u_music','u_error','u_glitch',
+        'u_accent','u_accentAmt','u_burst','u_sweep','u_scan','u_dust',
         'u_left','u_right','u_prop',
       ];
       for (const n of names) U[n] = gl.getUniformLocation(this.program, n);
@@ -440,6 +498,15 @@
 
       const prop = state.prop || { kind: 0, opacity: 0 };
       gl.uniform4f(U.u_prop, prop.kind ?? 0, prop.opacity ?? 0, prop.tilt ?? 0, prop.level ?? 0);
+
+      // Atmosphere / event FX.
+      const a = state.accent || { r: 1, g: 1, b: 1 };
+      gl.uniform3f(U.u_accent, a.r ?? 1, a.g ?? 1, a.b ?? 1);
+      gl.uniform1f(U.u_accentAmt, state.accentAmt ?? 0);
+      gl.uniform1f(U.u_burst, state.burst ?? 0);
+      gl.uniform1f(U.u_sweep, (state.sweep ?? -1));
+      gl.uniform1f(U.u_scan, (state.scan ?? -1));
+      gl.uniform1f(U.u_dust, state.dust ?? 1);
     }
 
     render(state, audio) {
