@@ -525,6 +525,16 @@ class AutonomousAgent:
             task.result = result
             graph.mark_success(task.id, result)
             state.record_success(task.name)
+            # Executor-level honesty: an autonomous run that REPLACED an
+            # existing file says so loudly (the result carries it; the
+            # audit log gets its own entry-shaped event).
+            if isinstance(result, dict) and result.get("overwritten"):
+                self._emit("EXECUTING", "agent.destructive_overwrite",
+                           task=task.id, tool=task.tool,
+                           path=result.get("path"))
+                task.notes = (task.notes +
+                              " | destructive: overwrote existing file"
+                              ).strip(" |")
             self._emit("EXECUTING", "agent.tool_succeeded", task=task.id,
                        tool=task.tool)
             return

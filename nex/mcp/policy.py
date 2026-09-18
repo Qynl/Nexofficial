@@ -110,6 +110,14 @@ def authorize(server: Optional[str], tool: str,
         return Decision(False, False,
                         "tool '%s' is never authorized" % tool, cat)
 
+    # 1b) Process execution (when the operator enables the shell) is a
+    # high-risk capability: always requires explicit confirmation, even
+    # though it is technically allowed.
+    if tool in ("run_command", "execute_command", "exec"):
+        return Decision(True, True,
+                        "process execution is high-risk: confirmation "
+                        "required", "PROCESS")
+
     # 2) Internal Nex runtime tool.
     if server is None or server == "__internal__":
         if tool in INTERNAL_ALLOWED:

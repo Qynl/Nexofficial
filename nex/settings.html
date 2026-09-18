@@ -223,6 +223,25 @@
   <div class="toast" id="toast"></div>
 
   <script>
+  // Auth bootstrap (same as app.js): attach X-Nex-Auth when configured.
+  (function () {
+    const TOKEN = window.NEX_AUTH || '';
+    if (!TOKEN) return;
+    const orig = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (url.startsWith('/api') || url.startsWith('/mcp')) {
+          init = init || {};
+          init.headers = Object.assign({}, init.headers || {},
+            { 'X-Nex-Auth': TOKEN });
+          return orig(input, init);
+        }
+      } catch (e) { /* fall through */ }
+      return orig(input, init);
+    };
+  })();
+
   /* Settings page — talks to /api/settings/tunnels and /api/settings/connect.
      Designed so each card is independent: connecting one tunnel never
      touches the others' state, and the catalog query updates both the

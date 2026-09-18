@@ -144,20 +144,36 @@ def tool_read_file(path: str, max_bytes: int = 1_000_000) -> Dict[str, Any]:
 
 
 def tool_write_file(path: str, content: str, append: bool = False) -> Dict[str, Any]:
-    """Write a text file. Overwrites by default; pass append=true to append."""
+    """Write a text file. Overwrites by default; pass append=true to append.
+
+    Hardening:
+      * the final component is opened with O_NOFOLLOW so a symlink swapped
+        in between the sandbox check and the write cannot redirect the
+        write outside the workspace (TOCTOU edge),
+      * the result honestly reports `overwritten: true` when an existing
+        file was replaced — callers/policy treat that as the destructive
+        fact it is.
+    """
     _ensure_root()
     try:
         full = _resolve(path)
     except PermissionError as exc:
         return {"error": str(exc)}
     os.makedirs(os.path.dirname(full), exist_ok=True)
-    mode = "a" if append else "w"
+    existed = os.path.exists(full) and not os.path.isdir(full)
     try:
-        with open(full, mode, encoding="utf-8") as f:
+        flags = os.O_WRONLY | os.O_CREAT
+        flags |= os.O_APPEND if append else os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(full, flags, 0o644)
+        with os.fdopen(fd, "a" if append else "w", encoding="utf-8") as f:
             f.write(content)
     except OSError as exc:
         return {"error": str(exc)}
-    return {"path": path, "bytes": len(content), "appended": append}
+    return {"path": path, "bytes": len(content), "appended": append,
+            "overwritten": bool(existed and not append),
+            "destructive": bool(existed and not append)}
 
 
 def tool_run_command(command: str, cwd: Optional[str] = None,
@@ -170,6 +186,19 @@ def tool_run_command(command: str, cwd: Optional[str] = None,
     """
     if not SHELL_ENABLED:
         return {"error": "shell commands are disabled (set NEX_TOOLS_SHELL=1)"}
+    # Name blocklists are not a security boundary (parent executables,
+    # interpreters, coreutils differ everywhere). When NEX_RUN_ALLOW is set
+    # it is an explicit executable ALLOWLIST: only those argv[0] basenames
+    # may run. Empty = unrestricted (the operator's explicit choice).
+    _allow = [a.strip() for a in
+              os.environ.get("NEX_RUN_ALLOW", "").split(",") if a.strip()]
+    if _allow:
+        argv0 = os.path.basename(command.strip().split(" ", 1)[0])
+        if argv0 not in _allow:
+            return {"error": (
+                "command '%s' not in NEX_RUN_ALLOW allowlist %s "
+                "(autonomous process execution is allowlisted)"
+                % (argv0, _allow))}
     try:
         argv = shlex.split(command)
     except ValueError as exc:

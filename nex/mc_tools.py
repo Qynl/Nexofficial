@@ -409,15 +409,20 @@ def compile_check(path: str, language: Optional[str] = None,
         # about that — the model can shell out to its own if it has
         # one configured.
         if language == "csharp":
+            # HONESTY: without a project/compiler we can only check the
+            # ENVIRONMENT, not the source. `checked: "environment"` tells
+            # the autonomous verifier this is NOT a successful compile.
             roslyn = _which("dotnet")
             if not roslyn:
-                return {"ok": False,
+                return {"ok": False, "checked": "none",
                         "reason": "dotnet not on PATH",
                         "file": path, "language": language}
             r = subprocess.run([roslyn, "--info"],
                                capture_output=True, text=True, timeout=10)
-            return {"ok": True,
-                    "reason": "dotnet present (full build requires a project)",
+            return {"ok": True, "checked": "environment",
+                    "compiled": False,
+                    "reason": "dotnet SDK present; source was NOT compiled "
+                              "(a csproj + build is required for that)",
                     "file": path, "language": language,
                     "dotnet": (r.stdout or r.stderr or "").strip()[:400]}
         return {"ok": False,
@@ -480,28 +485,37 @@ def validate_assets(kind: str = "auto",
                 kind = "roblox"; break
 
     if kind == "unreal":
-        # Every .uasset should have a sibling .uasset.meta with a guid.
+        # REAL Unreal structure checks. (An earlier version flagged every
+        # .uasset without a Unity-style .meta sidecar — that is not how
+        # Unreal works and it reported healthy projects as broken.)
         uasset_count = 0
-        meta_count = 0
+        empty_assets = 0
+        foreign_meta = 0
         for r, _d, files in os.walk(abs_root):
             for f in files:
                 p = os.path.join(r, f)
-                if f.endswith(".uasset"):
+                if f.endswith(".uasset") or f.endswith(".umap"):
                     uasset_count += 1
-                    meta = p + ".meta"
-                    if not os.path.exists(meta):
-                        _note("error",
-                              ".uasset missing sidecar .meta",
-                              os.path.relpath(p, abs_root))
-                elif f.endswith(".umap"):
-                    if not os.path.exists(p + ".meta"):
-                        _note("error",
-                              ".umap missing sidecar .meta",
-                              os.path.relpath(p, abs_root))
+                    try:
+                        if os.path.getsize(p) == 0:
+                            empty_assets += 1
+                            _note("error",
+                                  "asset file is zero bytes (corrupt save "
+                                  "or interrupted write)",
+                                  os.path.relpath(p, abs_root))
+                    except OSError:
+                        pass
                 elif f.endswith(".meta"):
-                    meta_count += 1
+                    # Unity-style sidecars inside an Unreal project are a
+                    # sign of a mixed checkout — informational, not fatal.
+                    foreign_meta += 1
+        if foreign_meta:
+            _note("warn",
+                  "%d Unity-style .meta sidecars present in an Unreal "
+                  "project (mixed checkout?)" % foreign_meta, "")
         report["uasset_count"] = uasset_count
-        report["meta_count"] = meta_count
+        report["empty_assets"] = empty_assets
+        report["foreign_meta_count"] = foreign_meta
 
     elif kind == "unity":
         # ProjectSettings/ProjectVersion.txt is the canonical version file.
@@ -620,8 +634,10 @@ def diff_files(a: str, b: str) -> Dict[str, Any]:
 
 MC_TOOLS = [
     ("detect_engines",
-     "Sniff the host for installed game engines (Unreal, Blender, "
-     "Godot, Roblox, Unity). Returns a structured report.",
+     "DIAGNOSTICS ONLY — host discovery, not a build capability. Sniffs "
+     "the local machine for installed game engines (Unreal, Blender, "
+     "Godot, Roblox, Unity). Do not plan around it: what Nex can actually "
+     "drive is whatever the CONNECTED MCP servers expose.",
      {"type": "object", "properties": {}, "required": []},
      detect_engines),
     ("engine_info",

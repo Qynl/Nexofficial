@@ -245,7 +245,7 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
         {"role": "user", "content": user_msg},
     ]
     try:
-        from mc import extract_plan
+        from agent.plans import extract_plan
         reply = llm(messages)
         plan = extract_plan(reply)
     except Exception:  # noqa: BLE001

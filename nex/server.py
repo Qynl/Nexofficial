@@ -20,7 +20,10 @@ Then open:
     http://localhost:8787
 
 Environment variables:
-    NEX_HOST / NEX_PORT         bind address (default 0.0.0.0:8787)
+    NEX_HOST / NEX_PORT         bind address (default 127.0.0.1:8787 —
+                                  loopback ONLY; set NEX_HOST=0.0.0.0 or
+                                  NEX_BIND=lan deliberately + set
+                                  NEX_AUTH_TOKEN if you want LAN access)
     OLLAMA_HOST                 base URL of the model server
                                  (default http://127.0.0.1:11434)
     OLLAMA_MODEL                model name (default llama3.2)
@@ -58,7 +61,15 @@ import mc_tools as _mc_tools  # noqa: E402
 # Configuration
 # ---------------------------------------------------------------------------
 
-HOST = os.environ.get("NEX_HOST", "0.0.0.0")
+# SECURITY: default bind is LOOPBACK. This server executes MCP tool calls,
+# mutates the workspace and reaches upstreams — it must not be reachable
+# from the network by accident. Opt into LAN exposure explicitly AND set a
+# NEX_AUTH_TOKEN (every /api + /mcp request then requires X-Nex-Auth).
+_host_env = os.environ.get("NEX_HOST", "")
+if not _host_env and os.environ.get("NEX_BIND", "").lower() in ("lan", "all", "0.0.0.0"):
+    _host_env = "0.0.0.0"
+HOST = _host_env or "127.0.0.1"
+AUTH_TOKEN = os.environ.get("NEX_AUTH_TOKEN", "")
 PORT = int(os.environ.get("NEX_PORT", "8787"))
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
@@ -262,10 +273,11 @@ def _NEX_META_TOOL_DEFS() -> List[Dict[str, Any]]:
         {
             "name": "call_upstream",
             "description":
-                "Raw passthrough to a child MCP server. Use this when "
-                "the targeted tool isn't exposed in /tools/list yet "
-                "or to call a non-tool method like 'resources/read' "
-                "on the upstream.",
+                "Read-only MCP protocol inspection on a child server. "
+                "Allowed methods ONLY: initialize, ping, tools/list, "
+                "resources/list, resources/read, prompts/list. Tool "
+                "EXECUTION must go through tools/call — this tool "
+                "deliberately cannot invoke arbitrary JSON-RPC methods.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -321,12 +333,26 @@ def _NEX_META_TOOL_HANDLERS() -> Dict[str, Any]:
         return {"error": "unknown platform: " + plat,
                 "known": [u.name for u in reg._upstreams]}
 
+    # Read-only protocol methods ONLY. call_upstream used to be a raw
+    # JSON-RPC passthrough — a policy bypass around capability/policy
+    # (arbitrary _method + params). Tool execution belongs in tools/call;
+    # this surface is for INSPECTING what an upstream exposes.
+    UPSTREAM_RPC_ALLOW = frozenset({
+        "initialize", "ping", "tools/list",
+        "resources/list", "resources/read", "prompts/list",
+    })
+
     def call_upstream(args: Dict[str, Any]) -> Dict[str, Any]:
         plat = (args or {}).get("platform")
         method = (args or {}).get("method")
         params = (args or {}).get("params") or {}
         if not plat or not method:
             return {"error": "missing 'platform' or 'method'"}
+        if method not in UPSTREAM_RPC_ALLOW:
+            return {"error": (
+                "method '%s' not allowed via call_upstream (read-only "
+                "protocol inspection only: %s). Execute tools via "
+                "tools/call." % (method, ", ".join(sorted(UPSTREAM_RPC_ALLOW))))}
         reg = get_tunnels()
         for u in reg._upstreams:
             if u.name == plat:
@@ -973,13 +999,20 @@ class NexHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_file(self, path: str, content_type: str) -> None:
+    def _send_file(self, path: str, content_type: str,
+                   inject_auth: bool = False) -> None:
         try:
             with open(path, "rb") as f:
                 data = f.read()
         except FileNotFoundError:
             self.send_error(404, "Not Found")
             return
+        if inject_auth and AUTH_TOKEN and content_type.startswith("text/html"):
+            # Bootstrap the token so the same-origin frontend can call the
+            # gated API. Only done when a token is configured at all.
+            boot = ("<script>window.NEX_AUTH = %s;</script>\n</head>"
+                    % json.dumps(AUTH_TOKEN))
+            data = data.replace(b"</head>", boot.encode("utf-8"), 1)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -1013,11 +1046,35 @@ class NexHandler(BaseHTTPRequestHandler):
             return
         self.send_error(404, "Not Found")
 
+    # ----- auth -------------------------------------------------------------
+    def _auth_ok(self) -> bool:
+        """When NEX_AUTH_TOKEN is set, every /api + /mcp request must carry
+        it (X-Nex-Auth header or Authorization: Bearer). Browsers get the
+        token injected into served HTML (window.NEX_AUTH) because the only
+        reason to expose this server beyond loopback is a deliberate,
+        token-protected deployment."""
+        if not AUTH_TOKEN:
+            return True
+        if self.headers.get("X-Nex-Auth") == AUTH_TOKEN:
+            return True
+        authz = self.headers.get("Authorization", "")
+        return authz == "Bearer " + AUTH_TOKEN
+
+    def _reject_auth(self) -> None:
+        self._send_json(401, {"ok": False,
+                              "error": "missing/invalid X-Nex-Auth"})
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if (path.startswith("/api/") or path == "/api"
+                or path == "/mcp" or path.startswith("/mcp/")) \
+                and not self._auth_ok():
+            self._reject_auth()
+            return
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         if path in ("/", "/index.html"):
-            self._send_file(os.path.join(FRONTEND_DIR, "index.html"), "text/html; charset=utf-8")
+            self._send_file(os.path.join(FRONTEND_DIR, "index.html"),
+                            "text/html; charset=utf-8", inject_auth=True)
         elif path == "/style.css":
             self._send_file(os.path.join(FRONTEND_DIR, "style.css"), "text/css; charset=utf-8")
         elif path == "/app.js":
@@ -1087,7 +1144,7 @@ class NexHandler(BaseHTTPRequestHandler):
             self._handle_plan(path, query)
         elif path == "/settings.html" or path == "/settings":
             self._send_file(os.path.join(FRONTEND_DIR, "settings.html"),
-                            "text/html; charset=utf-8")
+                            "text/html; charset=utf-8", inject_auth=True)
             return
         elif path.startswith("/api/tunnels/"):
             from tunnels import get_tunnels, reload_tunnels
@@ -1102,6 +1159,11 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if (path.startswith("/api/") or path == "/api"
+                or path == "/mcp" or path.startswith("/mcp/")) \
+                and not self._auth_ok():
+            self._reject_auth()
+            return
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         if path == "/api/state":
             body = self._read_json_body()
@@ -1301,7 +1363,8 @@ class NexHandler(BaseHTTPRequestHandler):
         """DELETE /api/tunnels/<name> — unregister now + un-persist."""
         from tunnels import get_tunnels, remove_user_tunnel
         reg = get_tunnels()
-        reg._upstreams[:] = [u for u in reg._upstreams if u.name != name]
+        with reg._lock:
+            reg._upstreams[:] = [u for u in reg._upstreams if u.name != name]
         was_saved = remove_user_tunnel(name)
         self._send_json(200, {
             "removed": name,
@@ -1311,6 +1374,9 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         """DELETE support (settings page removes user-added MCP servers)."""
+        if not self._auth_ok():
+            self._reject_auth()
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         if path.startswith("/api/tunnels/"):

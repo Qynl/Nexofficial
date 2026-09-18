@@ -48,7 +48,11 @@ class TunnelRegistry:
     def __init__(self, upstreams: Optional[List[Upstream]] = None) -> None:
         # Copy so callers can't mutate our state.
         self._upstreams: List[Upstream] = list(upstreams or default_registry())
-        self._lock = threading.Lock()
+        # Reentrant: reads that call other reads (summary -> list_upstreams).
+        # Snapshot reads: we copy the list under the lock, then touch the
+        # upstreams OUTSIDE it so slow network I/O never serializes the
+        # registry against itself under ThreadingHTTPServer concurrency.
+        self._lock = threading.RLock()
         self._local_tools_fn: Optional[Callable[[], List[Dict[str, Any]]]] = None
         self._local_router: Optional[Callable[[str, Dict[str, Any]],
                                               Dict[str, Any]]] = None
@@ -74,7 +78,9 @@ class TunnelRegistry:
     # ----- introspection --------------------------------------------------
 
     def list_upstreams(self) -> List[Dict[str, Any]]:
-        return [u.status() for u in self._upstreams]
+        with self._lock:
+            snapshot = list(self._upstreams)
+        return [u.status() for u in snapshot]
 
     def raw_upstreams(self) -> List[Upstream]:
         """Return the live ``Upstream`` objects (not status summaries).
@@ -82,7 +88,8 @@ class TunnelRegistry:
         The agent layer uses this to build a capability registry straight
         from the connected servers rather than from cached status dicts.
         """
-        return list(self._upstreams)
+        with self._lock:
+            return list(self._upstreams)
 
     def summary(self) -> Dict[str, Any]:
         statuses = self.list_upstreams()
@@ -129,7 +136,9 @@ class TunnelRegistry:
                 if _cap is not None:
                     e["_capability"] = _cap(t).to_dict()
                 out.append(e)
-        for u in self._upstreams:
+        with self._lock:
+            snapshot = list(self._upstreams)
+        for u in snapshot:
             try:
                 tools = u.tools()
             except UpstreamError:
@@ -237,9 +246,10 @@ class TunnelRegistry:
     # ----- primitives -----------------------------------------------------
 
     def _find(self, name: str) -> Optional[Upstream]:
-        for u in self._upstreams:
-            if u.name == name:
-                return u
+        with self._lock:
+            for u in self._upstreams:
+                if u.name == name:
+                    return u
         return None
 
     def _call_upstream(self, u: Upstream, tool: str,

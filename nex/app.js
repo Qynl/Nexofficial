@@ -14,6 +14,27 @@
  *   - window.NexAnim  (behavior engine)
  */
 (function () {
+  // Auth bootstrap: when the server runs with NEX_AUTH_TOKEN, every
+  // /api + /mcp request must carry it. The token is injected into the
+  // served HTML (window.NEX_AUTH); this wrapper attaches it everywhere.
+  (function () {
+    const TOKEN = window.NEX_AUTH || '';
+    if (!TOKEN) return;
+    const orig = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (url.startsWith('/api') || url.startsWith('/mcp')) {
+          init = init || {};
+          init.headers = Object.assign({}, init.headers || {},
+            { 'X-Nex-Auth': TOKEN });
+          return orig(input, init);
+        }
+      } catch (e) { /* fall through */ }
+      return orig(input, init);
+    };
+  })();
+
   'use strict';
 
   // ------- DOM -----------------------------------------------------------
