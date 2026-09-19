@@ -159,9 +159,42 @@ GAME REQUEST -> DIRECTOR (systems + build order + checklists)
   system still has unproven criteria — the run reports `PARTIAL` and
   names exactly which criteria lack evidence from the running game.
 
-The UI shows the system map (planned / building / verified / broken) with
-the current objective, its checklist (criteria turn green only when
-proven) and the gate rows for anything unverified.
+The UI shows the system map (planned / building / **built, not verified** /
+verified / broken) with the current objective, its checklist (criteria turn
+green only when proven) and the gate rows for anything unverified. A system
+whose work is done but whose criteria were never confirmed is labelled
+`unverified` — never `verified`.
+
+### Campaigns: a run works the game plan, not a single system
+
+`NEX_MAX_SYSTEMS_PER_RUN` (default 2) and `NEX_RUN_BUDGET_S` (default
+900s) bound how far one run gets: after a system's work is done the
+campaign scopes the next system and keeps going, announcing every step
+(`agent.system_started`, `agent.campaign_finished` /
+`agent.campaign_stopped` with the reason). Three things keep it honest:
+
+* **Verification is not progress.** The campaign advances when the work
+  is done, not when it is proven; unproven systems are recorded as
+  `unverified` and the completion gate still names their criteria, so a
+  campaign run ends `PARTIAL` rather than claiming "AAA done".
+* **A quality target, not a feeling.** The critics score 1-10; `NEX_QUALITY_TARGET`
+  (default 0.6) is enforced in code — a PASS below the target becomes
+  another polish round (`agent.quality_gate`), bounded by
+  `NEX_MAX_QUALITY_ROUNDS`.
+* **The model is optional.** With no model (or a failed model call) the
+  plan comes from the RECIPE library matched against the live catalog by
+  deterministic rules (`agent.recipe_planned`) instead of a generic
+  skeleton.
+
+### Without an engine: the BLUEPRINT
+
+"No MCP servers are connected" is honest but useless on its own, so a
+blocked run now produces the **build blueprint**: every system in build
+order, the proven steps, the capability each step needs and the tool that
+would serve it (or "not connected"), the completion checklist, and the
+test plan that would prove it. It is published as `agent.blueprint`,
+persisted with the project (`state.blueprint_md`) and is explicitly a
+PLAN — nothing is reported as built.
 
 Both entry points are directed. A run started from the agent loop gets a
 Director pass before planning; `START BUILD` on an approved plan
@@ -170,6 +203,38 @@ Director pass before planning; `START BUILD` on an approved plan
 its checklist — so an approved plan is executed as approved AND
 verifiable. Re-planning it would betray the approval; verifying it
 against nothing would betray the user.
+
+### The capability boundary: connected is not trusted, trusted is not code execution
+
+Nex's only action surface is MCP, and three separate decisions stand
+between a model output and the machine:
+
+1. **Server trust** (`NEX_TRUSTED_SERVERS`, strict mode by default):
+   connecting a server is an operator act, and it is not enough to call
+   its tools.
+2. **Tool classification** — every tool gets a category from its name and
+   from its (untrusted) MCP annotations, severity-max, plus the operator's
+   capability file. `CODE_EXECUTION` covers the tools that RUN code
+   (`execute_luau`, `run_python`, `run_script`, a terminal): whatever the
+   payload contains executes with the engine's privileges, so those tools
+   are never silently allowed. Ordinary editor tools (`create_script`,
+   `run_game`, `screenshot`, `read_console`, `save_place`) are classified
+   by exact token rules and stay friction-free.
+3. **The call's arguments** — `scan_arguments()` refuses OS primitives
+   inside an argument (`os.execute`, `io.popen`, `subprocess`,
+   `loadstring`, `dofile`, ...) and sensitive paths on *every* tool
+   (`~/.ssh`, `.aws`, `/etc/`, `.nex/` — Nex's own token), and
+   `scan_file_payload()` closes the laundering path where the payload is
+   written to a file and the file is executed.
+
+An autonomous run never approves anything for itself: a call that still
+requires confirmation stops the run, is reported (`agent.
+confirmation_required`) and appears in the UI. Two operator levers say
+"yes, deliberately": `NEX_ALLOW_CODE_EXECUTION=<server>` for code/process
+tools, `NEX_ALLOW_CONFIRMATIONS=<server>` for destructive/network/unknown
+names, or a per-tool `{"approved": true}` pin in the capability file.
+Escape payloads are refused even with every lever pulled
+(`test_escape.py`, section C).
 
 ## The OBSERVE loop (build -> run -> observe -> fix -> verify)
 
@@ -291,6 +356,9 @@ no flag, env var, or runtime call that turns this off
   per-system completion checklists (engine-agnostic, no tool names).
 - `agent/roles.py` — the specialized roles (planner/reviewer/tester/
   debugger/critic) and their tightly scoped context builders.
+- `agent/blueprint.py` — the deterministic build blueprint (systems,
+  required capabilities, checklists, test plan) for runs without an
+  engine.
 - `test_director.py` — Director-layer tests: recipes, decomposition,
   scope cage, bounded memory, roles, mandatory verification.
 - `mcp_engines.py` — **MCP-only** curated guide adapter for the Roblox

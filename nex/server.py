@@ -2270,10 +2270,22 @@ class NexHandler(BaseHTTPRequestHandler):
                     source=cd.get("source", "conservative"),
                 )
                 break
-        decision = authorize(server, tool_name, cap, current_policy())
+        decision = authorize(server, tool_name, cap, current_policy(),
+                             args=arguments if isinstance(arguments, dict)
+                             else None)
         if not decision.allowed:
             return {"content": [{"type": "text",
                                  "text": "blocked by the capability boundary: "
+                                 + decision.reason}],
+                    "isError": True}
+        # CONFIRMATION IS ENFORCED HERE TOO. A direct MCP/REST call has no
+        # way to ask a human, so a call that requires confirmation is
+        # refused with the exact operator action that would allow it.
+        # (Previously this decision was computed and then ignored — a
+        # destructive or code-executing tool ran on nothing but trust.)
+        if decision.requires_confirmation:
+            return {"content": [{"type": "text",
+                                 "text": "confirmation required: "
                                  + decision.reason}],
                     "isError": True}
         # Local-prefix tools below are handled without the registry.
@@ -3146,10 +3158,29 @@ def main() -> None:
                 _trusted.add(_a)
         _strict = os.environ.get("NEX_STRICT_SERVERS", "1").strip().lower()
         _strict_on = _strict not in ("0", "false", "no", "off")
+        # CODE EXECUTION standing approval: deliberately a separate
+        # operator statement. Trusting a server does not mean "and run
+        # whatever code it accepts"; this env is how the operator says
+        # that second thing explicitly.
+        _allow_exec = set()
+        for _a in os.environ.get("NEX_ALLOW_CODE_EXECUTION", "").split(","):
+            _a = _a.strip()
+            if _a:
+                _allow_exec.add(_a)
+        _allow_conf = set()
+        for _a in os.environ.get("NEX_ALLOW_CONFIRMATIONS", "").split(","):
+            _a = _a.strip()
+            if _a:
+                _allow_conf.add(_a)
         set_policy(Policy(strict_servers=_strict_on,
-                          trusted_servers=_trusted))
-        print("Policy: strict_servers=%s trusted=%s"
-              % (_strict_on, sorted(_trusted)))
+                          trusted_servers=_trusted,
+                          allow_code_execution=_allow_exec,
+                          allow_confirmations=_allow_conf))
+        print("Policy: strict_servers=%s trusted=%s code_execution=%s "
+              "standing_confirmations=%s"
+              % (_strict_on, sorted(_trusted),
+                 sorted(_allow_exec) or "none",
+                 sorted(_allow_conf) or "none"))
     except Exception as exc:  # noqa: BLE001
         print("Policy: NOT configured (%s) — using core defaults" % exc)
 

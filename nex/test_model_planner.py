@@ -259,7 +259,12 @@ def test_llm_repair_used_when_regex_fails():
     g = TaskGraph()
     g.add(Task(id="t1", name="flaky_step", stage="asset",
                server="repair_mcp", tool="flaky", args={}))
-    agent = agent_loop.AutonomousAgent(reg, llm=repair_llm)
+    # `flaky` is an unclassifiable tool name (UNKNOWN => "untrusted by
+    # default" => confirmation). An autonomous run does not invent that
+    # approval for itself, so the test supplies the operator's approver —
+    # the same lever a real deployment uses (capability pin / approver).
+    agent = agent_loop.AutonomousAgent(reg, llm=repair_llm,
+                                       approver=lambda task: True)
     report = agent.run("repair me", graph=g)
     _expect(report.status == STATUS_COMPLETED,
             "LLM repair recovers the task, got %r" % report.status)

@@ -239,9 +239,19 @@ try:
     # 6) The planner got the project memory on the repair round.
     plan_calls = [c for c in llm.calls
                   if "LIVE TOOL CATALOG" in json.dumps(c)]
-    _expect(len(plan_calls) == 2,
-            "observe: two planning rounds (initial + repair), got %d"
-            % len(plan_calls))
+    # Two rounds for THIS system (initial + repair) — plus, since round 3
+    # of the work, one more if the campaign moved on to the next system.
+    # The repair round is what this suite is about; the campaign has its
+    # own section in test_director.py.
+    _expect(len(plan_calls) >= 2,
+            "observe: the initial + repair planning rounds both happened, "
+            "got %d" % len(plan_calls))
+    campaign_started = [e for e in events
+                        if e.get("type") == "agent.system_started"]
+    _expect(len(plan_calls) == 2 + len(campaign_started),
+            "observe: exactly one planning round per system (initial + "
+            "repair, plus the campaign's next system): %d rounds, %d "
+            "campaign systems" % (len(plan_calls), len(campaign_started)))
     second = json.dumps(plan_calls[1])
     _expect("CONFIRMED DEFECTS" in second,
             "observe: repair plan prompt carries the open-bug memory")

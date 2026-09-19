@@ -44,6 +44,10 @@ SYSTEM_PLANNED = "planned"
 SYSTEM_IN_PROGRESS = "in_progress"
 SYSTEM_COMPLETE = "complete"
 SYSTEM_BROKEN = "broken"        # was complete, then a defect was observed
+# Work finished, but the criteria were NOT proven (no reviewer verdict and
+# no clean observation). Distinct from "complete" on purpose: the system
+# map must never show unverified work as verified.
+SYSTEM_UNVERIFIED = "unverified"
 
 
 @dataclass
@@ -92,6 +96,10 @@ class ProjectState:
     # The system the CURRENT work is scoped to (agent.director scope
     # envelope). The critic uses it to report scope creep; the UI shows it.
     current_system: str = ""
+    # The rendered BUILD BLUEPRINT (what will be built, with which
+    # capabilities, and what would prove it). Bounded: it is a document,
+    # not a log, and the newest one replaces the old.
+    blueprint_md: str = ""
     # Lifecycle phase: PLANNING -> DESIGNING -> BUILDING -> CRITIQUING ->
     # POLISHING -> COMPLETE (or FAILED / PAUSED).
     phase: str = "PLANNING"
@@ -419,6 +427,7 @@ class ProjectState:
             "knowledge": self.knowledge,
             "completed_count": self.completed_count,
             "current_system": self.current_system,
+            "blueprint_md": (self.blueprint_md or "")[:20000],
             "phase": self.phase,
             "project_id": self.project_id,
         }
@@ -451,6 +460,7 @@ class ProjectState:
         s.completed_count = int(d.get("completed_count")
                                 or len(s.completed))
         s.current_system = d.get("current_system", "") or ""
+        s.blueprint_md = (d.get("blueprint_md", "") or "")[:20000]
         s.phase = d.get("phase", "PLANNING") or "PLANNING"
         s.project_id = d.get("project_id", "") or ""
         return s

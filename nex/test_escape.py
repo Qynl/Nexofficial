@@ -408,7 +408,13 @@ env.update({
     "NEX_USER_TUNNELS_FILE": os.path.join(tdB, "tunnels.json"),
     # strict mode is ON by default in the deployed server; the ONLY
     # trusted server in this test is the mock.
-    "NEX_TRUSTED_SERVERS": "escape-mock",
+    "NEX_TRUSTED_SERVERS": "escape-mock,escape-strict",
+    # TWO SEPARATE OPERATOR STATEMENTS. Trusting a server does not mean
+    # "run whatever code it accepts"; that is said explicitly here. The
+    # test needs both because it checks BOTH states (escape-mock is
+    # pre-approved, escape-strict is only trusted).
+    "NEX_ALLOW_CODE_EXECUTION": "escape-mock",
+    "NEX_ALLOW_CONFIRMATIONS": "escape-mock",
     "NEX_CAPABILITY_FILE": capfile,
     "OLLAMA_HOST": "http://127.0.0.1:1",
 })
@@ -530,14 +536,13 @@ try:
     txt, iserr = _call_text(b)
     _expect(not iserr and os.path.exists(
         os.path.join(MOCK_DIR, "marker.txt")),
-        "B4(+): trusted server's OWN game action works (marker in the "
-        "mock's sandbox)")
+        "B4(+): pre-approved server's own game action works (marker in "
+        "the mock's sandbox): %s" % txt[:60])
     st, b = _mcp_call("escape-mock.execute_command", {"cmd": "noop"})
     txt, iserr = _call_text(b)
     _expect(not iserr,
-            "B4(+): trusted server's own process tool executes (it is "
-            "the server's vetted capability, gated by its trust): %s"
-            % txt[:60])
+            "B4(+): code execution runs ONLY because the operator "
+            "pre-approved it (NEX_ALLOW_CODE_EXECUTION): %s" % txt[:60])
     # a tool named like an internal one, ON the trusted server, is the
     # server's own tool — it may run, but it cannot touch NEX internals:
     # the mock sandboxes its writes to MOCK_DIR; the NEX canary must
@@ -692,6 +697,69 @@ try:
                 % sorted(x for x in seen if x))
     else:
         _expect(False, "B8: mock call log exists (positive controls ran)")
+    # --- B9/C: CONTENT escapes + the confirmation gate -------------------
+    print("--- C: confirmation gate + escape payloads ---")
+    # A SECOND, TRUSTED server that the operator has NOT pre-approved for
+    # code execution. (Registered here because the fail-closed reload in
+    # B6 rebuilds the registry from the persisted file.)
+    st, b = _http("POST", base + "/api/tunnels",
+                  {"tunnels": [{"name": "escape-strict", "transport": "http",
+                                "url": "http://127.0.0.1:%d/mcp"
+                                        % mock_port}]},
+                  headers=H)
+    _expect(st == 200, "C: second TRUSTED tunnel registered (connected, "
+                       "but not pre-approved for code execution)")
+    st, b = _http("POST", base + "/api/tunnels/probe",
+                  {"platforms": ["escape-strict"]}, headers=H)
+    _expect(st == 200 and any(r.get("platform") == "escape-strict"
+                              and r.get("ok") for r in b.get("probed", [])),
+            "C: the second server was probed and answered: %s"
+            % json.dumps(b.get("probed"))[:80])
+    time.sleep(0.3)
+    # Trusted but NOT pre-approved: code execution stops with a named
+    # reason instead of running because someone connected the server.
+    st, b = _mcp_call("escape-strict.execute_command", {"cmd": "noop"})
+    txt, iserr = _call_text(b)
+    _expect(iserr and "confirmation required" in txt,
+            "C: code execution on a trusted-but-unapproved server is "
+            "REFUSED: %s" % txt[:90])
+    # ...while ordinary reads on the same server still work (the gate is
+    # about code execution, not about the server).
+    st, b = _mcp_call("escape-strict.read_data")
+    txt, iserr = _call_text(b)
+    _expect(not iserr and "ok:read_data" in txt,
+            "C: normal reads on the same server are unaffected: %s"
+            % txt[:60])
+    # A payload that reaches the OS is refused EVEN on the pre-approved
+    # server: the standing approval covers the tool, never the payload.
+    for payload in ("os.execute('rm -rf /')",
+                    "io.popen('cat /etc/passwd')",
+                    "loadstring(http_body)()",
+                    "require('subprocess').check_output(['id'])"):
+        st, b = _mcp_call("escape-mock.execute_command", {"cmd": payload})
+        txt, iserr = _call_text(b)
+        _expect(iserr and "escape payload" in txt,
+                "C: payload %r refused on a PRE-APPROVED server: %s"
+                % (payload[:26], txt[:80]))
+    # Credentials and NEX's own token are refused on any tool, approval or
+    # not — an autonomous builder has no business near them.
+    for args in ({"file": "/home/dev/.ssh/id_rsa"},
+                 {"file": os.path.join(os.path.expanduser("~"), ".nex",
+                                       "server_token")},
+                 {"file": "../../etc/passwd"}):
+        st, b = _mcp_call("escape-mock.touch_marker", args)
+        txt, iserr = _call_text(b)
+        _expect(iserr and "escape payload" in txt,
+                "C: path %r refused on a plain tool: %s"
+                % (args["file"], txt[:70]))
+    # Nothing was created on the way (the refusals happened BEFORE any
+    # write), and the mock never saw an escape payload.
+    _expect(not os.path.exists(os.path.join(MOCK_DIR, "passwd")),
+            "C: no file was created outside the mock's sandbox")
+    with open(CANARY) as f:
+        _expect(f.read() == "NEX CANARY — do not touch\n",
+                "C: NEX canary still untouched after the payload attempts")
+
 finally:
     proc.terminate()
     try:

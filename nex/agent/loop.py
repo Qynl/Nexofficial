@@ -35,12 +35,12 @@ from agent.events import (
     STATUS_WAITING_USER, agent_event,
 )
 from agent.planner import plan as default_planner
-from agent.project_state import ProjectState
+from agent.project_state import SYSTEM_COMPLETE, ProjectState
 from agent.registry import CapabilityRegistry
 from agent.task_graph import TaskGraph, PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
 from agent.verification import verify_task
-from mcp.capability import ToolCapability
-from mcp.policy import authorize, current_policy
+from mcp.capability import CODE_EXECUTION, ToolCapability
+from mcp.policy import Decision, authorize, current_policy
 
 
 @dataclass
@@ -55,6 +55,10 @@ class CompletionReport:
     # Criteria declared for the scoped system with no proof from the
     # running game (mandatory-verification gate).
     unverified: List[Dict[str, str]] = field(default_factory=list)
+    # Systems this run worked on (a campaign works more than one).
+    systems: List[str] = field(default_factory=list)
+    # What a run without an engine still produced: the build blueprint.
+    blueprint: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -63,6 +67,8 @@ class CompletionReport:
             "skipped": self.skipped, "reasons": self.reasons,
             "missing": self.missing,
             "unverified": self.unverified,
+            "systems": self.systems,
+            "blueprint": self.blueprint,
         }
 
 
@@ -176,11 +182,35 @@ class AutonomousAgent:
         self.max_systems = int(os.environ.get("NEX_MAX_SYSTEMS", "6"))
         self.max_steps_per_system = int(
             os.environ.get("NEX_MAX_STEPS_PER_SYSTEM", "4"))
+        # --- AAA AUTOMATION (bounded campaign) ---------------------------
+        # One run should be able to finish more than one system — that is
+        # what "make me a game" means — but never without a budget. The
+        # campaign is bounded by BOTH a system count and a wall clock, and
+        # every stop is reported with its reason.
+        self.max_systems_per_run = max(1, int(
+            os.environ.get("NEX_MAX_SYSTEMS_PER_RUN", "2")))
+        self.run_budget_s = float(os.environ.get("NEX_RUN_BUDGET_S", "900"))
+        # Quality target: the critic may only finish a system at/above it.
+        # Expressed 0..1 (the critics score 1-10 internally); the model
+        # judges, Nex enforces.
+        self.quality_target = float(os.environ.get("NEX_QUALITY_TARGET",
+                                                   "0.6"))
+        self.max_quality_rounds = max(0, int(
+            os.environ.get("NEX_MAX_QUALITY_ROUNDS", "1")))
+        self._run_systems: List[str] = []   # systems this run worked on
+        self._quality_rounds = 0
         self.game_plan = None      # last GamePlan (director output)
         self._scope: Optional[Dict[str, Any]] = None
         self.audit = audit or AuditLog()
         self.bus = bus
-        self.approver = approver or (lambda task: True)
+        # CONFIRMATION IS A REAL GATE. Without an explicit approver an
+        # autonomous run does NOT assume "yes": a task whose authorization
+        # requires a human decision stops here and is reported, instead of
+        # quietly executing something nobody approved. The operator can
+        # grant a standing approval on purpose (capability file
+        # {"approved": true} for one tool, NEX_ALLOW_CODE_EXECUTION for
+        # code/process tools on one server) — but never by default.
+        self.approver = approver or (lambda task: False)
         self.max_iterations = max_iterations
         self.backoff_base = backoff_base
         self.max_backoff = max_backoff
@@ -319,27 +349,53 @@ class AutonomousAgent:
         # says exactly what to connect.
         if not graph.all():
             servers = [s.name for s in self.registry.servers]
+            # NO ENGINE IS NOT "NO RESULT". Everything the Director knows
+            # is deterministic: systems, order, proven structure, success
+            # criteria and the capability each step needs. That is a
+            # blueprint the user can act on today (connect, or build the
+            # parts that need no engine) — and it is explicitly a PLAN,
+            # never a claim that something was built.
+            blueprint = self._blueprint(goal, state, servers)
             if not servers:
                 reason = ("no MCP servers are connected — nothing is "
                           "executable. Connect an editor (Roblox Studio "
                           "/ Unreal / Blender) via the Settings page, "
-                          "then re-run.")
+                          "then re-run. A build blueprint for %d system(s) "
+                          "with their checklists is attached."
+                          % len(blueprint.get("systems") or []))
             else:
                 reason = ("the plan produced no executable tasks against "
                           "the live registry (servers: %s) — every step "
-                          "was dropped as missing or invalid."
-                          % ", ".join(servers))
+                          "was dropped as missing or invalid. Blueprint "
+                          "for %d system(s) attached."
+                          % (", ".join(servers),
+                             len(blueprint.get("systems") or [])))
             self._emit("BLOCKED", "agent.project_blocked",
                        status=STATUS_BLOCKED, completed=[], failed=[],
                        missing=[{"task": "capability", "stage": "connect",
                                  "server": None, "tool": None,
                                  "reason": reason}])
+            from agent.blueprint import blueprint_markdown
+            self._emit("PLANNING", "agent.blueprint", goal=goal,
+                       game=blueprint.get("game", ""),
+                       systems=[{"id": s.get("id"), "title": s.get("title"),
+                                 "layer": s.get("layer"),
+                                 "ready": s.get("ready"),
+                                 "steps": len(s.get("steps") or []),
+                                 "criteria": len(s.get("checklist") or [])}
+                                for s in blueprint.get("systems") or []],
+                       missing_capabilities=blueprint.get(
+                           "missing_capabilities", []),
+                       tests=len(blueprint.get("tests") or []),
+                       markdown=blueprint_markdown(blueprint))
             state.phase = "BLOCKED"
             report = CompletionReport(
                 status=STATUS_BLOCKED, goal=goal,
                 reasons=[reason],
                 missing=[{"task": "capability", "stage": "connect",
-                          "server": None, "tool": None, "reason": reason}])
+                          "server": None, "tool": None, "reason": reason}],
+                systems=list(self._run_systems),
+                blueprint=blueprint)
             if self.persist:
                 try:
                     from agent.projects_store import save_project
@@ -348,62 +404,52 @@ class AutonomousAgent:
                     pass
             return report
 
-        state.pending = [t.name for t in graph.all() if t.status == PENDING]
+        # --- CAMPAIGN: work the game plan, not just one system ------------
+        # "Make me a game" is 4-8 systems. Bounded by BOTH a system count
+        # and a wall clock; whatever stops the campaign is reported.
+        state.phase = "BUILDING"
+        if state.current_system and state.current_system not in self._run_systems:
+            self._run_systems.append(state.current_system)
+        deadline = time.time() + self.run_budget_s
+        rounds: List[CompletionReport] = []
+        report, work_ok = self._execute_round(goal, state, graph)
+        rounds.append(report)
 
-        # --- Execution with multi-pass recovery ------------------------------
-        self._run_passes(graph, state)
-
-        succeeded = [t.name for t in graph.completed()]
-        failed = [t.name for t in graph.failed()]
-        skipped = [t.name for t in graph.skipped()]
-
-        if not failed and not skipped and succeeded:
-            status = STATUS_COMPLETED
-        elif failed and not succeeded:
-            status = STATUS_FAILED
-        elif skipped and not failed:
-            status = STATUS_PARTIAL
+        while (work_ok and self.game_plan is not None
+               and len(rounds) < self.max_systems_per_run
+               and time.time() < deadline):
+            nxt = self._next_system(state)
+            if nxt is None:
+                self._emit("PLANNING", "agent.campaign_finished",
+                           systems=list(self._run_systems),
+                           note="every system in the game plan is done")
+                break
+            self._emit("PLANNING", "agent.system_started", system=nxt,
+                       objective=(self._scope or {}).get("objective", ""),
+                       index=len(self._run_systems),
+                       of=len(self.game_plan.systems))
+            graph = self._make_plan(goal, state)
+            if not graph.all():
+                self._emit("PLANNING", "agent.campaign_stopped",
+                           system=nxt,
+                           reason=("no executable tasks for '%s' against "
+                                   "the live registry" % nxt))
+                break
+            report, work_ok = self._execute_round(goal, state, graph)
+            rounds.append(report)
         else:
-            status = STATUS_PARTIAL
+            if (work_ok and self.game_plan is not None and time.time()
+                    >= deadline):
+                self._emit("PLANNING", "agent.campaign_stopped",
+                           reason="run budget exhausted (NEX_RUN_BUDGET_S)")
+            elif (work_ok and self.game_plan is not None
+                  and len(rounds) >= self.max_systems_per_run):
+                self._emit("PLANNING", "agent.campaign_stopped",
+                           reason=("system budget reached "
+                                   "(NEX_MAX_SYSTEMS_PER_RUN=%d)"
+                                   % self.max_systems_per_run))
 
-        reasons = []
-        for t in graph.failed():
-            reasons.append("%s: %s" % (t.name, t.error or "failed"))
-        for t in graph.skipped():
-            reasons.append("%s: %s" % (t.name, t.notes or "skipped"))
-
-        # Transparency: list the exact capabilities that were needed but could
-        # not be delivered, so the user knows precisely what to connect (no
-        # silent low-quality partial).
-        missing = []
-        for t in list(graph.failed()) + list(graph.skipped()):
-            missing.append({
-                "task": t.name,
-                "stage": t.stage,
-                "server": t.server,
-                "tool": t.tool,
-                "reason": t.error or t.notes or "unavailable",
-            })
-
-        state.completed = succeeded
-        state.failed = [{"task": n, "reason": r.split(": ", 1)[-1]}
-                        for n, r in zip(failed, reasons)]
-        self._emit("COMPLETED" if status == STATUS_COMPLETED else "BLOCKED",
-                   "agent.project_completed" if status == STATUS_COMPLETED
-                   else "agent.project_blocked",
-                   status=status, completed=succeeded, failed=failed,
-                   missing=missing)
-
-        report = CompletionReport(status=status, goal=goal,
-                                  completed=succeeded, failed=failed,
-                                  skipped=skipped, reasons=reasons,
-                                  missing=missing)
-
-        # --- NEX 2.0: build -> critique -> improve (bounded) ---------------
-        # Nex doesn't get a free pass after one iteration. The critic asks
-        # "is this actually GOOD?", and POLISH/REPLAN verdicts send the
-        # agent back to work (bounded by max_critique_cycles).
-        report = self._critique_and_improve(goal, state, graph, report)
+        report = self._merge_rounds(goal, state, rounds)
 
         # Mandatory verification: no "COMPLETED" while the scoped objective
         # still has unproven criteria.
@@ -493,10 +539,18 @@ class AutonomousAgent:
         """
         if report.status != STATUS_COMPLETED:
             return report
-        sid = getattr(state, "current_system", "")
-        if not sid:
+        # EVERY system this run worked on, not just the last one: a
+        # campaign that verified system 1 and guessed at system 3 is not
+        # done, and saying so is the point.
+        systems = list(self._run_systems) or (
+            [state.current_system] if getattr(state, "current_system", "")
+            else [])
+        if not systems:
             return report
-        unmet = state.unmet_criteria(sid)
+        unmet = []
+        for sid in systems:
+            for u in state.unmet_criteria(sid):
+                unmet.append(dict(u, system=sid))
         if not unmet:
             return report
         report.status = STATUS_PARTIAL
@@ -669,6 +723,34 @@ class AutonomousAgent:
                        findings=c.findings, scores=c.scores, note=c.note,
                        cycle=cycle)
             if c.action == ACTION_COMPLETE:
+                # QUALITY TARGET: the critic saying PASS is necessary, not
+                # sufficient. Below the target the round is not finished —
+                # it is another polish round (bounded), because "AAA" is a
+                # number the user set, not a feeling the model had.
+                score = self._round_score(c)
+                if (score is not None and score < self.quality_target
+                        and self._quality_rounds < self.max_quality_rounds):
+                    self._quality_rounds += 1
+                    self._emit("POLISHING", "agent.quality_gate",
+                               score=round(score, 2),
+                               target=self.quality_target,
+                               round=self._quality_rounds,
+                               note=("below target — polishing instead of "
+                                     "finishing"))
+                    feedback = _critique_feedback(goal, c, state) + [
+                        ("Quality score %.2f is below the target %.2f — "
+                         "raise it rather than declaring the system done."
+                         % (score, self.quality_target))]
+                    state.plan_feedback = feedback
+                    state.record_cycle(dict(c.to_dict(), ts=time.time(),
+                                            quality_gate="polish"))
+                    continue
+                if score is not None:
+                    self._emit("OBSERVING", "agent.quality_gate",
+                               score=round(score, 2),
+                               target=self.quality_target,
+                               round=self._quality_rounds,
+                               note="target met — system may close")
                 # The round's objective was OBSERVED CLEAN. That is the
                 # proof the checklist was waiting for: a criterion is only
                 # ever "pass" because the running game (or a reviewer)
@@ -843,8 +925,254 @@ class AutonomousAgent:
                     return g
             except Exception:  # noqa: BLE001
                 pass
+        # NO MODEL (or the model failed). The Director already produced a
+        # proven structure for this system, so the plan does not have to
+        # be a generic skeleton: it can be the RECIPE, matched against the
+        # live catalog by deterministic name rules. The model becomes an
+        # optimization, not a prerequisite.
+        g = self._recipe_plan(state)
+        if g is not None and g.all():
+            self._emit("PLANNING", "agent.recipe_planned",
+                       system=(self._scope or {}).get("system", ""),
+                       task_count=len(g.all()),
+                       note="planned from the recipe library (no model call)")
+            return g
         from agent.planner import plan as skeleton_plan
         return skeleton_plan(goal, self.registry)
+
+    def _recipe_plan(self, state: ProjectState) -> Optional[TaskGraph]:
+        """Build a TaskGraph from the scoped recipe steps + the live tools.
+
+        Deterministic: each step's intent names the capability it needs
+        (agent/blueprint.capability_for_intent), and the registry supplies
+        the concrete tool. Steps with no matching tool are DROPPED and
+        reported — never invented.
+        """
+        scope = self._scope or {}
+        steps = scope.get("steps") or []
+        if not steps:
+            return None
+        from agent.blueprint import capability_for_intent
+        from agent.task_graph import TaskGraph, Task
+        tools = self.registry.all_tools()
+        by_cap: Dict[str, List[Any]] = {}
+        by_cap["observe"] = [t for t in tools if any(
+            k in t.name.lower() for k in ("screenshot", "capture", "log",
+                                          "console", "inspect", "metric",
+                                          "profile"))]
+        by_cap["verify"] = [t for t in tools if any(
+            k in t.name.lower() for k in ("verify", "validate", "test",
+                                          "check"))]
+        by_cap["run"] = [t for t in tools if any(
+            k in t.name.lower() for k in ("launch", "run_game", "play",
+                                          "simulate", "start"))]
+        by_cap["build"] = [t for t in tools if any(
+            k in t.name.lower() for k in ("build", "compile", "package",
+                                          "bake", "cook"))]
+        graph = TaskGraph()
+        prev: Optional[str] = None
+        for i, st in enumerate(steps):
+            intent = st.get("intent", "") if isinstance(st, dict) else str(st)
+            cap = capability_for_intent(intent)
+            cands = by_cap.get(cap, [])
+            if cap in ("observe", "verify", "run", "build"):
+                # these are the verifying steps: prefer them when present
+                pass
+            else:
+                # a creative step: any tool whose name echoes the intent
+                words = [w for w in re.split(r"[^a-z0-9]+", intent.lower())
+                         if len(w) > 3]
+                cands = [t for t in tools
+                         if any(w in t.name.lower() for w in words)]
+            if not cands:
+                continue
+            tool = cands[0]
+            tid = "step_%d_%s" % (i + 1, re.sub(r"[^a-z0-9]+", "_",
+                                                cap))[:40]
+            t = Task(id=tid, name=intent[:80], stage=cap,
+                     server=tool.server, tool=tool.name, args={},
+                     notes=intent,
+                     expect=(st.get("evidence", "")
+                             if isinstance(st, dict) else ""),
+                     system=scope.get("system", ""),
+                     criteria=list(scope.get("success") or [])[:4])
+            if prev:
+                t.deps = [prev]
+            graph.add(t)
+            prev = tid
+        return graph
+
+    @staticmethod
+    def _round_score(critique: Any) -> Optional[float]:
+        """The critic's own numbers as one 0..1 score (None when the model
+        returned none — then there is nothing to enforce and the verdict
+        stands)."""
+        scores = getattr(critique, "scores", None) or {}
+        nums = []
+        for v in scores.values():
+            if isinstance(v, (int, float)):
+                nums.append(float(v))
+        if not nums:
+            return None
+        avg = sum(nums) / len(nums)
+        return avg / 10.0 if avg > 1.0 else avg
+
+    def _execute_round(self, goal: str, state: ProjectState,
+                       graph: TaskGraph):
+        """Execute ONE system's graph and critique it. Returns
+        (report, work_ok) — `work_ok` is about the WORK (every task ran
+        that could run), not about verification, which the campaign must
+        not confuse with progress."""
+        state.pending = [t.name for t in graph.all() if t.status == PENDING]
+
+        # --- Execution with multi-pass recovery --------------------------
+        self._run_passes(graph, state)
+
+        succeeded = [t.name for t in graph.completed()]
+        failed = [t.name for t in graph.failed()]
+        skipped = [t.name for t in graph.skipped()]
+
+        waiting = [t for t in graph.all() if t.status == "waiting"]
+        if not failed and not skipped and succeeded and not waiting:
+            status = STATUS_COMPLETED
+        elif failed and not succeeded:
+            status = STATUS_FAILED
+        elif skipped and not failed:
+            status = STATUS_PARTIAL
+        else:
+            status = STATUS_PARTIAL
+
+        reasons = []
+        for t in graph.failed():
+            reasons.append("%s: %s" % (t.name, t.error or "failed"))
+        for t in graph.skipped():
+            reasons.append("%s: %s" % (t.name, t.notes or "skipped"))
+        # A task that stopped for a human decision is not a success and not
+        # a failure — it is an open question, and the report says so.
+        for t in waiting:
+            reasons.append("%s: %s" % (t.name, t.error or
+                                       "waiting for confirmation"))
+
+        # Transparency: list the exact capabilities that were needed but
+        # could not be delivered, so the user knows precisely what to
+        # connect (no silent low-quality partial).
+        missing = []
+        for t in list(graph.failed()) + list(graph.skipped()) + waiting:
+            missing.append({
+                "task": t.name,
+                "stage": t.stage,
+                "server": t.server,
+                "tool": t.tool,
+                "reason": t.error or t.notes or "unavailable",
+            })
+
+        state.completed = succeeded
+        state.failed = [{"task": n, "reason": r.split(": ", 1)[-1]}
+                        for n, r in zip(failed, reasons)]
+        self._emit("COMPLETED" if status == STATUS_COMPLETED else "BLOCKED",
+                   "agent.project_completed" if status == STATUS_COMPLETED
+                   else "agent.project_blocked",
+                   status=status, completed=succeeded, failed=failed,
+                   missing=missing)
+
+        report = CompletionReport(status=status, goal=goal,
+                                  completed=succeeded, failed=failed,
+                                  skipped=skipped, reasons=reasons,
+                                  missing=missing)
+
+        # --- NEX 2.0: build -> critique -> improve (bounded) --------------
+        # Nex doesn't get a free pass after one iteration. The critic asks
+        # "is this actually GOOD?", and POLISH/REPLAN verdicts send the
+        # agent back to work (bounded by max_critique_cycles).
+        report = self._critique_and_improve(goal, state, graph, report)
+        work_ok = bool(succeeded) and not failed and not skipped \
+            and not waiting
+        return report, work_ok
+
+    def _blueprint(self, goal: str, state: ProjectState,
+                   servers: List[str]) -> Dict[str, Any]:
+        """The deterministic build plan (no model, no engine required)."""
+        try:
+            from agent.blueprint import build_blueprint, blueprint_markdown
+            names = []
+            for t in self.registry.all_tools():
+                names.append(getattr(t, "name", "") or "")
+            bp = build_blueprint(
+                goal, self.game_plan, names,
+                design=getattr(state, "design", {}) or None)
+            # Keep the rendered document on the state so a later run (or
+            # the project page) has the same plan the user saw.
+            state.blueprint_md = blueprint_markdown(bp)
+            return bp
+        except Exception as exc:  # noqa: BLE001
+            self._emit("PLANNING", "agent.blueprint_failed", error=repr(exc))
+            return {"goal": goal, "systems": [], "missing_capabilities": [],
+                    "tests": []}
+
+    def _next_system(self, state: ProjectState) -> Optional[str]:
+        """Advance the game plan to the next system and scope this round
+        to it. Returns the system id, or None when the plan is finished."""
+        gp = self.game_plan
+        if gp is None:
+            return None
+        sid = getattr(state, "current_system", "")
+        for s in gp.systems:
+            if s.id == sid:
+                s.status = "complete"
+        # Honest bookkeeping: advancing the campaign means the WORK is
+        # done, not that it is proven. A system whose criteria were never
+        # confirmed is recorded as `unverified` — visible in the map, and
+        # the completion gate names its criteria.
+        if sid:
+            if state.system_status(sid) != SYSTEM_COMPLETE:
+                state.upsert_system(
+                    sid, status="unverified",
+                    notes="work done; criteria not proven (no reviewer "
+                          "verdict / clean observation)")
+        nxt = gp.current()
+        if nxt is None:
+            return None
+        nxt.status = "in_progress"
+        state.current_system = nxt.id
+        state.upsert_system(nxt.id, status="in_progress")
+        from agent.director import scope_envelope
+        self._scope = scope_envelope(nxt, gp.remaining(),
+                                     max_steps=self.max_steps_per_system)
+        if nxt.id not in self._run_systems:
+            self._run_systems.append(nxt.id)
+        return nxt.id
+
+    def _merge_rounds(self, goal: str, state: ProjectState,
+                      rounds: List[CompletionReport]) -> CompletionReport:
+        """Aggregate the campaign into ONE honest report.
+
+        The rule: a run is COMPLETED only if EVERY round was. A round that
+        did its work but could not prove it stays PARTIAL (the completion
+        gate names the unproven criteria) — that distinction is the whole
+        point of mandatory verification.
+        """
+        if len(rounds) == 1:
+            return rounds[0]
+        completed = [t for r in rounds for t in r.completed]
+        failed = [t for r in rounds for t in r.failed]
+        skipped = [t for r in rounds for t in r.skipped]
+        reasons = [x for r in rounds for x in r.reasons]
+        missing = [m for r in rounds for m in r.missing]
+        unverified = [u for r in rounds for u in (r.unverified or [])]
+        if all(r.status == STATUS_COMPLETED for r in rounds) and completed:
+            status = STATUS_COMPLETED
+        elif completed and not failed:
+            status = STATUS_PARTIAL
+        elif not completed:
+            status = STATUS_FAILED
+        else:
+            status = STATUS_PARTIAL
+        report = CompletionReport(status=status, goal=goal,
+                                  completed=completed, failed=failed,
+                                  skipped=skipped, reasons=reasons,
+                                  missing=missing, unverified=unverified)
+        report.systems = list(self._run_systems)
+        return report
 
     def _llm_diagnose(self, task: Any, err: str, phase: str = "execute"):
         """Genuine LLM failure diagnosis (agent.diagnose): the model gets the
@@ -919,7 +1247,23 @@ class AutonomousAgent:
         # Authorization (architecture-level, not prompt-level).
         tv = self.registry.by_name(task.tool) if task.tool else None
         cap = tv.capability if tv else ToolCapability()
-        decision = authorize(task.server, task.tool, cap, self.policy)
+        decision = authorize(task.server, task.tool, cap, self.policy,
+                             args=task.args)
+        # Laundering: a code-execution call that only names a FILE gets the
+        # file's content scanned too — otherwise "write the payload, then
+        # run the file" sidesteps the argument scan entirely.
+        if (decision.allowed and cap.category == CODE_EXECUTION):
+            try:
+                from mcp.policy import code_file_argument, scan_file_payload
+                fpath = code_file_argument(task.args)
+                if fpath:
+                    leak = scan_file_payload(
+                        fpath, getattr(self, "workspace_root", "") or "")
+                    if leak:
+                        decision = Decision(False, False, leak,
+                                            decision.category)
+            except Exception:  # noqa: BLE001
+                pass
         if not decision.allowed:
             self.audit.record(task_id=task.id, server=task.server,
                              tool=task.tool, args=task.args,
@@ -935,8 +1279,20 @@ class AutonomousAgent:
 
         if decision.requires_confirmation and not self.approver(task):
             task.status = "waiting"
+            task.error = "confirmation required: " + decision.reason
+            self.audit.record(task_id=task.id, server=task.server,
+                              tool=task.tool, args=task.args,
+                              classification=cap.to_dict(),
+                              authorized=False,
+                              auth_reason="confirmation required",
+                              result="waiting")
             self._emit("WAITING", "agent.waiting_for_confirmation",
-                       task=task.id, tool=task.tool)
+                       task=task.id, tool=task.tool,
+                       server=task.server, category=decision.category,
+                       reason=decision.reason)
+            self._emit("BLOCKED", "agent.confirmation_required",
+                       task=task.id, tool=task.tool, server=task.server,
+                       category=decision.category, reason=decision.reason)
             return
 
         seen_sigs: Dict[str, int] = {}

@@ -294,11 +294,17 @@ registry = agent_loop.CapabilityRegistry(servers)
 
 with tempfile.TemporaryDirectory() as td:
     os.environ["NEX_PROJECTS_DIR"] = td
+    # This test is about the ORDER (design -> plan -> build -> critique),
+    # not about the campaign: pin the campaign to one system so the
+    # assertions count a single round. The multi-system campaign has its
+    # own section in test_director.py.
+    os.environ["NEX_MAX_SYSTEMS_PER_RUN"] = "1"
     events = []
     agent = agent_loop.AutonomousAgent(
         registry, llm=llm_pipeline, bus=events.append,
         max_critique_cycles=1, persist=True)
     report = agent.run("mechanism puzzle box")
+    os.environ.pop("NEX_MAX_SYSTEMS_PER_RUN", None)
 
     _expect(CALLS["design"] == 1,
             "design stage ran exactly once before planning")
@@ -365,10 +371,14 @@ servers2 = [
 ]
 registry2 = agent_loop.CapabilityRegistry(servers2)
 events2 = []
+# One system: this test counts critique CYCLES (WEAK -> improve -> PASS),
+# and a campaign would legitimately add cycles for the next system.
+os.environ["NEX_MAX_SYSTEMS_PER_RUN"] = "1"
 agent2 = agent_loop.AutonomousAgent(
     registry2, llm=llm_improve, bus=events2.append,
     max_critique_cycles=2, persist=False)
 report2 = agent2.run("mechanism puzzle box")
+os.environ.pop("NEX_MAX_SYSTEMS_PER_RUN", None)
 kinds2 = [e.get("type") for e in events2]
 _expect("agent.improve_started" in kinds2,
         "WEAK critique triggers a bounded improvement run")

@@ -532,4 +532,154 @@ try:
 finally:
     pass
 
+# ===========================================================================
+# 8. AAA AUTOMATION: campaign, quality target, blueprint
+# ===========================================================================
+# "Make me a game" is more than one system, and a run that stops after the
+# first one is not an autonomous builder — it is a to-do list. The campaign
+# works the game plan, bounded by BOTH a system count and a wall clock.
+
+print("\n=== 8. campaign / quality / blueprint ===")
+
+import agent.blueprint as blueprint_mod  # noqa: E402
+from agent.project_state import SYSTEM_UNVERIFIED  # noqa: E402
+_ENGINE_TOOLS = [
+    {"name": "create_character", "description": "create the playable "
+     "character", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "set_property", "description": "set a property",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "create_level", "description": "create level geometry",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "build", "description": "build the project",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "launch", "description": "run the game",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "screenshot", "description": "capture the running game",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "inspect_logs", "description": "read runtime logs",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+os.environ["NEX_MAX_SYSTEMS_PER_RUN"] = "2"
+os.environ["NEX_RUN_BUDGET_S"] = "120"
+try:
+    reg_c = agent_loop.CapabilityRegistry([mock_mcp.server_view(
+        "engine", mock_mcp.MockMCPServer("engine", _ENGINE_TOOLS))])
+    events_c = []
+    state_c = ProjectState(goal="make a platformer")
+    # NO MODEL: the recipe library + the live catalog must carry it.
+    agent_c = agent_loop.AutonomousAgent(
+        reg_c, llm=None, persist=False, bus=lambda e: events_c.append(e),
+        workspace_root=os.path.join(tempfile.mkdtemp(), "ws"))
+    report_c = agent_c.run("make a platformer", state=state_c)
+
+    started = [e for e in events_c if e.get("type") == "agent.system_started"]
+    _expect(len(started) >= 1,
+            "the campaign moved on to a SECOND system (got %d)"
+            % len(started))
+    _expect(len(report_c.systems) >= 2,
+            "the report lists every system the run worked on: %s"
+            % report_c.systems)
+    recipe_planned = [e for e in events_c
+                      if e.get("type") == "agent.recipe_planned"]
+    _expect(len(recipe_planned) >= 1 and recipe_planned[0].get("task_count"),
+            "without a model the plan comes from the RECIPE library "
+            "(%d steps), not a generic skeleton"
+            % (recipe_planned[0].get("task_count") if recipe_planned else 0))
+    _expect(any(t.startswith("Create") or "character" in t.lower()
+                for t in report_c.completed),
+            "the recipe's real steps executed: %s"
+            % report_c.completed[:2])
+    stopped = [e for e in events_c if e.get("type").startswith(
+        "agent.campaign_")]
+    _expect(bool(stopped), "the campaign reports why it stopped/finished: "
+                           "%s" % [e.get("type") for e in stopped])
+    # Honesty: nothing was verified (no reviewer, no clean observation), so
+    # no system may claim to be verified.
+    statuses = {k: v.get("status") for k, v in state_c.systems.items()}
+    _expect("complete" not in statuses.values(),
+            "unproven systems are never marked complete: %s" % statuses)
+    _expect(report_c.status == "PARTIAL" and report_c.unverified,
+            "the run is PARTIAL and NAMES the unproven criteria (%d)"
+            % len(report_c.unverified or []))
+    _expect(all("system" in u for u in (report_c.unverified or [])),
+            "every unproven criterion names its system")
+
+    # --- quality target: PASS below the target is not "done" -------------
+    class _QualityCritic:
+        scores = {"technical": 6, "design": 5, "quality": 5}   # 0.53
+    _expect(abs(agent_loop.AutonomousAgent._round_score(_QualityCritic())
+                - 0.533) < 0.01,
+            "_round_score turns the critic's 1-10 scores into 0..1")
+    class _NoScores:
+        scores = {}
+    _expect(agent_loop.AutonomousAgent._round_score(_NoScores()) is None,
+            "no numbers => no invented score (the verdict stands alone)")
+    agent_q = agent_loop.AutonomousAgent(reg_c, llm=None, persist=False)
+    _expect(agent_q.quality_target > 0 and agent_q.max_quality_rounds >= 0,
+            "the quality target is configured (%.2f, %d rounds)"
+            % (agent_q.quality_target, agent_q.max_quality_rounds))
+
+    # --- blueprint: no MCP server, still a real answer -------------------
+    empty_reg = agent_loop.CapabilityRegistry([])
+    events_b = []
+    state_b = ProjectState(goal="make a survival horror game")
+    agent_b = agent_loop.AutonomousAgent(
+        empty_reg, llm=None, persist=False, bus=lambda e: events_b.append(e))
+    report_b = agent_b.run("make a survival horror game", state=state_b)
+    _expect(report_b.status == "BLOCKED",
+            "with no engine the run is honestly BLOCKED")
+    bp = report_b.blueprint or {}
+    _expect(bool(bp.get("systems")),
+            "the blocked run still produced a blueprint (%d systems)"
+            % len(bp.get("systems") or []))
+    _expect(all(s.get("checklist") for s in bp.get("systems") or []),
+            "every blueprint system carries its completion checklist")
+    _expect(all("tool" in st and "needs" in st
+                for s in bp.get("systems") or []
+                for st in s.get("steps") or []),
+            "every blueprint step names the capability it needs and the "
+            "tool that would serve it")
+    _expect("Missing capabilities" in blueprint_mod.blueprint_markdown(bp)
+            or not bp.get("missing_capabilities"),
+            "the document names the capabilities to connect")
+    bp_evt = [e for e in events_b if e.get("type") == "agent.blueprint"]
+    _expect(bool(bp_evt) and bp_evt[0].get("markdown"),
+            "the blueprint is published for the UI (with the document)")
+    _expect(state_b.blueprint_md and "# Build blueprint" in state_b.blueprint_md,
+            "the blueprint is persisted with the project state")
+    _expect(not report_b.completed,
+            "a blueprint is a PLAN: nothing is reported as built")
+
+    # --- confirmation gate: a tool nobody approved does not run ----------
+    class _DestructiveEngine(mock_mcp.MockMCPServer):
+        def call(self, tool, args):
+            if tool == "delete_everything":
+                return {"result": {"deleted": True}}
+            return super().call(tool, args)
+
+    reg_d2 = agent_loop.CapabilityRegistry([mock_mcp.server_view(
+        "engine", _DestructiveEngine("engine", [
+            {"name": "delete_everything", "description": "delete the project",
+             "inputSchema": {"type": "object", "properties": {}}}]))])
+    events_d2 = []
+    agent_d2 = agent_loop.AutonomousAgent(
+        reg_d2, llm=None, persist=False, bus=lambda e: events_d2.append(e))
+    from agent.task_graph import Task as _Task, TaskGraph as _TG
+    g2 = _TG()
+    g2.add(_Task(id="d1", name="delete everything", stage="asset",
+                 server="engine", tool="delete_everything", args={}))
+    report_d2 = agent_d2.run("destroy", graph=g2)
+    conf = [e for e in events_d2
+            if e.get("type") == "agent.confirmation_required"]
+    _expect(bool(conf), "a destructive tool stops the run for confirmation")
+    _expect(report_d2.status != "COMPLETED",
+            "the run cannot be COMPLETED while a tool waits for approval "
+            "(status=%s)" % report_d2.status)
+    _expect(any("confirmation" in (r or "") for r in report_d2.reasons),
+            "the report says WHY it stopped: %s" % report_d2.reasons[:1])
+finally:
+    os.environ.pop("NEX_MAX_SYSTEMS_PER_RUN", None)
+    os.environ.pop("NEX_RUN_BUDGET_S", None)
+
 print("\nAll Director-layer tests passed.")

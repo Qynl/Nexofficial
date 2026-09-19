@@ -6,7 +6,7 @@ classification:
 
     read_only, reversible, destructive, network, requires_confirmation
     + a coarse category (READ / CREATE / MODIFY / BUILD / TEST /
-      DESTRUCTIVE / NETWORK / UNKNOWN)
+      CODE_EXECUTION / DESTRUCTIVE / NETWORK / UNKNOWN)
 
 Design rules (from the spec + audit hardening):
   * BOTH signals are always consulted: keyword heuristics on the tool
@@ -25,6 +25,7 @@ Design rules (from the spec + audit hardening):
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional
@@ -35,30 +36,143 @@ CREATE = "create"
 MODIFY = "modify"
 BUILD = "build"
 TEST = "test"
+# CODE_EXECUTION = the tool RUNS CODE (a script, a shell, a Lua/Python
+# payload) on the engine's behalf. Not "just another test tool": whatever
+# the payload contains executes with the engine's privileges. Ranked just
+# below DESTRUCTIVE (a delete is final) and above NETWORK; UNKNOWN stays
+# the most cautious rank of all.
+CODE_EXECUTION = "code_execution"
 DESTRUCTIVE = "destructive"
 NETWORK = "network"
 UNKNOWN = "unknown"
 
-CATEGORIES = (READ, CREATE, MODIFY, BUILD, TEST, DESTRUCTIVE, NETWORK, UNKNOWN)
+CATEGORIES = (READ, CREATE, MODIFY, BUILD, TEST, CODE_EXECUTION,
+              DESTRUCTIVE, NETWORK, UNKNOWN)
 
 # Heuristic keyword sets, used ONLY as a fallback (STAGE 3 rule).
+# The vocabulary below is the EDITOR vocabulary: it must place ordinary
+# engine tools correctly, because a mislabeled tool is now a tool that
+# stalls an autonomous run (UNKNOWN => confirmation). Adding a hint to a
+# LOW-severity bucket (READ) can never escalate anything — the
+# severity-max rule only ever moves tools toward caution.
 _CAT_HINTS: Dict[str, tuple] = {
     READ: ("get", "read", "list", "find", "search", "inspect", "query",
            "describe", "fetch", "status", "state", "discover", "export",
-           "download", "show", "peek", "analyze"),
+           "download", "show", "peek", "analyze",
+           # observation + editor inspection (screenshot/log/console are
+           # the tools the OBSERVE loop depends on)
+           "screenshot", "screengrab", "capture", "snapshot", "log", "logs",
+           # health checks: the plan-UX classifier in agent/plans.py already
+           # treats ping/echo as safe, so the capability model must agree —
+           # otherwise a health check stalls an autonomous run.
+           "ping", "pong", "echo",
+           "console_output", "telemetry", "metric", "metrics", "stats",
+           "info", "health", "version", "open", "close", "preview",
+           "diff", "compare", "check"),
     CREATE: ("create", "add", "new", "spawn", "make", "generate", "import",
-             "place", "insert", "build_asset", "add_actor", "create_actor"),
+             "place", "insert", "build_asset", "add_actor", "create_actor",
+             "duplicate", "clone", "instantiate"),
     MODIFY: ("set", "update", "edit", "modify", "change", "apply", "adjust",
-             "configure", "write", "animate", "move", "transform", "rename"),
+             "configure", "write", "animate", "move", "transform", "rename",
+             "save", "undo", "redo", "pause", "resume", "stop", "teleport",
+             "group", "align", "snap", "parent", "tag", "label", "assign"),
     BUILD: ("compile", "build", "package", "bake", "cook", "deploy",
             "export_package"),
     TEST: ("run", "launch", "play", "test", "simulate", "verify",
            "playtest", "inspect_runtime"),
     DESTRUCTIVE: ("delete", "remove", "destroy", "erase", "drop", "reset",
                   "purge", "wipe", "kill", "terminate", "clear", "uninstall"),
-    NETWORK: ("fetch_url", "http_request", "upload", "publish", "share",
-              "send", "post", "fetch_remote"),
+    NETWORK: ("fetch_url", "http_request", "http_get", "httpget", "upload",
+              "publish", "share", "send", "post", "fetch_remote",
+              "curl", "wget", "webhook"),
 }
+
+
+# --- CODE EXECUTION: exact token rules ------------------------------------
+# A tool NAME alone never proves code execution, but these token shapes
+# are unambiguous in the MCP ecosystem. Tokens are split on
+# non-alphanumerics, so `execute_luau` and `run_script` are decided by
+# their PARTS rather than by substring luck (which is how `run_python`
+# ended up in TEST: it contains "run").
+#
+# The rules are exactly as narrow as the risk demands: a false positive
+# here cannot be undone (the operator registry may only RAISE severity),
+# so engine nouns like `script`, `console`, `command` or `process` are
+# NOT hard tokens — they appear in legitimate editor tools
+# (`create_script`, `get_console_output`, `list_commands`). They become
+# code execution only next to an execution VERB.
+_TOK_SPLIT = re.compile(r"[^a-z0-9]+")
+
+# Tokens that ALONE mean "runs code / a shell / a language runtime".
+# `terminal` is deliberately included: an engine server exposing a
+# terminal IS a shell, and no game tool is named "terminal".
+_CODE_TOKENS = frozenset({
+    "eval", "exec", "shell", "bash", "sh", "zsh",
+    "powershell", "pwsh", "subprocess", "popen", "pty",
+    "loadstring", "dofile", "loadfile",
+    "lua", "luau", "python", "python3", "ruby", "perl", "php",
+    "javascript", "js", "node", "nodejs", "terminal",
+})
+# Tokens that name WHAT is run — they need an execution verb beside them.
+_CODE_NOUNS = frozenset({
+    "script", "scripts", "code", "lua", "luau", "python", "sh", "shell",
+    "cmd", "command", "commands", "console", "file", "expression", "expr",
+    "snippet", "string", "payload", "program", "process", "module",
+    "tool", "sandbox", "automation",
+})
+_CODE_VERBS = frozenset({
+    "run", "execute", "exec", "eval", "evaluate", "invoke", "spawn",
+    "launch", "start", "load", "interpret", "shell",
+})
+# NOUNS that are legitimate engine nouns and must NOT be dragged into code
+# execution by a verb: `run_game`, `run_tests`, `playtest`, `spawn_enemy`,
+# `start_timer`, `load_asset`, `launch_editor`, `apply_physics_material`.
+_CODE_SAFE_NOUNS = frozenset({
+    "game", "games", "editor", "player", "players", "level", "levels",
+    "scene", "scenes", "test", "tests", "playtest", "playtests",
+    "simulation", "sim", "world", "worlds", "animation", "anim",
+    "animations", "physics", "material", "materials", "asset", "assets",
+    "mesh", "meshes", "texture", "textures", "audio", "sound", "sounds",
+    "part", "parts", "actor", "actors", "enemy", "enemies", "npc", "npcs",
+    "timer", "tween", "camera", "cameras", "light", "lights", "particle",
+    "particles", "shader", "shaders", "ui", "widget", "widgets", "hud",
+    "build", "compile", "package", "deploy", "preview", "render", "frame",
+    "frames", "session", "instance", "instances", "model", "models", "rig",
+    "rigs", "skeleton", "behavior", "behaviour", "event", "events",
+    "signal", "signals", "metric", "metrics", "balance", "profile",
+    "profiler", "timeline", "playback",
+})
+
+
+def tokenize(name_l: str) -> tuple:
+    return tuple(t for t in _TOK_SPLIT.split(name_l or "") if t)
+
+
+def _is_code_execution(name_l: str) -> bool:
+    """True when the TOOL NAME says it runs code / a shell / a process.
+
+    Deterministic token rules:
+      * a token that IS a code/process primitive (`eval`, `shell`,
+        `exec`, `subprocess`, `loadstring`, `luau`, `python`, ...), or
+      * an execution verb next to a noun that is not a known-safe engine
+        noun (`run_script`, `execute_python`, `spawn_process`,
+        `run_console_command`) — while `run_game`, `run_tests`,
+        `create_script`, `spawn_enemy` stay in their own buckets.
+    """
+    toks = tokenize(name_l)
+    if not toks:
+        return False
+    for t in toks:
+        if t in _CODE_TOKENS:
+            return True
+    for t in toks:
+        if t in _CODE_VERBS:
+            for u in toks:
+                if u == t or u in _CODE_SAFE_NOUNS:
+                    continue
+                if u in _CODE_NOUNS or u in _CODE_TOKENS:
+                    return True
+    return False
 
 
 @dataclass
@@ -164,23 +278,26 @@ def classify_capability(name: str,
 
 def _needs_confirm(cat: str) -> bool:
     """Categories that warrant confirmation even when not destructive:
-    unknown (unclassifiable = untrusted by default) and network
-    (leaves the machine)."""
-    return cat in (UNKNOWN, NETWORK)
+    unknown (unclassifiable = untrusted by default), network (leaves the
+    machine) and CODE EXECUTION (runs arbitrary code with the engine's
+    privileges — the escape primitive)."""
+    return cat in (UNKNOWN, NETWORK, CODE_EXECUTION)
 
 
 def _more_dangerous(a: str, b: str) -> str:
     """The category with the higher severity. UNKNOWN ranks highest so
     'we can't classify it' can never be downgraded by a
     friendly-looking annotation."""
-    order = {READ: 1, CREATE: 2, MODIFY: 3, BUILD: 4,
-             TEST: 5, NETWORK: 6, DESTRUCTIVE: 7, UNKNOWN: 8}
-    return a if order.get(a, 8) >= order.get(b, 8) else b
+    order = {READ: 1, CREATE: 2, MODIFY: 3, BUILD: 4, TEST: 5,
+             NETWORK: 6, CODE_EXECUTION: 7, DESTRUCTIVE: 8, UNKNOWN: 9}
+    return a if order.get(a, 9) >= order.get(b, 9) else b
 
 
 def _category_from_annotations(ann: Dict[str, Any], name_l: str) -> str:
     if ann.get("destructiveHint"):
         return DESTRUCTIVE
+    if _is_code_execution(name_l):
+        return CODE_EXECUTION
     if ann.get("readOnlyHint"):
         return READ
     # openWorldHint implies touching external/shared state.
@@ -197,7 +314,12 @@ def _has_hint(name_l: str, cat: str) -> bool:
 
 
 def _heuristic_category(name_l: str) -> str:
-    # Order matters: most specific first.
+    # Order matters: most specific first. Code execution outranks the
+    # generic buckets because a running payload can do everything a
+    # create/modify/build/test tool can do — and more. DESTRUCTIVE still
+    # outranks it (a delete is final).
+    if _is_code_execution(name_l):
+        return CODE_EXECUTION
     for cat in (DESTRUCTIVE, NETWORK, BUILD, TEST, CREATE, MODIFY, READ):
         if _has_hint(name_l, cat):
             return cat
@@ -245,7 +367,8 @@ def category_hints() -> Dict[str, tuple]:
 # classification stays in effect. This file is operator infrastructure,
 # not model input: the model never reads or writes it.
 _REG_SEVERITY = {READ: 1, CREATE: 2, MODIFY: 3, BUILD: 4, TEST: 5,
-                 NETWORK: 6, DESTRUCTIVE: 7, UNKNOWN: 8}
+                 NETWORK: 6, CODE_EXECUTION: 7, DESTRUCTIVE: 8,
+                 UNKNOWN: 9}
 
 _reg_cache: Dict[str, Any] = {"path": None, "mtime": None, "data": {}}
 
@@ -321,5 +444,12 @@ def apply_capability_registry(cap: ToolCapability, server: Optional[str],
     if e.get("requires_confirmation") is True:
         out = replace(out, requires_confirmation=True)
     # `requires_confirmation: false` / `read_only: true` pins are
-    # deliberately NOT honored (severity-max, see above).
+    # deliberately NOT honored (severity-max, see above). A STANDING
+    # APPROVAL is a different statement and must be explicit, per tool:
+    # `"approved": true` means "the operator has read this tool and takes
+    # responsibility for it running autonomously". Only the operator's own
+    # file can say that; it is never inferred from a name or a hint.
+    if e.get("approved") is True:
+        out = replace(out, requires_confirmation=False,
+                      source=out.source + "+operator_approved")
     return out

@@ -181,8 +181,41 @@ _expect(d.allowed is False, "internal 'exec' denied by the boundary")
 # External process-execution names: allowed but ALWAYS confirmation.
 d = policy_mod.authorize("engine", "exec")
 _expect(d.allowed is True and d.requires_confirmation is True,
-        "external 'exec' allowed only with confirmation (PROCESS)")
-_expect(d.category == "PROCESS", "external 'exec' categorized PROCESS")
+        "external 'exec' allowed only with confirmation")
+# Round 3 unified the label: a process tool IS code execution, so it now
+# reports the real category instead of a parallel pseudo-category. One
+# vocabulary means one place to reason about the risk.
+_expect(d.category == "code_execution",
+        "external 'exec' categorized code_execution (unified with the "
+        "capability model, not a separate PROCESS label)")
+
+# Escape payloads are refused outright — never offered for approval.
+from mcp.capability import CODE_EXECUTION  # noqa: E402
+ce = cap.capability_for_tool({"name": "execute_luau"})
+_expect(ce.category == CODE_EXECUTION,
+        "execute_luau classified as code execution")
+d = policy_mod.authorize("roblox-studio", "execute_luau", ce,
+                         args={"code": "os.execute('rm -rf /')"})
+_expect(d.allowed is False,
+        "escape payload refused even on a trusted server: %s"
+        % d.reason[:70])
+d = policy_mod.authorize("roblox-studio", "execute_luau", ce,
+                         args={"code": "workspace.Gravity = 196.2"})
+_expect(d.allowed is True and d.requires_confirmation is True,
+        "real game code is allowed but needs the operator's approval")
+d = policy_mod.authorize(
+    "roblox-studio", "execute_luau", ce,
+    policy=policy_mod.Policy(allow_code_execution={"roblox-studio"}),
+    args={"code": "workspace.Gravity = 196.2"})
+_expect(d.allowed is True and d.requires_confirmation is False,
+        "NEX_ALLOW_CODE_EXECUTION is the operator's standing approval")
+
+# Path escapes are refused on EVERY tool, with a named reason.
+d = policy_mod.authorize("roblox-studio", "create_script", None,
+                         args={"path": "/home/dev/.ssh/id_rsa"})
+_expect(d.allowed is False and "escape payload" in d.reason,
+        "sensitive path refused on a plain create tool: %s"
+        % d.reason[:60])
 
 # Unclassifiable external tools: untrusted by default -> confirmation,
 # unless the operator explicitly relaxes it (confirm_unknown=False).

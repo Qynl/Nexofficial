@@ -1003,6 +1003,8 @@
   const SYS_LABEL = {
     planned: 'planned', in_progress: 'building',
     complete: 'verified', broken: 'broken',
+    // Work finished, criteria NOT proven — never rendered as verified.
+    unverified: 'built, not verified',
   };
   function renderSystemMap(systems, current) {
     if (!systems || !systems.length) return;
@@ -1412,6 +1414,80 @@
           setRuntimeState('verify', 'fail');
           showToast('Run is PARTIAL — criteria unproven', 'err');
         }
+      } else if (evt.type === 'agent.blueprint') {
+        // No engine: what WOULD be built, with the capability each step
+        // needs. Explicitly a plan (nothing was built).
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'bp-row';
+        const sys = (evt.systems || []);
+        row.textContent = 'BUILD BLUEPRINT (' + sys.length + ' systems, '
+          + (evt.tests || 0) + ' tests) — plan only, nothing built';
+        p.appendChild(row);
+        sys.forEach((s2) => {
+          const line = document.createElement('div');
+          line.className = 'bp-sys';
+          line.textContent = (s2.title || s2.id)
+            + (s2.ready ? ' · ready' : ' · needs a capability')
+            + ' · ' + (s2.criteria || 0) + ' criteria';
+          p.appendChild(line);
+        });
+        if ((evt.missing_capabilities || []).length) {
+          const miss = document.createElement('div');
+          miss.className = 'gate-row';
+          miss.textContent = 'connect an MCP server providing: '
+            + evt.missing_capabilities.join(', ');
+          p.appendChild(miss);
+        }
+        setRuntimeState('build', 'pending');
+        showToast('No engine connected — blueprint produced instead',
+          'err');
+      } else if (evt.type === 'agent.campaign_finished'
+                 || evt.type === 'agent.campaign_stopped') {
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'mem-row';
+        row.textContent = (evt.type === 'agent.campaign_finished'
+          ? 'campaign finished: ' : 'campaign stopped: ')
+          + (evt.reason || evt.note || '')
+          + (evt.systems ? ' [' + evt.systems.join(' → ') + ']' : '');
+        p.appendChild(row);
+      } else if (evt.type === 'agent.system_started') {
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'sys-start';
+        row.textContent = 'next objective: system ' + (evt.system || '?')
+          + (evt.index ? ' (' + evt.index + '/' + (evt.of || '?') + ')' : '')
+          + (evt.objective ? ' — ' + evt.objective : '');
+        p.appendChild(row);
+      } else if (evt.type === 'agent.quality_gate') {
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'quality-row'
+          + ((evt.score != null && evt.score < (evt.target || 0))
+             ? ' below' : '');
+        row.textContent = 'quality ' + evt.score + ' / target ' + evt.target
+          + (evt.note ? ' — ' + evt.note : '');
+        p.appendChild(row);
+      } else if (evt.type === 'agent.recipe_planned') {
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'mem-row';
+        row.textContent = 'planned from the recipe library (no model): '
+          + (evt.task_count || 0) + ' steps for ' + (evt.system || '?');
+        p.appendChild(row);
+      } else if (evt.type === 'agent.confirmation_required') {
+        // A tool that needs a human decision, in a run nobody is watching.
+        // It did NOT run — say so, and say how to approve it.
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'gate-row';
+        row.textContent = 'STOPPED for confirmation: ' + (evt.tool || '?')
+          + ' on ' + (evt.server || '?') + ' (' + (evt.category || '?')
+          + ') — ' + (evt.reason || '');
+        p.appendChild(row);
+        setRuntimeState('build', 'fail');
+        showToast('Tool needs approval — it was not executed', 'err');
       } else if (evt.type === 'agent.memory_compacted') {
         const p = ensureAgentPanel();
         const row = document.createElement('div');
