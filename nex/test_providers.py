@@ -467,6 +467,11 @@ _expect(view["providers"]["nim"]["api_key"] == "nvapi-…tkey",
         "the key is masked instead: %s" % view["providers"]["nim"]["api_key"])
 _expect(view["providers"]["nim"]["api_key_set"] is True, "api_key_set flag is set")
 _expect(view["roles"]["builder"]["provider"] == "nim", "roles are part of the view")
+_expect(all(k in view["providers"]["nim"]
+            for k in ("status", "rpm", "requests_in_window", "key_mismatch")),
+        "the settings view carries live state too (one shape, not two)")
+_expect("nvapi-testkey" not in json.dumps(view["providers"]),
+        "…and still never the raw key")
 _expect(len(view["catalog"]) >= 10, "the model catalog ships with the view")
 _expect(all("id" in c and "note" in c for c in view["catalog"]),
         "every catalog entry explains itself")

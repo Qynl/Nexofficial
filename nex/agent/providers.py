@@ -1316,7 +1316,11 @@ class Router:
     def settings_view(self) -> Dict[str, Any]:
         return {
             "ok": True,
-            "providers": {name: spec.masked() for name, spec in self.specs.items()},
+            # Masked spec + LIVE state, the same shape as status()["providers"]
+            # — a caller should not have to know that there are two views.
+            "providers": {name: dict(spec.masked(),
+                                     **self.states[name].to_dict())
+                          for name, spec in self.specs.items()},
             "roles": {role: dict(self.roles.get(role) or {},
                                  model=self.role_model(role),
                                  fallbacks=self.fallbacks(role))
