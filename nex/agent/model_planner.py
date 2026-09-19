@@ -97,6 +97,61 @@ def _stage_for(tv) -> str:
     return (tv.capability.category if tv.capability else "unknown").lower()
 
 
+def _memory_block(memory: Dict[str, Any]) -> str:
+    """Project-memory section of the planning prompt.
+
+    Four parts, all BOUNDED (project_state caps them) — the model gets an
+    orientation, never a chat log:
+      * PROJECT SYSTEMS — what exists, what works, what we are building
+        now. This is what lets a small model stop re-deriving the whole
+        project every round.
+      * LEARNED — durable facts about this project/engine.
+      * CONFIRMED DEFECTS — observation-verified bugs still open. A plan
+        that re-creates them is a plan defect.
+      * OBSERVE RULE — after runtime-affecting work, the plan must prove
+        it by observing the running game (build -> run -> observe).
+    """
+    parts: List[str] = []
+    systems = memory.get("systems") or {}
+    if systems:
+        rows = []
+        for name, info in list(systems.items())[:12]:
+            if not isinstance(info, dict):
+                continue
+            rows.append("- %s: %s%s"
+                        % (name, info.get("status", "planned"),
+                           (" (" + str(info.get("notes"))[:80] + ")")
+                           if info.get("notes") else ""))
+        if rows:
+            parts.append("PROJECT SYSTEMS (what exists; do NOT rebuild "
+                         "completed ones):\n" + "\n".join(rows))
+    knowledge = memory.get("knowledge") or {}
+    if knowledge:
+        parts.append("LEARNED ABOUT THIS PROJECT (facts, keep using "
+                     "them):\n" + "\n".join(
+                         "- %s: %s" % (k, v) for k, v in
+                         list(knowledge.items())[:8]))
+    bugs = [b for b in (memory.get("known_bugs") or [])
+            if isinstance(b, dict) and b.get("message")]
+    if bugs:
+        parts.append("CONFIRMED DEFECTS, STILL OPEN (repair these FIRST — "
+                     "a plan that re-creates them is a plan defect):\n"
+                     + "\n".join("- [%s] %s"
+                                 % (b.get("kind", "defect"),
+                                    b.get("message", "")) for b in bugs[:8]))
+    from agent.observations import summarize
+    parts.append("Latest runtime observations: %s"
+                 % summarize(memory.get("observations") or []))
+    parts.append(
+        "OBSERVE RULE: after any step that changes RUNTIME behavior "
+        "(building, or changing levels/actors/scripts/materials), include "
+        "the observation steps that PROVE the change — launch the game, "
+        "then capture screenshot / logs / scene-state from the catalog "
+        "(depends_on the build step). A runtime-affecting step without an "
+        "observation step after it is a plan defect.")
+    return "\n\n" + "\n\n".join(parts)
+
+
 def validate_plan_tools(plan: Dict[str, Any], registry) -> Tuple[List[str], List[str]]:
     """Return (valid_tool_names, missing_tool_names) for a parsed plan."""
     valid, missing = [], []
@@ -164,7 +219,8 @@ def validate_plan_deep(plan: Dict[str, Any],
     return errors, warnings
 
 
-def plan_to_graph(plan: Dict[str, Any], registry) -> TaskGraph:
+def plan_to_graph(plan: Dict[str, Any], registry,
+                  scope: Optional[Dict[str, Any]] = None) -> TaskGraph:
     """Convert a parsed mc-style plan into a validated TaskGraph.
 
     Steps referencing tools that don't exist in the registry are skipped
@@ -203,6 +259,11 @@ def plan_to_graph(plan: Dict[str, Any], registry) -> TaskGraph:
             args=dict(s.get("args", {})),
             deps=deps,
             expect=s.get("expect"),
+            system=(str(s.get("system") or "").strip().lower()
+                    or (scope or {}).get("system") or ""),
+            criteria=([str(c)[:200] for c in (s.get("criteria") or [])
+                       if str(c).strip()][:8]
+                      or list((scope or {}).get("success") or [])[:4]),
         ))
         name_to_id[s.get("name", tid)] = tid
         order.append(tid)
@@ -232,7 +293,9 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
                           fallback=None, max_catalog: int = 80,
                           feedback: Optional[List[str]] = None,
                           design: Optional[Dict[str, Any]] = None,
-                          locked: Optional[List[str]] = None
+                          locked: Optional[List[str]] = None,
+                          memory: Optional[Dict[str, Any]] = None,
+                          scope: Optional[Dict[str, Any]] = None
                           ) -> Tuple[TaskGraph, Optional[Dict[str, Any]]]:
     """Ask the LLM for a goal-specific plan, parse + validate it, and return a
     TaskGraph. Returns (graph, plan_dict). On any failure returns the fallback
@@ -243,6 +306,17 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
 
     `feedback` (optional list of strings) is incorporated into the prompt for an
     improvement round — e.g. judge suggestions from a previous attempt.
+
+    `memory` (optional dict) is the project memory: {known_bugs: [...],
+    observations: [...]} — confirmed defects and the latest runtime evidence,
+    so an improvement round REPAIRS instead of re-creating known problems.
+    `systems`/`knowledge` (same dict) give the model its orientation: what
+    exists, what works, what it learned — bounded, upserted state.
+
+    `scope` (optional dict, agent.director.scope_envelope) is the SINGLE
+    objective of this planning round. When present the model is told
+    exactly which system it is building, what proves success, and what it
+    must NOT touch — the anti-"I improved the entire project" guard.
     """
     fallback = fallback or default_planner
     if llm is None:
@@ -259,6 +333,14 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
         system += ("\n\nLOCKED DESIGN DECISIONS (binding; any step that "
                    "re-litigates them will be blocked):\n"
                    + "\n".join("- " + d for d in locked[:8]))
+    if memory:
+        system += _memory_block(memory)
+    if scope:
+        from agent.director import scope_block
+        system += ("\n\n" + scope_block(scope) +
+                   "\n\nEvery step MUST carry \"system\": \"%s\" and, when "
+                   "it proves one, \"criteria\": [\"<success criterion>\"]."
+                   % (scope.get("system") or ""))
     user_msg = "Goal: %s\n\nProduce the plan JSON now." % goal
     if feedback:
         user_msg += ("\n\nAddress these concrete findings before "
@@ -282,7 +364,7 @@ def model_driven_planner(goal: str, registry, llm: Optional[Callable] = None,
     if not valid:
         return fallback(goal, registry), None
 
-    graph = plan_to_graph(plan, registry)
+    graph = plan_to_graph(plan, registry, scope=scope)
     if not graph.all():
         return fallback(goal, registry), None
 

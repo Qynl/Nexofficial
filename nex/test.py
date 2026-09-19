@@ -16,6 +16,7 @@ import os
 import py_compile
 import subprocess
 import sys
+import tempfile
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def _load_server_module():
     """Load server.py as a module so we can call its pure functions."""
+    # server.py creates its auth token file at import time — point it at a
+    # throwaway path so the test suite never touches the real one.
+    os.environ["NEX_TOKEN_FILE"] = os.path.join(tempfile.mkdtemp(), "token")
     spec = importlib.util.spec_from_file_location("nex_server", os.path.join(HERE, "server.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

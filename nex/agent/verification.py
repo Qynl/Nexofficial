@@ -7,8 +7,9 @@ If no verifier is available we report UNVERIFIED (never "fake success").
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from agent.registry import CapabilityRegistry
 
@@ -125,6 +126,68 @@ def _stringify(result: Any) -> str:
         return str(result)
 
 
+# ---------------------------------------------------------------------------
+# THE MANDATORY-VERIFICATION RULE (Director layer)
+# ---------------------------------------------------------------------------
+# "Done!" without evidence is the single most expensive failure mode of an
+# autonomous builder: it stops working while the game is still broken. The
+# rule enforced here:
+#
+#   A task that DECLARES what it must prove (step `criteria` — the
+#   recipe/Director checklist) is NOT complete just because its tool call
+#   returned. Its result must satisfy those criteria, or it is retried /
+#   reported as failed.
+#
+# Criteria are strings from the recipe library ("the player can take
+# damage"). They are checked structurally against the result: the result
+# must be non-trivial AND (when the criterion names observable keys) show
+# the named evidence. When a criterion cannot be checked from the result
+# alone, it stays UNRESOLVED for the OBSERVE loop (which has the runtime
+# evidence) — never silently "passed".
+_CRITERIA_STOPWORDS = frozenset((
+    "the", "a", "an", "can", "is", "are", "be", "and", "or", "of", "to",
+    "in", "on", "with", "without", "no", "not", "after", "before", "when",
+    "player", "game", "system", "must", "should", "does", "do", "it",
+    "that", "this", "for", "from", "at", "by", "into", "over", "up",
+))
+
+
+def criteria_keywords(criterion: str) -> List[str]:
+    """The observable nouns in a criterion ('the enemy can die' -> enemy,
+    die). Used to look for the criterion's evidence in the result."""
+    out: List[str] = []
+    for tok in re.split(r"[^a-z0-9_]+", (criterion or "").lower()):
+        if len(tok) >= 4 and tok not in _CRITERIA_STOPWORDS and tok not in out:
+            out.append(tok)
+    return out
+
+
+def check_criteria(criteria: List[str], result: Any) -> tuple:
+    """(ok, notes) — structural check of declared criteria against one
+    tool result.
+
+    ok=False only when the result is empty/trivial (nothing to prove
+    anything with). Otherwise the criteria are carried forward as
+    UNRESOLVED evidence for the reviewer/observer — an unproven criterion
+    is never reported as passed.
+    """
+    criteria = [c for c in (criteria or []) if str(c).strip()]
+    if not criteria:
+        return True, ""
+    if _is_empty_result(result):
+        return False, ("declared criteria %r but the result is empty — "
+                       "nothing proves them" % (criteria[:2],))
+    hinted = 0
+    for c in criteria:
+        kws = criteria_keywords(c)
+        blob = _stringify(result).lower()
+        if kws and any(k in blob for k in kws):
+            hinted += 1
+    return True, ("criteria: %d/%d look evidenced in the result; all %d "
+                  "stay pending until the running game confirms them"
+                  % (hinted, len(criteria), len(criteria)))
+
+
 def verify_task(task: Any, registry: CapabilityRegistry,
                 result: Any) -> VerificationResult:
     """Run the task's verify_tool against the registry, if present.
@@ -132,13 +195,15 @@ def verify_task(task: Any, registry: CapabilityRegistry,
     Layers of criteria (richer than a single boolean):
       1. the task's ``expect`` acceptance criteria (from the plan step:
          required keys / contains / min_len / equals / not_empty),
-      2. the minimum triviality gate: an information-free result
+      2. the declared CHECKLIST criteria (`task.criteria`, Director layer):
+         an empty result proves nothing — see check_criteria,
+      3. the minimum triviality gate: an information-free result
          (None / {} / '' / empty lists / envelope-of-nothing) is NOT
          accepted as success,
-      3. the task's ``verify_tool`` — a REAL check via a discovered tool.
+      4. the task's ``verify_tool`` — a REAL check via a discovered tool.
 
     If no verifier is available we still report UNVERIFIED (never fake
-    success) — but only after 1 and 2 passed.
+    success) — but only after 1-3 passed.
     """
     # 1) Plan-declared acceptance criteria.
     expect = getattr(task, "expect", None)
@@ -147,7 +212,18 @@ def verify_task(task: Any, registry: CapabilityRegistry,
         if not ok:
             return VerificationResult(ok=False, verified=False, note=note)
 
-    # 2) Triviality gate when no verifier exists (see below for verifier).
+    # 2) Declared checklist criteria (Director layer). An empty result
+    #    proves nothing — refuse it before the triviality gate would.
+    crit = list(getattr(task, "criteria", []) or [])
+    if crit:
+        cok, cnote = check_criteria(crit, result)
+        if not cok:
+            return VerificationResult(ok=False, verified=False, note=cnote)
+        crit_note = cnote
+    else:
+        crit_note = ""
+
+    # 3) Triviality gate when no verifier exists (see below for verifier).
     if not task.verify_tool:
         if _is_empty_result(result):
             return VerificationResult(
@@ -156,7 +232,8 @@ def verify_task(task: Any, registry: CapabilityRegistry,
                      "avoid low-quality/empty output")
         return VerificationResult(
             ok=True, verified=False,
-            note="no verifier available; result unverified")
+            note=("no verifier available; result unverified"
+                  + (" — " + crit_note if crit_note else "")))
 
     tv = registry.by_name(task.verify_tool)
     if tv is None:

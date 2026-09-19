@@ -8,6 +8,16 @@ loop:
   * tools/call  — confirms it reaches the fake upstream.
   * /api/tunnels /probe — confirms the management surfaces report
     the new tunnel as reachable.
+
+NOTE — strict server registry: the deployed server runs with
+``strict_servers`` ON (CONNECTED != TRUSTED), so the test tunnel
+``fake-roblox`` must be in the trusted registry or every tools/call is
+refused by design. Start the server under test with:
+
+    NEX_TRUSTED_SERVERS=fake-roblox python3 server.py
+
+(that is exactly the operator act the strict mode asks for). Without
+it, this suite fails on the first tools/call — by design, not by bug.
 """
 import json
 import os
@@ -143,6 +153,25 @@ def _free_port() -> int:
     return p
 
 
+def _load_token():
+    """This suite talks to an ALREADY-RUNNING server (NEX_BASE). The
+    server now always requires a token: use NEX_TEST_TOKEN if you know
+    it, else read the auto-generated one from ~/.nex/server_token (the
+    default-mode boot writes it there and prints it)."""
+    tok = os.environ.get("NEX_TEST_TOKEN", "").strip()
+    if tok:
+        return tok
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".nex",
+                               "server_token"), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+TOKEN = _load_token()
+
+
 def _http_json(method, path, payload=None, headers=None):
     url = BASE + path
     data = None
@@ -150,6 +179,8 @@ def _http_json(method, path, payload=None, headers=None):
         data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, method=method,
                                  headers={"Content-Type": "application/json",
+                                          **({"X-Nex-Auth": TOKEN}
+                                             if TOKEN else {}),
                                           **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -249,6 +280,14 @@ try:
                                           "arguments": {"echo": 1}}})
     _expect(status == 200, "tools/call ping 200")
     res = body.get("result", {})
+    if res.get("isError") is True:
+        _blob = json.dumps(res)
+        if ("trusted server registry" in _blob
+                or "trusted_servers" in _blob):
+            sys.exit("FAIL - ping not error: the server under test is in "
+                     "STRICT mode and does not trust 'fake-roblox'. "
+                     "Restart it with NEX_TRUSTED_SERVERS=fake-roblox "
+                     "(connected != trusted — this is the intended gate).")
     _expect(res.get("isError") is False, "ping not error")
     text = res["content"][0]["text"]
     parsed = json.loads(text)

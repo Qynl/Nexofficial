@@ -23,6 +23,7 @@ only reports a capability as missing when every recovery option is exhausted.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -51,6 +52,9 @@ class CompletionReport:
     skipped: List[str] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
     missing: List[Dict[str, Any]] = field(default_factory=list)
+    # Criteria declared for the scoped system with no proof from the
+    # running game (mandatory-verification gate).
+    unverified: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,6 +62,7 @@ class CompletionReport:
             "completed": self.completed, "failed": self.failed,
             "skipped": self.skipped, "reasons": self.reasons,
             "missing": self.missing,
+            "unverified": self.unverified,
         }
 
 
@@ -81,16 +86,30 @@ def _is_transient(error: str) -> bool:
         re.IGNORECASE))
 
 
-def _diagnose(error: str, task: Any):
+def _diagnose(error: str, task: Any,
+              schema_props: Optional[set] = None):
     """Generic, non-hardcoded repair: if the error names a missing argument,
-    supply a placeholder default for it and retry."""
+    supply a placeholder default for it and retry.
+
+    SCHEMA-GATED: when the live inputSchema's properties are known
+    (`schema_props`), the repair only fires for args the schema actually
+    declares. Before this gate, a missing-arg error from an execution
+    tool would retry with literal `__default_<name>` values — e.g.
+    `execute_luau` would run the string `__default_code` in a LIVE
+    editor. When the schema is unknown (None) the old behavior stands:
+    a wrong retry is cheap; executing garbage in a real engine is not,
+    but unknown-schema tools are the mock/test world where it's safe.
+    """
     m = re.search(r"'([a-zA-Z_][a-zA-Z0-9_]*)'", error or "")
     if m:
         field_name = m.group(1)
-        if field_name not in (task.args or {}):
-            new_args = dict(task.args or {})
-            new_args[field_name] = "__default_" + field_name
-            return new_args, "added missing argument '%s'" % field_name
+        if field_name in (task.args or {}):
+            return None, None
+        if schema_props is not None and field_name not in schema_props:
+            return None, None
+        new_args = dict(task.args or {})
+        new_args[field_name] = "__default_" + field_name
+        return new_args, "added missing argument '%s'" % field_name
     return None, None
 
 
@@ -144,10 +163,21 @@ class AutonomousAgent:
                  llm: Optional[Callable] = None,
                  max_critique_cycles: int = 1,
                  design_enabled: bool = True,
-                 persist: bool = True) -> None:
+                 persist: bool = True,
+                 workspace_root: Optional[str] = None) -> None:
         self.registry = registry
         self.planner = planner or default_planner
         self.policy = policy or current_policy()
+        # --- Director layer (agent.director) ---------------------------------
+        # max_systems: how many systems one game may consist of (a weak
+        # model asked for "everything" is what this bounds).
+        # max_steps_per_system: the scope envelope's hard step budget —
+        # the anti-"I improved the entire project" knob.
+        self.max_systems = int(os.environ.get("NEX_MAX_SYSTEMS", "6"))
+        self.max_steps_per_system = int(
+            os.environ.get("NEX_MAX_STEPS_PER_SYSTEM", "4"))
+        self.game_plan = None      # last GamePlan (director output)
+        self._scope: Optional[Dict[str, Any]] = None
         self.audit = audit or AuditLog()
         self.bus = bus
         self.approver = approver or (lambda task: True)
@@ -172,6 +202,9 @@ class AutonomousAgent:
         self.design_enabled = design_enabled
         self.persist = persist
         self.last_critique = None
+        # Workspace the agent writes game files into — the target for
+        # experiment snapshots/rollback (defaults to the tools workspace).
+        self._workspace_root_override = workspace_root
 
     # ----- event helper ---------------------------------------------------
     def _emit(self, agent_state=None, event_type=None, **payload) -> None:
@@ -182,10 +215,41 @@ class AutonomousAgent:
         except Exception:  # noqa: BLE001
             pass
 
+    # ----- experiment safety (workspace snapshots) -------------------------
+    def _workspace_root(self) -> str:
+        """The directory the agent's file-producing tools write into."""
+        if self._workspace_root_override:
+            return self._workspace_root_override
+        try:
+            from tools import TOOLS_ROOT  # type: ignore
+            return TOOLS_ROOT
+        except Exception:  # noqa: BLE001
+            import os
+            return os.path.join(os.path.expanduser("~"), "nex_workspace")
+
+    def _workspace_snapshot(self, label: str):
+        """Snapshot the workspace before a risky improvement run.
+        Returns the snapshot path or None (no workspace yet, or I/O error
+        — in that case the run simply proceeds without rollback ability)."""
+        root = self._workspace_root()
+        if not os.path.isdir(root):
+            return None
+        try:
+            from agent.checkpoints import (prune_snapshots,
+                                           snapshot_workspace)
+            snap = snapshot_workspace(root, label=label)
+            if snap is not None:
+                prune_snapshots(root, keep=5)
+            return snap
+        except Exception:  # noqa: BLE001
+            return None
+
     # ----- main entry ------------------------------------------------------
     def run(self, goal: str, state: Optional[ProjectState] = None,
             graph: Optional[TaskGraph] = None,
-            resume_checkpoint: Optional[str] = None) -> CompletionReport:
+            resume_checkpoint: Optional[str] = None,
+            scope: Optional[Dict[str, Any]] = None,
+            game_plan=None) -> CompletionReport:
         self._emit("OBSERVING", "agent.observe",
                    servers=[s.name for s in self.registry.servers])
         if state is None:
@@ -222,13 +286,67 @@ class AutonomousAgent:
                 and graph is None:
             self._make_design(goal, state)
 
-        self._emit("PLANNING", "agent.plan_started", goal=goal)
+        # --- GAME DIRECTOR: decompose the request into SYSTEMS -----------
+        # "Make me a game" is not a plan. The Director decides which
+        # systems the game needs and in what order (recipe library +
+        # optional model refinement), stores them in the system map, and
+        # picks the ONE system this round is scoped to. The planner then
+        # gets a narrow objective instead of the whole project.
+        # Direct when we are planning from scratch. A caller that already
+        # directed this run (server path) passes game_plan; a pre-built
+        # graph is somebody else's plan and must not be re-scoped here.
+        if graph is None and self.game_plan is None:
+            self._direct(goal, state, game_plan=game_plan)
+        if scope is not None:
+            # The caller already directed this run (server path): adopt its
+            # objective instead of silently re-scoping the work.
+            self._scope = scope
+            state.current_system = scope.get("system") or state.current_system
+        self._emit("PLANNING", "agent.plan_started", goal=goal,
+                   objective=(self._scope or {}).get("objective", ""),
+                   system=(self._scope or {}).get("system", ""))
         if graph is None:
             graph = self._make_plan(goal, state)
         self._design_guard(graph, state)
         self._emit("PLANNING", "agent.plan_updated",
                    task_count=len(graph.all()),
                    stages=[t.stage for t in graph.all()])
+
+        # HONEST BLOCK: zero executable tasks is not PARTIAL (which reads
+        # as "we did some of it"). With no tools connected — or a plan
+        # that validated down to nothing — the run is BLOCKED with a
+        # concrete, actionable reason, and the missing-capability list
+        # says exactly what to connect.
+        if not graph.all():
+            servers = [s.name for s in self.registry.servers]
+            if not servers:
+                reason = ("no MCP servers are connected — nothing is "
+                          "executable. Connect an editor (Roblox Studio "
+                          "/ Unreal / Blender) via the Settings page, "
+                          "then re-run.")
+            else:
+                reason = ("the plan produced no executable tasks against "
+                          "the live registry (servers: %s) — every step "
+                          "was dropped as missing or invalid."
+                          % ", ".join(servers))
+            self._emit("BLOCKED", "agent.project_blocked",
+                       status=STATUS_BLOCKED, completed=[], failed=[],
+                       missing=[{"task": "capability", "stage": "connect",
+                                 "server": None, "tool": None,
+                                 "reason": reason}])
+            state.phase = "BLOCKED"
+            report = CompletionReport(
+                status=STATUS_BLOCKED, goal=goal,
+                reasons=[reason],
+                missing=[{"task": "capability", "stage": "connect",
+                          "server": None, "tool": None, "reason": reason}])
+            if self.persist:
+                try:
+                    from agent.projects_store import save_project
+                    save_project(state, report)
+                except Exception:  # noqa: BLE001
+                    pass
+            return report
 
         state.pending = [t.name for t in graph.all() if t.status == PENDING]
 
@@ -287,6 +405,20 @@ class AutonomousAgent:
         # agent back to work (bounded by max_critique_cycles).
         report = self._critique_and_improve(goal, state, graph, report)
 
+        # Mandatory verification: no "COMPLETED" while the scoped objective
+        # still has unproven criteria.
+        report = self._completion_gate(state, report)
+
+        # Bounded memory: the state is fed back into every later planning
+        # round, so enforce the caps once per run and report what rolled out.
+        try:
+            trimmed = state.compact_memory()
+            if trimmed:
+                self._emit("OBSERVING", "agent.memory_compacted",
+                           trimmed=trimmed, size=state.memory_size())
+        except Exception:  # noqa: BLE001
+            pass
+
         if self.persist:
             try:
                 from agent.projects_store import save_project
@@ -296,6 +428,86 @@ class AutonomousAgent:
         return report
 
     # ------------------------------------------------------------------
+    def _review_system(self, goal: str, state: ProjectState) -> None:
+        """REVIEWER role: prove/fail the scoped system's criteria from the
+        runtime evidence. Scoped context, validated output, never fatal."""
+        sid = getattr(state, "current_system", "")
+        if not sid or self.llm is None:
+            return
+        crit = state.criteria_for(sid)
+        if not crit:
+            return
+        try:
+            from agent.roles import (REVIEWER, apply_review, reviewer_context,
+                                     reviewer_json, system_prompt)
+            obs = list(getattr(state, "observations", []) or [])
+            reply = self.llm([{"role": "user", "content":
+                               system_prompt(REVIEWER) + "\n\n"
+                               + reviewer_context(crit, obs)}])
+            data = reviewer_json(reply)
+            if not data:
+                return
+            passed = apply_review(data, state, sid)
+            self._emit("OBSERVING", "agent.reviewed", system=sid,
+                       proven=passed, verdict=data.get("verdict"),
+                       criteria=[{"criterion": c,
+                                  "state": state.criterion_state(sid, c)}
+                                 for c in crit])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _close_system(self, state: ProjectState, cycle: int) -> None:
+        """Mark the scoped system's checklist as PROVEN (clean observation)
+        and move the system map forward."""
+        sid = getattr(state, "current_system", "")
+        if not sid:
+            return
+        n = state.prove_criteria(sid, note="observed clean in cycle %d" % cycle)
+        state.upsert_system(sid, status="complete",
+                            notes="verified by observation")
+        self._emit("COMPLETED", "agent.system_verified",
+                   system=sid, proven=n,
+                   criteria=state.criteria_for(sid),
+                   systems={k: (v or {}).get("status")
+                            for k, v in (state.systems or {}).items()})
+        # Next objective, if the game has one.
+        nxt = None
+        try:
+            gp = self.game_plan
+            remaining = [s for s in (gp.systems if gp else [])
+                         if s.id != sid and s.status != "complete"]
+            nxt = remaining[0].id if remaining else None
+        except Exception:  # noqa: BLE001
+            nxt = None
+        if nxt:
+            self._emit("PLANNING", "agent.system_next", system=nxt)
+
+    def _completion_gate(self, state: ProjectState,
+                         report: CompletionReport) -> CompletionReport:
+        """THE MANDATORY-VERIFICATION GATE.
+
+        A run may not report COMPLETED while the objective it was scoped
+        to still has unproven success criteria. The honest outcome is
+        PARTIAL plus the exact list of unproven criteria — "Done!" without
+        evidence is the most expensive lie an autonomous builder can tell.
+        """
+        if report.status != STATUS_COMPLETED:
+            return report
+        sid = getattr(state, "current_system", "")
+        if not sid:
+            return report
+        unmet = state.unmet_criteria(sid)
+        if not unmet:
+            return report
+        report.status = STATUS_PARTIAL
+        report.reasons = list(report.reasons) + [
+            "NOT verified (no evidence from the running game): %s"
+            % uc["criterion"] for uc in unmet[:6]]
+        report.unverified = unmet
+        self._emit("OBSERVING", "agent.verification_gate",
+                   status=report.status, system=sid, unverified=unmet)
+        return report
+
     def _run_passes(self, graph, state) -> None:
         """Execute the graph with multi-pass recovery.
         Pass 1 executes everything that's ready. If failures leave the graph
@@ -432,11 +644,23 @@ class AutonomousAgent:
         current = report
         for cycle in range(1, self.max_critique_cycles + 1):
             state.phase = "CRITIQUING"
+            # REVIEWER role (before the critic): does the EVIDENCE prove the
+            # system's success criteria? This is the other honest half of
+            # mandatory verification — the reviewer can PROVE criteria from
+            # bounded evidence, while the critic judges overall quality.
+            self._review_system(goal, state)
             self._emit("OBSERVING", "agent.critique_started", cycle=cycle)
             c = run_critique(goal, state, current, llm=self.llm,
                              cycle=cycle)
             self.last_critique = c
             state.record_cycle(dict(c.to_dict(), ts=time.time()))
+            # Surface observation findings to the UI. (The critic already
+            # recorded them in state.known_bugs — project memory.)
+            for f in c.findings:
+                if f.get("source") == "observation":
+                    self._emit("OBSERVING", "agent.bug_recorded",
+                               kind=f.get("kind"), message=f.get("message"),
+                               severity=f.get("severity"))
             state.phase = ("COMPLETE" if c.action == ACTION_COMPLETE
                            else ("PLANNING" if c.action == ACTION_REPLAN
                                  else "POLISHING"))
@@ -445,6 +669,11 @@ class AutonomousAgent:
                        findings=c.findings, scores=c.scores, note=c.note,
                        cycle=cycle)
             if c.action == ACTION_COMPLETE:
+                # The round's objective was OBSERVED CLEAN. That is the
+                # proof the checklist was waiting for: a criterion is only
+                # ever "pass" because the running game (or a reviewer)
+                # confirmed it, never because a tool call returned.
+                self._close_system(state, cycle)
                 if current.status != STATUS_COMPLETED:
                     current.status = (
                         STATUS_COMPLETED if current.completed
@@ -480,6 +709,12 @@ class AutonomousAgent:
                                  plan=getattr(g2, "_model_plan", None))
                 except Exception:  # noqa: BLE001
                     pass
+            # Experiment safety: the improvement run may change the game.
+            # Snapshot the workspace first; if this run makes things WORSE
+            # (more failed tasks than before), roll the files back — the
+            # plan is kept, the damage is not.
+            snap = self._workspace_snapshot("improve_c%d" % cycle)
+            before_failed = len(current.failed)
             self._run_passes(g2, state)
 
             # Merge outcomes.
@@ -498,6 +733,28 @@ class AutonomousAgent:
                 "task": t.name, "stage": t.stage, "server": t.server,
                 "tool": t.tool, "reason": t.error or t.notes or "unavailable"}
                 for t in skipped_like]
+            # Rollback check: the experiment made things WORSE (more failed
+            # tasks than before the run) -> restore the snapshot. The plan
+            # and the critique memory survive; the file damage does not.
+            if snap and len(failed) > before_failed:
+                try:
+                    from agent.checkpoints import restore_workspace
+                    restored = restore_workspace(
+                        self._workspace_root(), snap)
+                    self._emit("BLOCKED", "agent.experiment_rolled_back",
+                               cycle=cycle, restored=restored,
+                               note="improvement run made things worse "
+                                    "(%d -> %d failed) — workspace "
+                                    "restored to pre-change snapshot"
+                                    % (before_failed, len(failed)))
+                    if restored:
+                        state.note_decision(
+                            "improvement cycle %d rolled back (made "
+                            "things worse); files restored to snapshot"
+                            % cycle,
+                            reason="experiment safety")
+                except Exception:  # noqa: BLE001
+                    pass
             if failed and not succeeded:
                 status = STATUS_FAILED
             elif failed or skipped:
@@ -516,6 +773,50 @@ class AutonomousAgent:
         return current
 
     # ----- planning (canonical: LLM-driven, skeleton fallback) -----------
+    # ------------------------------------------------------------------
+    def _direct(self, goal: str, state: ProjectState,
+                game_plan=None) -> None:
+        """Establish the system map + this round's scope envelope.
+
+        `game_plan` lets the caller (server_run) pass the outcome of a
+        Director run that already happened — the server plans BEFORE the
+        agent starts, so re-directing here would re-decompose and could
+        pick a different objective. Never fatal: without a model (or on
+        any failure) the recipe library is the Director."""
+        try:
+            from agent.director import direct, scope_envelope
+            gp = game_plan
+            if gp is None:
+                gp = direct(goal, llm=self.llm,
+                            design=(getattr(state, "design", {}) or None),
+                            memory={"systems": (getattr(state, "systems", {})
+                                                or {}),
+                                    "known_bugs": state.open_bugs()},
+                            limit=self.max_systems)
+            self.game_plan = gp
+            for sys_plan in gp.systems:
+                state.upsert_system(sys_plan.id, recipe=sys_plan.recipe,
+                                    notes=sys_plan.why)
+                state.set_criteria(sys_plan.id, sys_plan.checklist)
+            cur = gp.current()
+            env = scope_envelope(cur, gp.remaining(),
+                                 max_steps=self.max_steps_per_system)
+            self._scope = env if cur is not None else None
+            state.current_system = (cur.id if cur is not None else "")
+            if cur is not None:
+                state.upsert_system(cur.id, status="in_progress")
+            self._emit("PLANNING", "agent.directed",
+                       game=gp.game, source=gp.source,
+                       systems=[{"id": s.id, "title": s.title,
+                                 "layer": s.layer, "status": s.status,
+                                 "criteria": len(s.checklist)}
+                                for s in gp.systems],
+                       current=state.current_system,
+                       objective=(env.get("objective") if env else ""),
+                       success=(env.get("success") if env else []))
+        except Exception as exc:  # noqa: BLE001
+            self._emit("PLANNING", "agent.direct_failed", error=repr(exc))
+
     def _make_plan(self, goal: str, state: ProjectState) -> TaskGraph:
         """ONE planning path: the model produces the goal-specific plan when
         an llm is attached; the deterministic skeleton is the fallback."""
@@ -528,7 +829,15 @@ class AutonomousAgent:
                     goal, self.registry, self.llm,
                     feedback=feedback,
                     design=getattr(state, "design", {}) or None,
-                    locked=state.locked_decisions() or None)
+                    locked=state.locked_decisions() or None,
+                    memory={
+                        "known_bugs": state.open_bugs(),
+                        "observations": list(
+                            getattr(state, "observations", []) or []),
+                        "systems": dict(getattr(state, "systems", {}) or {}),
+                        "knowledge": dict(getattr(state, "knowledge", {}) or {}),
+                    },
+                    scope=self._scope)
                 if g is not None and g.all():
                     self.last_plan = plan
                     return g
@@ -664,7 +973,15 @@ class AutonomousAgent:
                     return
 
                 # B) retry with corrected args (missing-parameter repair)
-                corrected, note = _diagnose(err, task)
+                tv_now = (self.registry.by_name(task.tool)
+                          if task.tool else None)
+                schema_props = (set((tv_now.schema or {}).get(
+                    "properties", {}) or {})
+                    if tv_now and isinstance(getattr(tv_now, "schema",
+                                                     None), dict)
+                    else None)
+                corrected, note = _diagnose(err, task,
+                                            schema_props=schema_props)
                 decision = None
                 if corrected is None:
                     # B2) genuine LLM diagnosis (bounded once per task);
@@ -762,7 +1079,38 @@ class AutonomousAgent:
             self._emit("VERIFYING", "agent.verification_passed", task=task.id)
             task.result = result
             graph.mark_success(task.id, result)
-            state.record_success(task.name)
+            # Scope attribution: "<task>@<system>" lets the critic detect
+            # work that left the current objective's cage.
+            state.record_success(task.name + ("@" + task.system
+                                              if task.system else ""))
+            # Mandatory verification, honest half: a successful tool call
+            # is INTENT, not proof. The criteria this step was meant to
+            # prove are recorded as weak EVIDENCE; only a clean
+            # re-observation (here) or a reviewer verdict (roles.REVIEWER)
+            # upgrades them to PROVEN.
+            for crit in (task.criteria or []):
+                state.mark_evidence(task.system, crit,
+                                    note="step '%s' ran" % task.name)
+            # OBSERVE loop: when the tool IS a runtime observation
+            # (launch/screenshot/logs/state/performance), its result is
+            # EVIDENCE about the running game — capture it for the critic,
+            # the project memory and the UI. Untrusted data: it is judged,
+            # never obeyed.
+            try:
+                from agent.observations import extract_observation
+                obs = extract_observation(task.tool, result)
+                if obs is not None:
+                    obs["task"] = task.name
+                    obs["server"] = task.server
+                    state.record_observation(obs)
+                    self._emit("OBSERVING", "agent.observation",
+                               task=task.id, task_name=task.name,
+                               server=task.server, kind=obs["kind"],
+                               empty=obs["empty"],
+                               text=obs["text"][:600],
+                               payload=obs["payload"])
+            except Exception:  # noqa: BLE001
+                pass
             # Executor-level honesty: an autonomous run that REPLACED an
             # existing file says so loudly (the result carries it; the
             # audit log gets its own entry-shaped event).

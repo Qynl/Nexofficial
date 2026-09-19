@@ -169,6 +169,11 @@ class CapabilityRegistry:
                 # heuristic. This keeps the agent's view consistent with
                 # the LIVE MCP truth.
                 cap = capability_for_tool(t)
+                # Operator capability registry (severity-max): a local
+                # pin may escalate this view; it can never downgrade.
+                from mcp.capability import apply_capability_registry
+                cap = apply_capability_registry(cap, up.name,
+                                                t.get("name", ""))
                 tools.append(ToolView(
                     server=up.name,
                     name=t.get("name", ""),

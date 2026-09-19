@@ -95,12 +95,29 @@ class TunnelRegistry:
         statuses = self.list_upstreams()
         online = sum(1 for s in statuses if not s["last_error"]
                      or (s.get("tools_count", 0) > 0))
+        # TRUST state (CONNECTED != TRUSTED): in strict server mode only
+        # servers in the trusted registry may be called (mcp.policy). The
+        # UI shows this; the gateway enforces it.
+        strict = False
+        trusted: set = set()
+        try:
+            from mcp.policy import current_policy
+            pol = current_policy()
+            strict = bool(getattr(pol, "strict_servers", False))
+            trusted = set(getattr(pol, "trusted_servers", None) or set())
+        except Exception:  # noqa: BLE001
+            pass
+        for s in statuses:
+            s["trusted"] = (not strict) or (s.get("name") in trusted)
         return {
             "tunnels": statuses,
             "online": online,
             "total": len(statuses),
             "platforms": [s["label"] for s in statuses],
             "names":    [s["name"]  for s in statuses],
+            "strict": strict,
+            "trusted_total": len(trusted),
+            "trusted_online": sum(1 for s in statuses if s.get("trusted")),
         }
 
     # ----- aggregates -----------------------------------------------------
@@ -377,6 +394,14 @@ def reload_tunnels(extra: Optional[List[Dict[str, Any]]] = None,
         stdio MCP children (e.g. Roblox Studio's ``mcp.bat``).
     """
     global _TUNNELS
+    # SECURITY: stdio entries mean "spawn this process" — reject anything
+    # not on the operator allowlist (built-in catalog + NEX_STDIO_ALLOW).
+    # The HTTP API returns 400 before it gets here; this is the
+    # defense-in-depth net for every other caller.
+    problems = validate_extra_entries(list(extra or []))
+    if problems:
+        raise ValueError("unsafe tunnel entries rejected: "
+                         + "; ".join(problems))
     if replace or extra:
         cfg: List[Dict[str, Any]] = []
         if not replace:
@@ -387,6 +412,30 @@ def reload_tunnels(extra: Optional[List[Dict[str, Any]]] = None,
     else:
         cfg = (list(DEFAULT_TUNNELS) + _parse_extra_tunnels()
                + load_user_tunnels())
+    # Fail-closed on persisted/env rows too: an old (pre-allowlist)
+    # ~/.nex/tunnels.json could still carry a command no one vetted —
+    # drop it from the live registry and say so, instead of spawning it.
+    allow = stdio_allowlist()
+    kept: List[Dict[str, Any]] = []
+    for c in cfg:
+        if _is_stdio_entry(c) and str(c.get("command") or "") not in allow:
+            import sys as _sys
+            _sys.stderr.write(
+                "[nex] dropped non-allowlisted stdio tunnel %r\n"
+                % (c.get("name"),))
+            continue
+        if not _is_stdio_entry(c):
+            url = str(c.get("url") or "")
+            if url and not url.startswith("stdio://"):
+                ok, why = http_url_allowed(url)
+                if not ok:
+                    import sys as _sys
+                    _sys.stderr.write(
+                        "[nex] dropped non-allowlisted http tunnel %r: %s\n"
+                        % (c.get("name"), why))
+                    continue
+        kept.append(c)
+    cfg = kept
     upstreams = []
     for c in cfg:
         url = c.get("url") or _stdio_url_for(c)
@@ -421,7 +470,113 @@ def _stdio_url_for(c: Dict[str, Any]) -> str:
     return "stdio://" + c["name"]
 
 
+# ---------------------------------------------------------------------------
+# Stdio command allowlist.
+#
+# A stdio tunnel entry means "spawn this process and speak MCP to it" —
+# i.e. arbitrary process execution as the server user. The HTTP API must
+# never be able to spawn an arbitrary command (it was a remote code
+# execution: POST /api/tunnels + probe ran any command).
+#
+# What IS allowed:
+#   * commands that appear in DEFAULT_TUNNELS (the built-in editor
+#     entrypoints — Roblox Studio MCP, etc.), and
+#   * commands the operator explicitly allowlisted in NEX_STDIO_ALLOW
+#     (comma-separated exact `command` strings, set in the server's
+#     environment — not via the HTTP API).
+# Everything else is rejected BEFORE it is registered or persisted.
+# ---------------------------------------------------------------------------
+
+def stdio_allowlist() -> List[str]:
+    raw = os.environ.get("NEX_STDIO_ALLOW", "")
+    allowed = [a.strip() for a in raw.split(",") if a.strip()]
+    for c in DEFAULT_TUNNELS:
+        if c.get("command"):
+            allowed.append(c["command"])
+    return allowed
+
+
+def validate_extra_entries(entries: List[Any]) -> List[str]:
+    """Return a list of human-readable rejection reasons for unsafe
+    entries (empty list = all safe). Stdio entries must be on the
+    command allowlist; HTTP url entries must point at loopback or an
+    operator-allowlisted host (SSRF boundary)."""
+    problems: List[str] = []
+    allow = stdio_allowlist()
+    for i, e in enumerate(entries or []):
+        if not isinstance(e, dict):
+            problems.append("entry %d: must be an object" % i)
+            continue
+        if not e.get("name"):
+            problems.append("entry %d: missing 'name'" % i)
+            continue
+        if _is_stdio_entry(e):
+            cmd = str(e.get("command") or "")
+            if cmd not in allow:
+                problems.append(
+                    "entry %d ('%s'): stdio command %r is not allowed — "
+                    "stdio MCP children must be a built-in editor "
+                    "entrypoint or listed in NEX_STDIO_ALLOW (operator "
+                    "environment; the HTTP API cannot extend the list)"
+                    % (i, e.get("name"), cmd))
+        else:
+            url = str(e.get("url") or "")
+            if url and not url.startswith("stdio://"):
+                ok, why = http_url_allowed(url)
+                if not ok:
+                    problems.append("entry %d ('%s'): %s"
+                                    % (i, e.get("name"), why))
+    return problems
+
+
 def reset_tunnels_for_testing() -> None:
     """Drop the cached registry. Only used by the test harness."""
     global _TUNNELS
     _TUNNELS = None
+
+
+# ---------------------------------------------------------------------------
+# HTTP MCP endpoint trust boundary (SSRF defense).
+#
+# An http tunnel tells the server "connect to this URL and speak MCP
+# there". An unrestricted URL is a classic SSRF primitive: internal
+# services, cloud metadata endpoints, other LAN machines — reachable
+# with the server's privileges. The LLM can never choose a URL (only
+# the operator configures tunnels), but even an operator mistake — or
+# a poisoned tunnels.json — must fail closed.
+#
+# What IS allowed:
+#   * loopback endpoints (127.0.0.1 / localhost / ::1, any port) — the
+#     engine's local MCP servers, and
+#   * hosts the operator explicitly allowlisted in NEX_HTTP_ALLOW
+#     (comma-separated hostnames, e.g. "gamebox.lan,10.0.0.5").
+# Everything else is rejected BEFORE registration / dropped on reload.
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def http_allowlist() -> List[str]:
+    raw = os.environ.get("NEX_HTTP_ALLOW", "")
+    return [a.strip().lower() for a in raw.split(",") if a.strip()]
+
+
+def http_url_allowed(url: str) -> tuple:
+    """(allowed, reason) for an http(s) MCP endpoint URL."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False, "not an http(s) URL"
+        host = (p.hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        return False, "unparseable URL"
+    if not host:
+        return False, "URL has no host"
+    if host in _LOOPBACK_HOSTS or host in http_allowlist():
+        return True, ""
+    return False, (
+        "http MCP endpoint %r is not allowed — only loopback "
+        "(127.0.0.1/localhost) or hosts listed in NEX_HTTP_ALLOW "
+        "(operator environment; the HTTP API cannot extend the list)"
+        % url)

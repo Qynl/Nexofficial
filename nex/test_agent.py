@@ -235,4 +235,56 @@ assert any(m["task"] == "animation" for m in report2.missing), \
     "missing list names the failed animation stage: %s" % report2.missing
 
 
+# ---------------------------------------------------------------------------
+# 10. Honest block: a run with NO executable tasks is BLOCKED with a
+#     concrete reason — never an empty PARTIAL that reads as "we did some
+#     of it" (regression: fresh installs with no engine connected used to
+#     return status=PARTIAL, completed=[], failed=[], missing=[]).
+# ---------------------------------------------------------------------------
+from agent.events import STATUS_BLOCKED  # noqa: E402
+
+reg_none = agent_loop.CapabilityRegistry([])
+rep_none = agent_loop.AutonomousAgent(reg_none, persist=False).run(
+    "make a game", graph=task_graph.TaskGraph())
+_expect(rep_none.status == STATUS_BLOCKED,
+        "empty registry -> status BLOCKED (was: empty PARTIAL): %s"
+        % rep_none.status)
+_expect(bool(rep_none.reasons) and "connect" in
+        " ".join(rep_none.reasons).lower(),
+        "blocked reason tells the user to connect an MCP server: %s"
+        % rep_none.reasons)
+_expect(bool(rep_none.missing),
+        "blocked run fills the missing-capability list (transparency)")
+
+
+# Also BLOCKED when the registry has servers but the plan validated down
+# to zero tasks (e.g. a goal that matches no live tool).
+reg_matchless = agent_loop.CapabilityRegistry(
+    [mock_mcp.server_view("qa3", mock_mcp.MockMCPServer(
+        "qa3", [{"name": "unrelated_tool", "description": "x",
+                 "inputSchema": {}}]))])
+rep_matchless = agent_loop.AutonomousAgent(reg_matchless,
+                                           persist=False).run(
+    "make a game", graph=task_graph.TaskGraph())
+_expect(rep_matchless.status == STATUS_BLOCKED,
+        "servers but no executable tasks -> BLOCKED: %s"
+        % rep_matchless.status)
+_expect("no executable tasks" in " ".join(rep_matchless.reasons),
+        "reason distinguishes 'nothing connected' from 'plan matched "
+        "nothing'")
+
+
+# ---------------------------------------------------------------------------
+# 11. Robustness: a dangling dependency id (corrupt checkpoint) counts as
+#     unmet instead of raising KeyError and crashing the execution loop.
+# ---------------------------------------------------------------------------
+g_dangle = task_graph.TaskGraph()
+t = task_graph.Task(id="x", name="x", stage="s", deps=["ghost_dep"])
+g_dangle.add(t)
+_expect(g_dangle.deps_met(t) is False,
+        "dangling dep id -> deps_met False (was: KeyError)")
+_expect(g_dangle.ready() == [],
+        "dangling dep id -> task not ready (no crash)")
+
+
 print("\nAll agent tests passed.")

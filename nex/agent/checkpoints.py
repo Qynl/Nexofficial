@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent.project_state import ProjectState
 from agent.task_graph import TaskGraph
@@ -142,3 +142,100 @@ def reconcile_on_resume(path: str, registry,
         bus({"type": "agent.checkpoint_resumed", "goal": goal,
              "report": report})
     return goal, state, graph, report
+
+
+# ---------------------------------------------------------------------------
+# Workspace snapshots (file-level checkpoints — the audit's
+# "checkpoint before a big change, rollback after a failed experiment").
+#
+# A state checkpoint (above) remembers the PLAN. A workspace snapshot
+# remembers the actual FILES the agent has written so far. Together they
+# let the agent experiment aggressively: snapshot -> try -> if it makes
+# things worse, restore the files and keep the plan.
+#
+# Implemented with tar (stdlib) so it works with no external deps and is
+# atomic enough for the agent's use (we never edit a snapshot after
+# writing it). Snapshots live under <root>/.nex_snapshots/.
+# ---------------------------------------------------------------------------
+
+import tarfile
+import time
+
+
+def _snapshot_dir(root: str) -> str:
+    return os.path.join(root, ".nex_snapshots")
+
+
+def snapshot_workspace(root: str, label: str = "") -> Optional[str]:
+    """Snapshot the files under ``root`` (excluding the snapshot dir and
+    VCS/dep noise). Returns the snapshot path, or None on failure.
+
+    This is what the agent calls before a risky change so it can roll the
+    files back if the change makes verification/observation worse.
+    """
+    root = os.path.abspath(root)
+    if not os.path.isdir(root):
+        return None
+    snap_dir = _snapshot_dir(root)
+    try:
+        os.makedirs(snap_dir, exist_ok=True)
+        slug = (label or "snap").replace(os.sep, "_")
+        safe = "".join(c for c in slug if c.isalnum() or c in "-_")[:40] or "snap"
+        path = os.path.join(snap_dir, "%d_%s.tar" % (int(time.time() * 1000), safe))
+        # tar members are named "<root-basename>/..."; skip the snapshot
+        # dir itself, VCS metadata, and dependency bulk that never needs
+        # rolling back (any path component in `skip` excludes the member).
+        skip = {".nex_snapshots", ".git", ".hg", ".svn", "node_modules",
+                ".venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
+
+        def _filter(member: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+            if any(part in skip for part in member.name.split("/")):
+                return None
+            return member
+
+        # arcname="." -> members are "./file" so that extractall(root)
+        # (see restore_workspace) lands files exactly where they came
+        # from — no double-nested root directory.
+        with tarfile.open(path, "w") as tf:
+            tf.add(root, arcname=".", filter=_filter, recursive=True)
+        return path
+    except (OSError, tarfile.TarError):
+        return None
+
+
+def restore_workspace(root: str, snapshot_path: str) -> bool:
+    """Restore the files under ``root`` from a snapshot made by
+    ``snapshot_workspace``. Best-effort: overwrites matching files, leaves
+    others alone. Returns True on success."""
+    root = os.path.abspath(root)
+    try:
+        with tarfile.open(snapshot_path, "r") as tf:
+            tf.extractall(root)  # noqa: S202 — snapshot is our own file
+        return True
+    except (OSError, tarfile.TarError):
+        return False
+
+
+def list_snapshots(root: str) -> List[str]:
+    """Newest-first list of snapshot paths under ``root``."""
+    snap_dir = _snapshot_dir(os.path.abspath(root))
+    if not os.path.isdir(snap_dir):
+        return []
+    out = []
+    for name in os.listdir(snap_dir):
+        if name.endswith(".tar"):
+            out.append(os.path.join(snap_dir, name))
+    return sorted(out, reverse=True)
+
+
+def prune_snapshots(root: str, keep: int = 5) -> int:
+    """Keep only the newest ``keep`` snapshots. Returns # removed."""
+    snaps = list_snapshots(root)
+    removed = 0
+    for path in snaps[keep:]:
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed

@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 import socket
+import tempfile
 import subprocess
 import sys
 import time
@@ -140,6 +141,7 @@ for _attempt in range(5):
     env["NEX_HOST"] = "127.0.0.1"
     env["NEX_PORT"] = str(port)
     env["NEX_OBSERVER_DISABLED"] = "1"
+    env["NEX_AUTH_TOKEN"] = "engines-test-token"
     env["PYTHONPATH"] = HERE
     proc = subprocess.Popen([PYTHON, os.path.join(HERE, "server.py")],
                             env=env, cwd=HERE,
@@ -148,8 +150,10 @@ for _attempt in range(5):
     ready = False
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(
-                    "http://127.0.0.1:%d/api/health" % port, timeout=1) as r:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/health" % port)
+            req.add_header("X-Nex-Auth", "engines-test-token")
+            with urllib.request.urlopen(req, timeout=1) as r:
                 if r.status == 200:
                     ready = True
                     break
@@ -169,7 +173,8 @@ port = int(BASE.rsplit(":", 1)[1])
 def _mcp(payload, timeout=8):
     data = json.dumps(payload).encode()
     req = urllib.request.Request(BASE + "/mcp", data=data, method="POST",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "X-Nex-Auth": "engines-test-token"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())

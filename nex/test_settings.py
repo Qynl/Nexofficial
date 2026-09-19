@@ -90,10 +90,16 @@ def _expect(cond, msg):
         sys.exit(1)
 
 
+# Auth: the server now ALWAYS requires a token. We set one for the
+# boot and attach it to every request.
+TEST_TOKEN = "settings-test-token"
+
+
 def _http(method, path, body=None, base="http://127.0.0.1:8787"):
     import urllib.request
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method)
+    req.add_header("X-Nex-Auth", TEST_TOKEN)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
@@ -133,6 +139,7 @@ env["NEX_PORT"] = str(test_port)
 # Disable the observer + tools shell + cut ollama attempts.
 env["NEX_OBSERVER_DISABLED"] = "1"
 env["NEX_TUNNELS"] = f"fake-settings=http://127.0.0.1:{port}/mcp"
+env["NEX_AUTH_TOKEN"] = TEST_TOKEN
 # Make sure we DON'T have an Ollama server (we mock /api/chat).
 proc = subprocess.Popen(
     [PYTHON, os.path.join(HERE, "server.py")],

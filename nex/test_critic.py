@@ -436,6 +436,12 @@ STATES_B = {"critiques": 0}
 
 def llm_design_critique_only(messages):
     prompt = messages[-1]["content"]
+    if "PROVEN RECIPES" in prompt or "ROLE:" in prompt:
+        # The GAME DIRECTOR ("PROVEN RECIPES") and the specialized ROLES
+        # (reviewer/tester/debugger) are not planners. They never produce a
+        # task plan, so they must not count as a plan call. Decline with a
+        # valid empty answer so each role keeps its deterministic fallback.
+        return "{}"
     if "quality critic" in prompt.lower():
         STATES_B["critiques"] += 1
         STATES_B["critique_seen"] = True
@@ -503,6 +509,17 @@ with tempfile.TemporaryDirectory() as td:
                                   registry=registry)
     _expect(plan_calls["pre_critique"] == 0,
             "START BUILD executes Plan A — no planning before the critic")
+    # ...while the Director still ran: an approved plan is executed as
+    # approved, but it is now attributed to a system with criteria, which
+    # is what the reviewer and the completion gate verify against.
+    directed_b = [e for e in events_b if e.get("type") == "agent.directed"]
+    _expect(len(directed_b) == 1,
+            "START BUILD is directed into ONE system (%d directed events)"
+            % len(directed_b))
+    _expect(bool(st_a.current_system) and bool(st_a.criteria_for(
+        st_a.current_system)),
+        "the executed plan carries a system with success criteria (%s)"
+        % st_a.current_system)
     executed = agent_b_runs["report"]["completed"]
     _expect(executed[:len(PLAN_JSON["steps"])]
             == [s["name"] for s in PLAN_JSON["steps"]],
@@ -514,6 +531,11 @@ with tempfile.TemporaryDirectory() as td:
     _expect(STATES_B["critiques"] >= 2
             and agent_b_runs["report"]["status"] == "COMPLETED",
             "critic ran; WEAK -> improve -> re-critique PASS (bounded)")
+    # COMPLETED is only allowed if the scoped criteria were actually
+    # proven — the verification gate must not have been bypassed.
+    _expect(not agent_b_runs["report"].get("unverified"),
+            "COMPLETED carries no unverified criteria: %s"
+            % (agent_b_runs["report"].get("unverified") or [])[:2])
     # Plan B persisted deliberately after the improve round.
     approved2 = load_approved(pid)
     if not (approved2 and (approved2.get("plan") or {}).get("title")
@@ -540,5 +562,176 @@ report4 = agent4.run("make a small thing")
 _expect(agent4.last_critique is None,
         "bare skeleton run: no critique cycle (nothing to critique against)")
 
+
+# ---------------------------------------------------------------------------
+# 9. OBSERVE-loop detector — runtime evidence (untrusted engine output)
+# ---------------------------------------------------------------------------
+
+def _obs(kind, tool, text, empty=False):
+    return {"kind": kind, "tool": tool, "text": text, "empty": empty,
+            "ts": time.time()}
+
+# Defects are caught.
+f = critic.find_observations([
+    _obs("screenshot", "engine.screenshot",
+         '{"note": "player floating 30cm above the ground"}'),
+    _obs("logs", "engine.inspect_logs",
+         '{"logs": ["Exception: NullReferenceException in PlayerController"]},')
+])
+fk = {x["kind"] for x in f}
+_expect("physics_defect" in fk, "obs: floating player -> physics_defect")
+_expect("crash" in fk, "obs: crash log -> crash finding")
+_expect(all(x["severity"] == "major" for x in f),
+        "obs: runtime defects are major (drive repair)")
+
+# A crash in METRICS counts too; clean evidence produces nothing.
+f = critic.find_observations([
+    _obs("metrics", "engine.performance",
+         '{"fps": 3, "error": "fatal error: out of memory"}'),
+    _obs("screenshot", "engine.screenshot",
+         '{"note": "player grounded and centered"}'),
+    _obs("logs", "engine.inspect_logs", '{"logs": ["boot ok", "no errors"]}'),
+])
+fk = {x["kind"] for x in f}
+_expect("crash" in fk, "obs: fatal error in metrics -> crash")
+_expect("physics_defect" not in fk, "obs: clean re-observation is NOT a defect")
+
+# Empty captures + empty scenes.
+f = critic.find_observations([
+    _obs("screenshot", "engine.screenshot", "", empty=True),
+    _obs("state", "engine.inspect_runtime", '{"actors_count": 0, "note": "empty scene"}'),
+])
+fk = {x["kind"] for x in f}
+_expect("empty_capture" in fk and "empty_scene" in fk,
+        "obs: empty capture + empty scene detected")
+
+# The LATEST observation per tool wins: a repaired defect that was
+# re-observed clean must not re-trigger (full critique() semantics).
+st = project_state.ProjectState(goal="g")
+st.design = {"concept": "x", "quality_gates": []}
+st.record_observation(_obs("screenshot", "engine.screenshot",
+                           '{"note": "player floating above ground"}'))
+c1 = critic.critique("g", st, report4, llm=None, cycle=1)
+_expect(any(x["kind"] == "physics_defect" for x in c1.findings),
+        "obs: stale defect observed -> finding")
+st.record_observation(_obs("screenshot", "engine.screenshot",
+                           '{"note": "player grounded and centered"}'))
+c2 = critic.critique("g", st, report4, llm=None, cycle=2)
+_expect(not any(x.get("source") == "observation" for x in c2.findings),
+        "obs: clean RE-observation clears the defect (latest wins)")
+
+# Bug memory: defect recorded open, then marked fixed by the clean
+# re-observation.
+st2 = project_state.ProjectState(goal="g")
+st2.design = {"concept": "x", "quality_gates": []}
+st2.record_observation(_obs("screenshot", "engine.screenshot",
+                            '{"note": "player floating above ground"}'))
+critic.critique("g", st2, report4, llm=None, cycle=1)
+_expect(st2.open_bugs() and st2.open_bugs()[0]["status"] == "open",
+        "obs: defect recorded as open bug in project memory")
+st2.record_observation(_obs("screenshot", "engine.screenshot",
+                            '{"note": "player grounded and centered"}'))
+critic.critique("g", st2, report4, llm=None, cycle=2)
+_expect(not st2.open_bugs(),
+        "obs: re-observation marks the bug fixed (memory hygiene)")
+
+
+# ---------------------------------------------------------------------------
+# 10. LLM observation judge — the second pair of eyes on runtime evidence
+# ---------------------------------------------------------------------------
+
+class _JudgeLLM:
+    """Prompt-aware fake: answers the observation-judge prompt with a
+    fixed JSON payload; anything else -> '{}'."""
+
+    def __init__(self, findings, verdict="WEAK"):
+        self.findings = findings
+        self.verdict = verdict
+        self.seen_prompts = []
+
+    def __call__(self, messages):
+        blob = json.dumps(messages)
+        self.seen_prompts.append(blob)
+        if "runtime observation judge" in blob:
+            return json.dumps({"findings": self.findings,
+                               "verdict": self.verdict})
+        return "{}"
+
+
+# A defect the RULES cannot name ("the level has no exit") is caught by
+# the judge and drives a repair.
+stj = project_state.ProjectState(goal="g")
+stj.design = {"concept": "x", "quality_gates": []}
+stj.record_observation(_obs("screenshot", "engine.screenshot",
+                            '{"note": "a corridor with no exit anywhere"}'))
+jllm = _JudgeLLM([{"kind": "playability", "severity": "major",
+                   "message": "the level has no exit; the player cannot "
+                              "finish"}])
+cj = critic.critique("g", stj, report4, llm=jllm, cycle=1)
+pj = [f for f in cj.findings if f.get("severity") == "major"]
+_expect(any("no exit" in f.get("message", "") for f in pj),
+        "judge: an unnameable defect from the evidence drives a finding")
+_expect(cj.action == "REPLAN",
+        "judge: a major judged defect -> REPLAN (got %s)" % cj.action)
+_expect(any("live tool catalog" not in p.lower() for p in jllm.seen_prompts)
+        and any("RUNTIME EVIDENCE" in p for p in jllm.seen_prompts),
+        "judge: the evidence is framed as untrusted data in the prompt")
+_expect(stj.open_bugs(), "judge: the judged defect enters project memory")
+
+# Failure-safety: a model that explodes / returns garbage adds nothing
+# and never breaks the critique (rules still stand).
+def _boom(messages):
+    if "runtime observation judge" in json.dumps(messages):
+        raise RuntimeError("judge exploded")
+    return "{}"
+
+
+stj2 = project_state.ProjectState(goal="g")
+stj2.design = {"concept": "x", "quality_gates": []}
+stj2.record_observation(_obs("logs", "engine.inspect_logs",
+                             '{"logs": ["NullReferenceException"]}'))
+cj2 = critic.critique("g", stj2, report4, llm=_boom, cycle=1)
+_expect(any(f.get("kind") == "crash" for f in cj2.findings),
+        "judge: a broken judge keeps the deterministic findings intact")
+
+# Garbage output is ignored (no fabricated defects).
+stj3 = project_state.ProjectState(goal="g")
+stj3.design = {"concept": "x", "quality_gates": []}
+stj3.record_observation(_obs("screenshot", "engine.screenshot",
+                             '{"note": "clean"}'))
+cj3 = critic.critique("g", stj3, report4,
+                      llm=_JudgeLLM([{"message": "x"}], ), cycle=1)
+# (kind missing -> canonicalized to playability; the finding is still
+# traceable and bounded, never free-form)
+kinds3 = [f.get("kind") for f in cj3.findings]
+_expect(all(k in critic._JUDGE_KINDS or k in critic._SEVERITY
+            for k in kinds3),
+        "judge: findings carry canonical kinds only: %s" % kinds3)
+
+# No duplicate: a defect the rules already flagged is not double-counted.
+stj4 = project_state.ProjectState(goal="g")
+stj4.design = {"concept": "x", "quality_gates": []}
+stj4.record_observation(_obs("logs", "engine.inspect_logs",
+                             '{"logs": ["NullReferenceException"]}'))
+cj4 = critic.critique("g", stj4, report4,
+                      llm=_JudgeLLM([{"kind": "crash", "severity": "major",
+                                      "message": "a crash in the logs"}],
+                                    verdict="WEAK"), cycle=1)
+crashes = [f for f in cj4.findings if f.get("kind") == "crash"]
+_expect(len(crashes) == 1,
+        "judge: a rule-flagged defect is not double-counted (%d)"
+        % len(crashes))
+
+# Clean evidence + a quiet judge = no observation findings at all.
+stj5 = project_state.ProjectState(goal="g")
+stj5.design = {"concept": "x", "quality_gates": []}
+stj5.record_observation(_obs("screenshot", "engine.screenshot",
+                             '{"note": "player grounded, level exit visible"}'))
+cj5 = critic.critique("g", stj5, report4,
+                      llm=_JudgeLLM([], verdict="PASS"), cycle=1)
+_expect(not [f for f in cj5.findings if f.get("source") == "observation"],
+        "judge: clean evidence + quiet judge -> no defect findings")
+_expect(stj5.open_bugs() == [],
+        "judge: a healthy re-observation leaves no open bug")
 
 print("\nAll critic + improve-loop tests passed.")

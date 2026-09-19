@@ -6,6 +6,24 @@ Nex might want to comment on. It exists so Nex is not just a reaction
 machine — it can speak up when something happens (a build finishes,
 a test passes, a file appears, the user has been idle long enough).
 
+LAYER SEPARATION (hard architectural contract, enforced by
+test_escape.py section A7):
+
+  * The observer is ASSISTANT-LAYER ONLY. Its single side channel is
+    publishing `speak.*` events to the server's EventBus. It has NO
+    import of — and no access to — the MCP registry, the tunnel
+    transports, tools.py, subprocess, or the agent loop. It cannot
+    place an actor, run a command, open a network connection, or
+    touch the workspace.
+  * The ACTION RIGHT stays exactly where the security architecture
+    puts it: the MCP gateway (authorize() → Upstream.call), reachable
+    only through an LLM plan that was authorized step by step.
+  * Consequently the model can "comment on" anything but can never
+    cause external change through the assistant layer, no matter how
+    it misbehaves. test_security.py proves this structurally
+    (import scan) and behaviorally (the observer's only emits are
+    speak events).
+
 Sources of triggers:
 
   1. The Nex activity log (`.nex_log.jsonl`). Each new entry is

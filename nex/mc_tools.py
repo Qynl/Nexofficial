@@ -47,9 +47,13 @@ import tomllib
 from typing import Any, Dict, List, Optional
 
 
+# NOTE: same default root as tools.py / observer.py (~/nex_workspace) —
+# an earlier version used ~/NexWorkspace here, so a file written by
+# `write_file` (tools.py root) would be "not found" when this module
+# compiled/diffed it.
 WORKSPACE_ROOT = os.environ.get(
     "NEX_TOOLS_ROOT",
-    os.path.join(os.path.expanduser("~"), "NexWorkspace"))
+    os.path.join(os.path.expanduser("~"), "nex_workspace"))
 
 
 # ---------------------------------------------------------------------------

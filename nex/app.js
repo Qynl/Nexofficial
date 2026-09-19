@@ -14,26 +14,77 @@
  *   - window.NexAnim  (behavior engine)
  */
 (function () {
-  // Auth bootstrap: when the server runs with NEX_AUTH_TOKEN, every
-  // /api + /mcp request must carry it. The token is injected into the
-  // served HTML (window.NEX_AUTH); this wrapper attaches it everywhere.
+  // Auth: the server runs with an always-on token. Browsers carry it in
+  // an HttpOnly `nex_auth` cookie — same-origin fetch/EventSource send it
+  // automatically, so NO token ever appears in this script or in query
+  // strings. Two ways to get the cookie:
+  //   1. open the banner link /?nex_token=<t> once (server-side swap), or
+  //   2. type the token into the login card (an XSS-readable global like
+  //      the old window.NEX_AUTH is exactly what this avoids).
   (function () {
-    const TOKEN = window.NEX_AUTH || '';
-    if (!TOKEN) return;
+    // A 401 anywhere means "no/invalid cookie": show the login card.
+    // Never intercept the login call itself.
     const orig = window.fetch.bind(window);
     window.fetch = (input, init) => {
-      try {
-        const url = typeof input === 'string' ? input : (input && input.url) || '';
-        if (url.startsWith('/api') || url.startsWith('/mcp')) {
-          init = init || {};
-          init.headers = Object.assign({}, init.headers || {},
-            { 'X-Nex-Auth': TOKEN });
-          return orig(input, init);
+      const url = typeof input === 'string' ? input
+        : (input && input.url) || '';
+      return orig(input, init).then((r) => {
+        if (r && r.status === 401 && url.indexOf('/api/auth/') !== 0) {
+          showLoginCard();
         }
-      } catch (e) { /* fall through */ }
-      return orig(input, init);
+        return r;
+      });
     };
+    window.__nexShowLogin = showLoginCard;
   })();
+
+  function showLoginCard() {
+    if (document.getElementById('login-card')) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'login-card';
+    const h = document.createElement('div');
+    h.className = 'login-title';
+    h.textContent = 'Nex — authentication';
+    const p = document.createElement('div');
+    p.className = 'login-hint';
+    p.textContent = 'Paste the server token (printed at boot / in '
+      + '~/.nex/server_token). It is exchanged for an HttpOnly cookie and '
+      + 'never stored in this page.';
+    const inp = document.createElement('input');
+    inp.type = 'password';
+    inp.placeholder = 'server token';
+    inp.autocomplete = 'off';
+    const btn = document.createElement('button');
+    btn.textContent = 'connect';
+    const err = document.createElement('div');
+    err.className = 'login-err';
+    const submit = () => {
+      const tok = (inp.value || '').trim();
+      if (!tok) return;
+      btn.disabled = true;
+      orig.call(window, '/api/auth/session', {   // bypass the 401 wrapper
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tok }),
+      }).then((r) => (r.ok ? (window.location.reload(), null)
+        : (err.textContent = 'token rejected', btn.disabled = false)))
+        .catch(() => {
+          err.textContent = 'server unreachable';
+          btn.disabled = false;
+        });
+    };
+    btn.addEventListener('click', submit);
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+    });
+    wrap.appendChild(h);
+    wrap.appendChild(p);
+    wrap.appendChild(inp);
+    wrap.appendChild(btn);
+    wrap.appendChild(err);
+    document.body.appendChild(wrap);
+    inp.focus();
+  }
 
   'use strict';
 
@@ -538,11 +589,11 @@
       body: JSON.stringify({ goal: goal, mode: mode }),
     }).then(r => r.json()).then(j => {
       if (!j || !j.ok) {
-        agentPanel().innerHTML += '<div class="agent-status err">'
-          + (j && j.error ? j.error : 'failed to start') + '</div>';
+        appendAgentError(agentPanel(),
+          (j && j.error) ? j.error : 'failed to start');
       }
     }).catch(e => {
-      agentPanel().innerHTML += '<div class="agent-status err">network error</div>';
+      appendAgentError(agentPanel(), 'network error');
     });
   }
 
@@ -560,11 +611,11 @@
       body: JSON.stringify({ goal: goal }),
     }).then(r => r.json()).then(j => {
       if (!j || !j.ok) {
-        p.innerHTML += '<div class="agent-status err">'
-          + (j && j.error ? j.error : 'failed to start campaign') + '</div>';
+        appendAgentError(p,
+          (j && j.error) ? j.error : 'failed to start campaign');
       }
     }).catch(() => {
-      p.innerHTML += '<div class="agent-status err">network error</div>';
+      appendAgentError(p, 'network error');
     });
   }
 
@@ -687,9 +738,61 @@
         document.body.appendChild(pill);
       }
       const online = d.online || 0, total = d.total || 0;
+      const trust = d.strict ? ' · strict ' + (d.trusted_online || 0) + '/'
+        + (d.trusted_total || 0) : '';
       pill.innerHTML = '<span class="pill-dot ' + (online > 0 ? 'on' : 'off')
-        + '"></span>MCP ' + online + '/' + total;
+        + '"></span>MCP ' + online + '/' + total + trust;
+      pill.title = d.strict
+        ? 'MCP servers. STRICT MODE: only servers in the trusted registry '
+          + 'can be called — connecting is not trusting.'
+        : 'MCP servers — click to manage';
+      renderMcpStrip(d);
     }).catch(() => {});
+  }
+
+  // ---- MCP status strip (command center) ---------------------------------
+  // One row per connected server: trust state + tool count + error. The
+  // server (not the UI) decides trust; this only displays it. Untrusted
+  // servers are listed but marked — they are connected, not callable.
+  function renderMcpStrip(d) {
+    const p = ensureAgentPanel();
+    let strip = p.querySelector('.mcp-strip');
+    if (!strip) {
+      strip = document.createElement('div');
+      strip.className = 'mcp-strip';
+      p.insertBefore(strip, p.firstChild);
+    }
+    strip.textContent = '';
+    const head = document.createElement('span');
+    head.className = 'mcp-head';
+    head.textContent = d && d.strict ? 'MCP · strict' : 'MCP';
+    strip.appendChild(head);
+    const list = (d && d.tunnels) || [];
+    if (!list.length) {
+      const none = document.createElement('span');
+      none.className = 'mcp-name';
+      none.textContent = 'no servers connected';
+      strip.appendChild(none);
+      return;
+    }
+    list.slice(0, 8).forEach((t) => {
+      const cell = document.createElement('span');
+      const ok = !(t.last_error) || (t.tools_count || 0) > 0;
+      cell.className = 'mcp-srv ' + (t.trusted === false ? 'untrusted'
+        : (ok ? 'ok' : 'err'));
+      const dot = document.createElement('span');
+      dot.className = 'mcp-dot';
+      const nm = document.createElement('span');
+      nm.textContent = t.name + (t.tools_count ? ' (' + t.tools_count + ')'
+        : '');
+      cell.appendChild(dot);
+      cell.appendChild(nm);
+      cell.title = (t.trusted === false
+        ? t.name + ': connected but NOT in the trusted registry — tool '
+          + 'calls are refused (strict mode)'
+        : t.name + ': trusted' + (t.last_error ? ' — ' + t.last_error : ''));
+      strip.appendChild(cell);
+    });
   }
   function startConnPill() {
     refreshConnPill();
@@ -846,6 +949,161 @@
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  // Server/MCP error text is UNTRUSTED data — append it as text only,
+  // never concatenated into innerHTML (a hostile or buggy backend
+  // response containing <img onerror=...> would otherwise execute).
+  function appendAgentError(container, msg) {
+    const d = document.createElement('div');
+    d.className = 'agent-status err';
+    d.textContent = msg;
+    container.appendChild(d);
+  }
+
+  // ---- runtime status strip (Build / Verify / Runtime) -------------------
+  // The command-center's heartbeat: which phase of the loop is where.
+  const runtimeKeys = ['build', 'verify', 'runtime'];
+  const runtimeState = {};
+  function ensureRuntimeStrip() {
+    const p = ensureAgentPanel();
+    let strip = p.querySelector('.runtime-strip');
+    if (!strip) {
+      strip = document.createElement('div');
+      strip.className = 'runtime-strip';
+      runtimeKeys.forEach((k) => {
+        const chip = document.createElement('span');
+        chip.className = 'runtime-chip pending';
+        chip.dataset.key = k;
+        const dot = document.createElement('span');
+        dot.className = 'runtime-dot';
+        const lbl = document.createElement('span');
+        lbl.textContent = k;
+        chip.appendChild(dot);
+        chip.appendChild(lbl);
+        strip.appendChild(chip);
+      });
+      p.insertBefore(strip, p.firstChild);
+    }
+    return strip;
+  }
+  function setRuntimeState(key, state) {  // pending | ok | fail | warn
+    runtimeState[key] = state;
+    const strip = ensureRuntimeStrip();
+    const chip = strip.querySelector('.runtime-chip[data-key="' + key + '"]');
+    if (!chip) return;
+    chip.className = 'runtime-chip ' + state;
+  }
+  function resetRuntimeStrip() {
+    runtimeKeys.forEach((k) => setRuntimeState(k, 'pending'));
+  }
+
+  // ---- system map (Game Director: what the game consists of) -------------
+  // The small model's orientation, made visible: which systems exist, how
+  // far each got, and which one is the current objective. Status comes
+  // from the project state — the UI never guesses.
+  const SYS_LABEL = {
+    planned: 'planned', in_progress: 'building',
+    complete: 'verified', broken: 'broken',
+  };
+  function renderSystemMap(systems, current) {
+    if (!systems || !systems.length) return;
+    const p = ensureAgentPanel();
+    let map = p.querySelector('.sys-map');
+    if (!map) {
+      map = document.createElement('div');
+      map.className = 'sys-map';
+      p.insertBefore(map, p.firstChild);
+    }
+    map.textContent = '';
+    const head = document.createElement('span');
+    head.className = 'mcp-head';
+    head.textContent = 'GAME SYSTEMS';
+    map.appendChild(head);
+    systems.forEach((s) => {
+      const cell = document.createElement('span');
+      cell.className = 'sys-chip ' + (s.status || 'planned')
+        + (current && s.id === current ? ' current' : '');
+      const lbl = document.createElement('span');
+      lbl.textContent = (s.title || s.id)
+        + (s.criteria ? ' · ' + s.criteria : '');
+      cell.appendChild(lbl);
+      cell.title = (s.title || s.id) + ' — ' + (SYS_LABEL[s.status]
+        || s.status || 'planned') + (s.layer ? ' (' + s.layer + ')' : '')
+        + (current && s.id === current ? ' — CURRENT OBJECTIVE' : '');
+      map.appendChild(cell);
+    });
+  }
+  // The scope envelope of the current objective: objective, success
+  // criteria, DO-NOT list. This is the cage the planner works inside.
+  function renderScope(evt) {
+    const p = ensureAgentPanel();
+    let box = p.querySelector('.scope-box');
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'scope-box';
+      p.insertBefore(box, p.firstChild);
+    }
+    box.textContent = '';
+    const title = document.createElement('div');
+    title.className = 'scope-title';
+    title.textContent = 'Objective — ' + (evt.current || '?');
+    const obj = document.createElement('div');
+    obj.className = 'scope-obj';
+    obj.textContent = evt.objective || '';
+    box.appendChild(title);
+    box.appendChild(obj);
+    if ((evt.success || []).length) {
+      const ul = document.createElement('ul');
+      ul.className = 'scope-crit';
+      evt.success.forEach((c) => {
+        const li = document.createElement('li');
+        li.textContent = c;
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+  }
+  function markCriterion(system, criterion, stateName) {
+    const p = ensureAgentPanel();
+    const box = p.querySelector('.scope-box');
+    if (!box) return;
+    box.querySelectorAll('.scope-crit li').forEach((li) => {
+      if (li.textContent === criterion) {
+        li.className = stateName;
+      }
+    });
+  }
+
+  // ---- observation pane (OBSERVE loop evidence) --------------------------
+  // Engine output (logs/screenshot/state) is UNTRUSTED DATA — render as
+  // text only. The observation row is the "screenshot pane" of the
+  // command center: what Nex actually SAW in the running game.
+  const OBS_ICONS = { screenshot: '📷', logs: '📜', metrics: '📊', state: '🧩' };
+  function renderObservation(evt) {
+    const p = ensureAgentPanel();
+    const row = document.createElement('details');
+    row.className = 'agent-obs ' + (evt.empty ? 'warn' : 'ok');
+    const summary = document.createElement('summary');
+    const icon = document.createElement('span');
+    icon.className = 'agent-obs-icon';
+    icon.textContent = OBS_ICONS[evt.kind] || '👁';
+    const task = document.createElement('span');
+    task.className = 'agent-obs-task';
+    task.textContent = (evt.kind || 'obs') + ' · ' + (evt.task_name || evt.server || '');
+    const chip = document.createElement('span');
+    chip.className = 'agent-obs-chip';
+    chip.textContent = evt.empty ? 'no content' : 'ok';
+    summary.appendChild(icon);
+    summary.appendChild(task);
+    summary.appendChild(chip);
+    row.appendChild(summary);
+    const body = document.createElement('pre');
+    body.className = 'agent-obs-body';
+    body.textContent = evt.text || '(no payload text)';
+    row.appendChild(body);
+    p.appendChild(row);
+    setRuntimeState('runtime', evt.empty ? 'warn' : 'ok');
+  }
+
   function renderAgentPlan(plan) {
     const p = ensureAgentPanel();
     const steps = (plan && plan.steps) || [];
@@ -853,7 +1111,11 @@
     html += '<ol class="agent-steps">';
     let idx = 0;
     for (const s of steps) {
-      html += '<li data-step="' + (s._idx != null ? s._idx : idx++) + '"><b>' + escapeHtml(s.name || '?') + '</b> '
+      // _idx is model/plan data — coerce to a real integer before it
+      // lands in an attribute (a crafted string would break out of it).
+      const rawIdx = (s && s._idx != null) ? Number(s._idx) : NaN;
+      const stepIdx = Number.isInteger(rawIdx) ? rawIdx : idx++;
+      html += '<li data-step="' + stepIdx + '"><b>' + escapeHtml(s.name || '?') + '</b> '
         + '<code>' + escapeHtml(s.tool || '') + '</code>'
         + (s.depends_on && s.depends_on.length ? ' <i>← ' + escapeHtml(s.depends_on.join(', ')) + '</i>' : '')
         + (s.why ? '<br><span class="agent-why">' + escapeHtml(s.why) + '</span>' : '')
@@ -880,9 +1142,12 @@
     html += '<div class="agent-verdict verdict-' + ((v && v.pass) ? 'pass' : 'fail') + '">'
       + ((v && v.pass) ? 'PASSED quality bar' : 'below quality bar — improving…') + '</div>';
     if (llm) {
+      // Judge scores come from model JSON — only render real numbers
+      // (a malformed string here would be markup-injected).
+      const num = (v) => (typeof v === 'number' && isFinite(v)) ? v : '-';
       html += '<div class="agent-scores">'
-        + 'fun ' + (llm.fun || '-') + ' · quality ' + (llm.quality || '-')
-        + ' · playability ' + (llm.playability || '-') + '</div>';
+        + 'fun ' + num(llm.fun) + ' · quality ' + num(llm.quality)
+        + ' · playability ' + num(llm.playability) + '</div>';
     }
     const dims = (v && v.dimensions) || {};
     const labels = { core_loop: 'core loop', feedback: 'feedback', art: 'art',
@@ -1000,6 +1265,8 @@
 
   function bindNetwork() {
     if (!('EventSource' in window)) return;
+    // Same-origin EventSource sends the HttpOnly `nex_auth` cookie
+    // automatically — no token in the URL.
     es = new EventSource('/api/events');
     es.onmessage = (m) => {
       let evt;
@@ -1106,6 +1373,53 @@
       } else if (evt.type === 'agent.mcp_disconnected') {
         showToast('MCP server lost: ' + (evt.server || 'server'), 'err');
         refreshConnPill();
+      } else if (evt.type === 'agent.directed') {
+        renderSystemMap(evt.systems, evt.current);
+        renderScope(evt);
+        setRuntimeState('build', 'pending');
+        setRuntimeState('verify', 'pending');
+        if (evt.game) {
+          showToast('Director: ' + evt.game + ' · ' + (evt.systems || []).length
+            + ' systems', 'ok');
+        }
+      } else if (evt.type === 'agent.system_next') {
+        const map = ensureAgentPanel().querySelector('.sys-map');
+        if (map) {
+          map.querySelectorAll('.sys-chip').forEach((c) => c.classList
+            .remove('current'));
+        }
+      } else if (evt.type === 'agent.reviewed') {
+        (evt.criteria || []).forEach((c) =>
+          markCriterion(evt.system, c.criterion, c.state));
+        setRuntimeState('verify', evt.verdict === 'PASS' ? 'ok' : 'warn');
+      } else if (evt.type === 'agent.system_verified') {
+        const map = ensureAgentPanel().querySelector('.sys-map');
+        if (map) {
+          const chip = Array.from(map.querySelectorAll('.sys-chip'))
+            .find((c) => c.title.indexOf(evt.system) === 0);
+          if (chip) chip.className = 'sys-chip complete';
+        }
+        setRuntimeState('runtime', 'ok');
+      } else if (evt.type === 'agent.verification_gate') {
+        const p = ensureAgentPanel();
+        const notVerified = evt.unverified || [];
+        if (notVerified.length) {
+          const row = document.createElement('div');
+          row.className = 'gate-row';
+          row.textContent = 'NOT verified (no evidence from the running '
+            + 'game): ' + notVerified.map((u) => u.criterion).join(' · ');
+          p.appendChild(row);
+          setRuntimeState('verify', 'fail');
+          showToast('Run is PARTIAL — criteria unproven', 'err');
+        }
+      } else if (evt.type === 'agent.memory_compacted') {
+        const p = ensureAgentPanel();
+        const row = document.createElement('div');
+        row.className = 'mem-row';
+        row.textContent = 'memory compacted: '
+          + Object.keys(evt.trimmed || {}).join(', ')
+          + ' (' + (evt.size || 0) + ' chars)';
+        p.appendChild(row);
       } else if (evt.type === 'agent.campaign_started') {
         renderCampaignStart(evt.milestones);
       } else if (evt.type === 'agent.milestone_started') {
@@ -1130,6 +1444,7 @@
           faceTrouble();
         }
       } else if (evt.type === 'agent.verification_passed') {
+        setRuntimeState('verify', 'ok');
         // Light-touch flourish: sparkle line in the panel + face flash.
         const p = ensureAgentPanel();
         const tick = document.createElement('div');
@@ -1147,6 +1462,24 @@
         void p.offsetWidth;
         p.classList.add('shake');
         markStep(evt.task, 'failed');
+        setRuntimeState('build', 'fail');
+      } else if (evt.type === 'agent.tool_succeeded') {
+        setRuntimeState('build', 'ok');
+      } else if (evt.type === 'agent.verification_failed') {
+        setRuntimeState('verify', 'fail');
+      } else if (evt.type === 'agent.observation') {
+        // OBSERVE loop: Nex saw the running game. Evidence row in the
+        // panel + runtime chip. (Payload text is untrusted — textContent.)
+        renderObservation(evt);
+      } else if (evt.type === 'agent.bug_recorded') {
+        appendAgentError(ensureAgentPanel(),
+          'defect recorded: ' + (evt.message || evt.kind || 'unknown'));
+      } else if (evt.type === 'agent.experiment_rolled_back') {
+        setRuntimeState('build', 'warn');
+        appendAgentError(ensureAgentPanel(),
+          'experiment rolled back: ' + (evt.note || 'workspace restored'));
+      } else if (evt.type === 'agent.plan_started') {
+        resetRuntimeStrip();
       } else if (evt.type === 'agent.plan_ready') {
         // The agent produced a goal-specific plan (model-driven or
         // capability fallback). Show it in the agent panel.
@@ -1164,9 +1497,8 @@
         if (res.report) renderAgentReport(res.report);
         else if (res.mode === 'plan') renderAgentPlan(res);
       } else if (evt.type === 'agent.error') {
-        const p = ensureAgentPanel();
-        p.innerHTML += '<div class="agent-status err">agent error: '
-          + escapeHtml(evt.error || 'unknown') + '</div>';
+        appendAgentError(ensureAgentPanel(),
+          'agent error: ' + (evt.error || 'unknown'));
       } else if (evt.type === 'agent.design_started') {
         // NEX 2.0: Nex is thinking about WHAT to build before any tool call.
         anim.setState({ state: 'FOCUSED', params: { source: 'design' } });

@@ -8,18 +8,25 @@ classification:
     + a coarse category (READ / CREATE / MODIFY / BUILD / TEST /
       DESTRUCTIVE / NETWORK / UNKNOWN)
 
-Design rules (from the spec):
-  * Prefer EXPLICIT metadata when the live MCP server provides it
-    (MCP 2025 tool ``annotations``: readOnlyHint, destructiveHint,
+Design rules (from the spec + audit hardening):
+  * BOTH signals are always consulted: keyword heuristics on the tool
+    name AND explicit MCP annotations (readOnlyHint, destructiveHint,
     idempotentHint, openWorldHint).
-  * Fall back to keyword heuristics ONLY when no explicit metadata exists.
+  * MCP annotations are UNTRUSTED: they come from the very server the
+    classification guards, and a malicious or broken server may lie
+    (e.g. ``{"name": "delete_project",
+    "annotations": {"readOnlyHint": true}}``). They may therefore only
+    RAISE caution — the final category is the MORE dangerous of
+    (heuristic, annotation); a hint can never downgrade a tool.
   * Unknown tools are classified CONSERVATIVELY (assume they may need
     confirmation; never assume safe).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+import sys
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional
 
 # --- category constants ----------------------------------------------------
@@ -87,48 +94,88 @@ def classify_capability(name: str,
                         schema: Optional[Dict[str, Any]] = None) -> ToolCapability:
     """Classify a tool.
 
-    Priority:
-      1. Explicit MCP annotations (live MCP truth).
-      2. Keyword heuristics on the tool name (fallback).
-      3. Conservative defaults (unknown).
+    Two signals are combined, and the more dangerous one wins:
+      1. Keyword heuristics on the tool name (Nex's own, unspoofable
+         view of what the name says).
+      2. Explicit MCP annotations (live server-provided metadata).
+
+    MCP annotations are UNTRUSTED metadata — they are supplied by the
+    very server the classification is meant to gate, and a malicious or
+    broken server may lie (e.g. a tool named ``delete_project`` that
+    claims ``readOnlyHint: true``). The rule is therefore SEVERITY-MAX,
+    never severity-min:
+
+        final category = the MORE dangerous of (heuristic, annotation)
+        destructive    = heuristic-destructive OR destructiveHint
+        read_only      = ONLY when both signals agree (heuristic READ +
+                         the server positively asserts readOnlyHint)
+
+    A hint may RAISE caution but can never LOWER it.
     """
     name_l = _norm(name)
     ann = annotations or {}
 
-    # 1) Explicit annotations (MCP 2025).
+    # Heuristic baseline — always computed, even when annotations exist.
+    base_cat = _heuristic_category(name_l)
+    base_destructive = base_cat == DESTRUCTIVE
+
     if ann:
-        read_only = bool(ann.get("readOnlyHint", False))
-        destructive = bool(ann.get("destructiveHint", False))
-        cat = _category_from_annotations(ann, name_l)
-        cap = ToolCapability(
+        ann_cat = _category_from_annotations(ann, name_l)
+        # Severity-max: an annotation can only make a tool look MORE
+        # dangerous, never less.
+        cat = _more_dangerous(base_cat, ann_cat)
+        destructive = (base_destructive
+                       or bool(ann.get("destructiveHint", False)))
+        # read_only requires BOTH signals to agree: the name must read as
+        # READ and the (untrusted) server must positively assert it.
+        read_only = (base_cat == READ and not destructive
+                     and bool(ann.get("readOnlyHint", False)))
+        network = (cat == NETWORK) or _has_hint(name_l, NETWORK)
+        return ToolCapability(
             category=cat,
             read_only=read_only,
             destructive=destructive,
             reversible=bool(ann.get("idempotentHint", False)),
-            network=_CAT_HINTS[NETWORK] and _has_hint(name_l, NETWORK),
-            requires_confirmation=destructive,
-            source="explicit",
+            network=network,
+            requires_confirmation=(destructive or _needs_confirm(cat)),
+            source="explicit+heuristic",
+            notes=("MCP annotations treated as UNTRUSTED hints; "
+                   "severity-max with the name heuristic — a hint can "
+                   "raise caution but never lower it"),
         )
-        if cap.requires_confirmation is False and cat in (READ,):
-            cap.requires_confirmation = False
-        return cap
 
-    # 2) Heuristic fallback.
-    cat = _heuristic_category(name_l)
-    destructive = cat == DESTRUCTIVE
+    # 2) No annotations at all: pure heuristic fallback.
+    cat = base_cat
+    destructive = base_destructive
     return ToolCapability(
         category=cat,
         read_only=(cat == READ),
         reversible=(cat in (MODIFY, BUILD, TEST)),
         destructive=destructive,
         network=(cat == NETWORK),
-        requires_confirmation=destructive or cat == UNKNOWN,
+        requires_confirmation=destructive or _needs_confirm(cat),
         # Unknown tools are flagged conservative so callers treat them as
         # needing caution (STAGE 3: "Unknown tools should be classified
         # conservatively").
         source="conservative" if cat == UNKNOWN else "heuristic",
         notes="heuristic classification; live annotations preferred",
     )
+
+
+def _needs_confirm(cat: str) -> bool:
+    """Categories that warrant confirmation even when not destructive:
+    unknown (unclassifiable = untrusted by default) and network
+    (leaves the machine)."""
+    return cat in (UNKNOWN, NETWORK)
+
+
+def _more_dangerous(a: str, b: str) -> str:
+    """The category with the higher severity. UNKNOWN ranks highest so
+    'we can't classify it' can never be downgraded by a
+    friendly-looking annotation."""
+    order = {READ: 1, CREATE: 2, MODIFY: 3, BUILD: 4,
+             TEST: 5, NETWORK: 6, DESTRUCTIVE: 7, UNKNOWN: 8}
+    return a if order.get(a, 8) >= order.get(b, 8) else b
 
 
 def _category_from_annotations(ann: Dict[str, Any], name_l: str) -> str:
@@ -175,3 +222,104 @@ def category_hints() -> Dict[str, tuple]:
     is exactly one canonical capability/policy vocabulary.
     """
     return {k: tuple(v) for k, v in _CAT_HINTS.items()}
+
+
+# --- the OPERATOR CAPABILITY REGISTRY (layer 3) ----------------------------
+# A local, operator-owned file pins the classification of specific tools
+# where the heuristics + (untrusted) annotations are not enough — e.g. to
+# escalate a suspiciously-named tool:
+#
+#     $NEX_CAPABILITY_FILE  (default: ~/.nex/capabilities.json)
+#     {
+#       "roblox-studio": {
+#         "apply_decision": {"category": "destructive"},
+#         "inspect_project": {"category": "read"}
+#       }
+#     }
+#
+# Semantics are the SAME severity-max rule as for MCP annotations:
+# the registry can only RAISE caution (a higher-severity category, or
+# requires_confirmation=true). It can never LOWER it — a pin claiming a
+# destructive tool is "read" is ignored. An invalid file or an unknown
+# category is ignored (with a warning); the heuristic + annotation
+# classification stays in effect. This file is operator infrastructure,
+# not model input: the model never reads or writes it.
+_REG_SEVERITY = {READ: 1, CREATE: 2, MODIFY: 3, BUILD: 4, TEST: 5,
+                 NETWORK: 6, DESTRUCTIVE: 7, UNKNOWN: 8}
+
+_reg_cache: Dict[str, Any] = {"path": None, "mtime": None, "data": {}}
+
+
+def capability_registry_path() -> str:
+    p = os.environ.get("NEX_CAPABILITY_FILE", "").strip()
+    if p:
+        return p
+    return os.path.join(os.path.expanduser("~"), ".nex", "capabilities.json")
+
+
+def capability_registry() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Load the registry (mtime-cached). Never raises."""
+    import json as _json
+    path = capability_registry_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    if _reg_cache.get("path") == path and _reg_cache.get("mtime") == st.st_mtime:
+        return _reg_cache["data"]  # type: ignore[return-value]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write("[nex] capability registry %r ignored (%s)\n"
+                         % (path, exc))
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    _reg_cache.update(path=path, mtime=st.st_mtime, data=data)
+    return data  # type: ignore[return-value]
+
+
+def registry_entry(server: Optional[str], tool: str) -> Optional[Dict[str, Any]]:
+    if not server or not tool:
+        return None
+    servers = capability_registry()
+    entry = servers.get(server)
+    if not isinstance(entry, dict):
+        return None
+    e = entry.get(tool)
+    return e if isinstance(e, dict) else None
+
+
+def apply_capability_registry(cap: ToolCapability, server: Optional[str],
+                              tool: str) -> ToolCapability:
+    """Apply the operator registry layer over a classification.
+
+    STRICTEST WINS: the returned capability is the input, possibly
+    ESCALATED (higher-severity category / requires_confirmation=true).
+    Downgrades are silently ignored — the same rule that keeps a lying
+    server annotation from softening a tool keeps a lying registry pin
+    from softening one.
+    """
+    e = registry_entry(server, tool)
+    if not e:
+        return cap
+    out = cap
+    cat = e.get("category")
+    if isinstance(cat, str):
+        cat_l = cat.strip().lower()
+        if cat_l in _REG_SEVERITY and \
+                _REG_SEVERITY[cat_l] > _REG_SEVERITY.get(out.category, 8):
+            out = replace(
+                out,
+                category=cat_l,
+                destructive=out.destructive or (cat_l == DESTRUCTIVE),
+                network=out.network or (cat_l == NETWORK),
+                read_only=(out.read_only and cat_l == READ),
+                source=out.source + "+registry",
+            )
+    if e.get("requires_confirmation") is True:
+        out = replace(out, requires_confirmation=True)
+    # `requires_confirmation: false` / `read_only: true` pins are
+    # deliberately NOT honored (severity-max, see above).
+    return out

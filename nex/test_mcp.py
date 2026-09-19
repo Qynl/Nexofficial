@@ -26,6 +26,10 @@ import urllib.error
 HERE = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 
+# The server now always requires an auth token; the boot below sets it in
+# the environment and every request carries it.
+MCP_TOKEN = "mcp-test-token"
+
 
 def _expect(cond, msg):
     print(("ok   - " if cond else "FAIL - ") + msg)
@@ -45,7 +49,8 @@ def _free_port():
 port = _free_port()
 env = os.environ.copy()
 env.update({"NEX_HOST": "127.0.0.1", "NEX_PORT": str(port),
-            "NEX_OBSERVER_DISABLED": "1"})
+            "NEX_OBSERVER_DISABLED": "1",
+            "NEX_AUTH_TOKEN": MCP_TOKEN})
 proc = subprocess.Popen([PYTHON, os.path.join(HERE, "server.py")],
                         env=env, cwd=HERE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -55,6 +60,7 @@ BASE = "http://127.0.0.1:%d" % port
 def _http(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method)
+    req.add_header("X-Nex-Auth", MCP_TOKEN)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
@@ -81,7 +87,9 @@ deadline = time.time() + 10
 ready = False
 while time.time() < deadline:
     try:
-        with urllib.request.urlopen(BASE + "/api/health", timeout=1) as r:
+        req = urllib.request.Request(BASE + "/api/health")
+        req.add_header("X-Nex-Auth", MCP_TOKEN)
+        with urllib.request.urlopen(req, timeout=1) as r:
             if r.status == 200:
                 ready = True
                 break

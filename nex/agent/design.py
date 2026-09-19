@@ -157,6 +157,37 @@ def missing_sections(design: Dict[str, Any]) -> List[str]:
 # Parsing the model's design answer
 # ---------------------------------------------------------------------------
 
+def _first_balanced_object(text: str) -> Optional[str]:
+    """Depth-scan for the first balanced {...} (string-aware). More
+    robust than the greedy brace regex: model replies that add prose
+    (with or without braces) after the JSON object still parse."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def parse_design(text: str, idea: str = "", engine: Optional[str] = None
                  ) -> Optional[Dict[str, Any]]:
     """Extract the first JSON object from an LLM reply and normalize it.
@@ -168,9 +199,11 @@ def parse_design(text: str, idea: str = "", engine: Optional[str] = None
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
     if fenced:
         candidates.append(fenced.group(1))
-    brace = re.search(r"\{.*\}", text, re.S)
-    if brace:
-        candidates.append(brace.group(0))
+    # Depth scan FIRST (the non-greedy fence regex above truncates nested
+    # JSON at the first '}', so the balanced scan is the reliable one).
+    balanced = _first_balanced_object(text)
+    if balanced:
+        candidates.append(balanced)
     for cand in candidates:
         try:
             data = json.loads(cand)

@@ -41,6 +41,10 @@ class Task:
     tried_alts: List[str] = field(default_factory=list)
     llm_diagnosed: bool = False   # bounded: LLM repair runs at most once/task
     expect: Optional[Any] = None  # acceptance criteria (from plan step.expect)
+    # Director layer: the system this task builds (scope attribution) and
+    # the checklist criteria it is meant to prove (mandatory verification).
+    system: str = ""
+    criteria: List[str] = field(default_factory=list)
     notes: str = ""
 
 
@@ -75,8 +79,16 @@ class TaskGraph:
         return out
 
     def deps_met(self, task: Task) -> bool:
-        """Are all of `task`'s dependencies currently SUCCESS?"""
-        return all(self._tasks[d].status == SUCCESS for d in task.deps)
+        """Are all of `task`'s dependencies currently SUCCESS?
+
+        A dep id that no longer exists (hand-edited/corrupt
+        checkpoint) counts as UNMET instead of raising KeyError —
+        the task stays pending and the run reports it as blocked
+        rather than crashing the loop."""
+        return all(
+            (self._tasks.get(d) is not None
+             and self._tasks[d].status == SUCCESS)
+            for d in task.deps)
 
     def dependents(self, tid: str) -> List[str]:
         return list(self._dependents.get(tid, []))
@@ -135,7 +147,8 @@ class TaskGraph:
                     "result": t.result, "error": t.error,
                     "error_signature": t.error_signature,
                     "llm_diagnosed": t.llm_diagnosed,
-                    "expect": t.expect, "notes": t.notes,
+                    "expect": t.expect, "system": t.system,
+                    "criteria": t.criteria, "notes": t.notes,
                 }
                 for t in self._tasks.values()
             ]
@@ -158,6 +171,8 @@ class TaskGraph:
                 error_signature=td.get("error_signature"),
                 llm_diagnosed=bool(td.get("llm_diagnosed", False)),
                 expect=td.get("expect"),
+                system=td.get("system", "") or "",
+                criteria=list(td.get("criteria", []) or []),
                 notes=td.get("notes", ""),
             ))
         return g

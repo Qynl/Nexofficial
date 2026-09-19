@@ -150,6 +150,12 @@ def _validate_plan_shape(plan: Dict[str, Any]
                 "args": dict(s["args"]),
                 "why": s.get("why", ""),
                 "expect": s.get("expect", ""),
+                # Director layer: which SYSTEM this step belongs to (scope
+                # attribution) and the checklist criteria it is meant to
+                # prove. Optional — absence is tolerated, never invented.
+                "system": str(s.get("system") or "").strip().lower(),
+                "criteria": [str(c)[:200] for c in (s.get("criteria") or [])
+                             if str(c).strip()][:8],
             }
             for i, s in enumerate(steps)
         ],

@@ -33,10 +33,12 @@ Environment variables:
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import queue
 import re
+import secrets
 import socketserver
 import subprocess
 import sys
@@ -63,14 +65,66 @@ import mc_tools as _mc_tools  # noqa: E402
 
 # SECURITY: default bind is LOOPBACK. This server executes MCP tool calls,
 # mutates the workspace and reaches upstreams — it must not be reachable
-# from the network by accident. Opt into LAN exposure explicitly AND set a
-# NEX_AUTH_TOKEN (every /api + /mcp request then requires X-Nex-Auth).
+# from the network by accident. Opt into LAN exposure explicitly (NEX_BIND=lan)
+# — but note the auth token is ALWAYS required regardless of bind (see below).
 _host_env = os.environ.get("NEX_HOST", "")
 if not _host_env and os.environ.get("NEX_BIND", "").lower() in ("lan", "all", "0.0.0.0"):
     _host_env = "0.0.0.0"
 HOST = _host_env or "127.0.0.1"
-AUTH_TOKEN = os.environ.get("NEX_AUTH_TOKEN", "")
 PORT = int(os.environ.get("NEX_PORT", "8787"))
+
+
+# ---------------------------------------------------------------------------
+# Auth token — ALWAYS present.
+#
+# This server can spawn stdio MCP children and drive long builds, so an
+# unauthenticated HTTP surface is a real local/remote RCE vector (any
+# process on the host, or any web page in the user's browser — cross-origin
+# POSTs need no user interaction). Loopback-only is NOT enough.
+#
+# Token priority:
+#   1. NEX_AUTH_TOKEN env (explicit operator choice).
+#   2. NEX_TOKEN_FILE (default ~/.nex/server_token) — auto-created with
+#      0600 on first boot so the token survives restarts.
+# Browser auth: the token is NEVER put into served HTML/JS (no
+# window.NEX_AUTH). The operator opens the banner link
+#   http://host:port/?nex_token=<t>
+# which sets an HttpOnly, SameSite=Strict (Secure on https) `nex_auth`
+# cookie and 302-redirects to a clean URL; every subsequent same-origin
+# /api + /mcp request carries the cookie automatically. CLI/programmatic
+# clients use the X-Nex-Auth header (or `?nex_auth=` on GET /api/events).
+# There is no "no auth" mode. Tests override NEX_TOKEN_FILE to isolate.
+# ---------------------------------------------------------------------------
+
+def _token_file_path() -> str:
+    return os.environ.get("NEX_TOKEN_FILE") or os.path.join(
+        os.path.expanduser("~"), ".nex", "server_token")
+
+
+def _load_or_create_auth_token() -> str:
+    env_tok = os.environ.get("NEX_AUTH_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    path = _token_file_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            tok = f.read().strip()
+        if tok:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(24)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(tok + "\n")
+    except OSError:
+        pass  # read-only home: token still works for this process
+    return tok
+
+
+AUTH_TOKEN = _load_or_create_auth_token()
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
@@ -656,24 +710,25 @@ def _format_tunnel_awareness() -> str:
         if sample:
             rows.append("    sample tools: " + sample)
     if not rows:
-        s = ""
+        # Honest empty state: the model must know there is NOTHING to
+        # call right now, instead of inventing tools (the old version
+        # listed local primitives here that the capability boundary
+        # hard-refuses — plans against them were rejected every time).
+        s = ("\nNO MCP tunnels are connected right now — the only tools "
+             "live are the four MCP introspection tools (who_am_i, "
+             "list_platforms, tunnel_status, tunnel_probe). Do NOT "
+             "invent or name any other tool; if the task needs engine "
+             "tools, say the user must connect the editor first "
+             "(Settings page).")
     else:
         s = ("Connected MCP tunnels (call them via tools/call "
              "with namespaced names like '<tunnel>.<tool_name>'):\n"
-             + "\n".join(rows))
-    # Always-on primitives the model can rely on, even when no tunnel
-    # is live. Keep this short — the system prompt has the long form.
-    s += (
-        "\n\nAAA primitives (always available, call them by bare name):\n"
-        "- detect_engines — sniff Unreal/Blender/Godot/Roblox/Unity.\n"
-        "- engine_info — version + project paths for one engine.\n"
-        "- compile_check — syntax-validate a single source file "
-        "(python always; lua/gdscript/csharp when their toolchains "
-        "are on PATH; json + toml + cpp via shell).\n"
-        "- validate_assets — best-effort asset sanity walk.\n"
-        "- json_path_query — RFC 6901 query against a JSON document.\n"
-        "- diff_files — unified diff between two sandbox files.\n"
-    )
+             + "\n".join(rows)
+             + "\n\nOnly these namespaced tools and the four MCP "
+             "introspection tools are callable. Nex's own "
+             "filesystem/shell/host infrastructure is NOT an AI "
+             "capability — calls to it are refused by the hard "
+             "capability boundary.")
     _TUNNEL_AWARENESS_CACHE = (now, s)
     return s
 
@@ -976,29 +1031,31 @@ class NexHandler(BaseHTTPRequestHandler):
     # ----- helpers ---------------------------------------------------------
 
     def _send_json(self, status: int, payload: Any) -> None:
+        # NOTE: no Access-Control-Allow-Origin. The UI is same-origin.
+        # A wildcard CORS here let ANY web page in the user's browser
+        # drive the API cross-origin (with the token mandatory, that
+        # page would still get 401 — but the preflight/leak surface
+        # disappears entirely with no downside).
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_file(self, path: str, content_type: str,
-                   inject_auth: bool = False) -> None:
+    def _send_file(self, path: str, content_type: str) -> None:
         try:
             with open(path, "rb") as f:
                 data = f.read()
         except FileNotFoundError:
             self.send_error(404, "Not Found")
             return
-        if inject_auth and AUTH_TOKEN and content_type.startswith("text/html"):
-            # Bootstrap the token so the same-origin frontend can call the
-            # gated API. Only done when a token is configured at all.
-            boot = ("<script>window.NEX_AUTH = %s;</script>\n</head>"
-                    % json.dumps(AUTH_TOKEN))
-            data = data.replace(b"</head>", boot.encode("utf-8"), 1)
+        # NOTE: the auth token is deliberately NOT injected into served
+        # HTML (the old window.NEX_AUTH global made the token readable by
+        # any page script — the XSS→token→MCP/stdio chain). Browsers
+        # authenticate with the HttpOnly `nex_auth` cookie, set via one
+        # top-level navigation to `/?nex_token=<t>` (_cookie_bootstrap).
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -1017,7 +1074,12 @@ class NexHandler(BaseHTTPRequestHandler):
             return {}
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("[nex %s] %s\n" % (self.log_date_time_string(), fmt % args))
+        line = fmt % args
+        # SSE streams carry the token as a query param (EventSource can't
+        # set headers) — never let it into the access log.
+        if AUTH_TOKEN:
+            line = line.replace(AUTH_TOKEN, "***")
+        sys.stderr.write("[nex %s] %s\n" % (self.log_date_time_string(), line))
 
     # ----- routing ---------------------------------------------------------
 
@@ -1033,34 +1095,164 @@ class NexHandler(BaseHTTPRequestHandler):
         self.send_error(404, "Not Found")
 
     # ----- auth -------------------------------------------------------------
-    def _auth_ok(self) -> bool:
-        """When NEX_AUTH_TOKEN is set, every /api + /mcp request must carry
-        it (X-Nex-Auth header or Authorization: Bearer). Browsers get the
-        token injected into served HTML (window.NEX_AUTH) because the only
-        reason to expose this server beyond loopback is a deliberate,
-        token-protected deployment."""
-        if not AUTH_TOKEN:
+    def _is_https(self) -> bool:
+        # Behind the preview/LAN proxy the real scheme arrives as a
+        # header; NEX_COOKIE_SECURE=1 forces the Secure flag anyway.
+        if os.environ.get("NEX_COOKIE_SECURE", "").strip().lower() \
+                in ("1", "true", "yes", "on"):
             return True
-        if self.headers.get("X-Nex-Auth") == AUTH_TOKEN:
+        return self.headers.get("X-Forwarded-Proto", "").strip().lower() \
+            == "https"
+
+    def _cookie_token(self) -> Optional[str]:
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "nex_auth":
+                return v
+        return None
+
+    def _auth_ok(self) -> bool:
+        """Every /api + /mcp request must carry the token.
+
+        Acceptance, in order:
+          * the `nex_auth` COOKIE — the browser path. The cookie is
+            HttpOnly (page scripts — even an XSS — cannot read it),
+            SameSite=Strict (never sent cross-site), Path=/, and Secure
+            on https origins. Browsers obtain it by one top-level
+            navigation to `/?nex_token=<t>` (the banner link), which
+            sets the cookie and redirects to a clean URL — the token is
+            NEVER injected into served HTML (window.NEX_AUTH is gone:
+            a readable global was the XSS→token→MCP/stdio chain).
+          * X-Nex-Auth / Authorization: Bearer — CLI + programmatic.
+          * `?nex_auth=` on GET /api/events ONLY — legacy CLI/programmatic
+            SSE (a browser never needs it; EventSource sends the cookie
+            automatically same-origin).
+        The token is ALWAYS set, so this is not a conditional gate: it
+        IS the gate. Comparisons are constant-time (hmac.compare_digest)
+        to defeat timing oracles."""
+        tok = AUTH_TOKEN.encode("utf-8")
+        ct = self._cookie_token()
+        if ct and hmac.compare_digest(ct.encode("utf-8"), tok):
+            return True
+        provided = self.headers.get("X-Nex-Auth")
+        if provided and hmac.compare_digest(provided.encode("utf-8"), tok):
             return True
         authz = self.headers.get("Authorization", "")
-        return authz == "Bearer " + AUTH_TOKEN
+        if authz.startswith("Bearer ") and hmac.compare_digest(
+                authz[len("Bearer "):].encode("utf-8"), tok):
+            return True
+        # Legacy programmatic SSE (EventSource in a headless client):
+        # query token honored ONLY for the SSE stream, never anywhere
+        # else — a token in the URL should have the smallest possible
+        # surface (logs, proxies, history).
+        if self.command == "GET":
+            clean = self.path.split("?", 1)[0].rstrip("/")
+            if clean == "/api/events":
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                try:
+                    q = urllib.parse.parse_qs(query)
+                except Exception:  # noqa: BLE001
+                    q = {}
+                qv = (q.get("nex_auth") or [""])[0]
+                if qv and hmac.compare_digest(qv.encode("utf-8"), tok):
+                    return True
+        return False
+
+    def _cookie_bootstrap(self) -> bool:
+        """Top-level navigation with `?nex_token=<t>`: a valid token is
+        exchanged for the HttpOnly `nex_auth` cookie, then a 302 drops
+        the token from the address bar (history/logs keep a clean URL).
+        Returns True when the request was handled (redirect sent)."""
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        if not query or "nex_token" not in query:
+            return False
+        path = self.path.split("?", 1)[0]
+        try:
+            q = urllib.parse.parse_qs(query)
+            nt = (q.get("nex_token") or [""])[0]
+        except Exception:  # noqa: BLE001
+            return False
+        if not nt or not AUTH_TOKEN:
+            return False
+        if not hmac.compare_digest(nt.encode("utf-8"),
+                                   AUTH_TOKEN.encode("utf-8")):
+            # Invalid token: no cookie, no redirect — the page loads,
+            # its API calls 401, and the auth hint tells the operator.
+            return False
+        secure = "; Secure" if self._is_https() else ""
+        self.send_response(302)
+        self.send_header("Set-Cookie",
+                         "nex_auth=%s; Path=/; HttpOnly; SameSite=Strict%s"
+                         % (nt, secure))
+        self.send_header("Location", path or "/")
+        self.end_headers()
+        return True
 
     def _reject_auth(self) -> None:
         self._send_json(401, {"ok": False,
                               "error": "missing/invalid X-Nex-Auth"})
 
-    def do_GET(self) -> None:  # noqa: N802
+    def _auth_gate(self) -> bool:
+        """True if the request must be authenticated (and wasn't).
+
+        There is exactly ONE unauthenticated API path: the login
+        endpoint (`POST /api/auth/session`) — it exists so a browser can
+        turn a token the operator KNOWS into an HttpOnly cookie without
+        ever putting the token in the URL/DOM (the preview/LAN case
+        where the ?nex_token= link is not reachable). Everything else —
+        including /api/health — requires the token (a 401 is still a
+        valid "server is up" signal for boot-wait loops; see the tests)."""
         path = self.path.split("?", 1)[0]
-        if (path.startswith("/api/") or path == "/api"
-                or path == "/mcp" or path.startswith("/mcp/")) \
-                and not self._auth_ok():
+        if path == "/api/auth/session" or path == "/api/auth/logout":
+            return False
+        sensitive = (path.startswith("/api/") or path == "/api"
+                     or path == "/mcp" or path.startswith("/mcp/"))
+        return sensitive and not self._auth_ok()
+
+    def _handle_auth_session(self) -> None:
+        """POST {token} -> Set-Cookie (login) / logout clears it.
+
+        The token is compared constant-time; a wrong token costs a
+        small fixed delay (cheap brute-force throttle for a 32-char
+        random secret) and never sets a cookie."""
+        path = self.path.split("?", 1)[0]
+        secure = "; Secure" if self._is_https() else ""
+        if path == "/api/auth/logout":
+            self.send_response(200)
+            self.send_header("Set-Cookie",
+                             "nex_auth=; Path=/; HttpOnly; SameSite=Strict; "
+                             "Max-Age=0%s" % secure)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true, "logout": true}')
+            return
+        body = self._read_json_body() or {}
+        tok = str(body.get("token") or "")
+        if tok and AUTH_TOKEN and hmac.compare_digest(
+                tok.encode("utf-8"), AUTH_TOKEN.encode("utf-8")):
+            self.send_response(200)
+            self.send_header("Set-Cookie",
+                             "nex_auth=%s; Path=/; HttpOnly; SameSite=Strict%s"
+                             % (tok, secure))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true, "method": "cookie"}')
+            return
+        time.sleep(0.4)  # fixed delay on failure (throttle)
+        self._send_json(401, {"ok": False, "error": "invalid token"})
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self._cookie_bootstrap():
+            return
+        path = self.path.split("?", 1)[0]
+        if self._auth_gate():
             self._reject_auth()
             return
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         if path in ("/", "/index.html"):
             self._send_file(os.path.join(FRONTEND_DIR, "index.html"),
-                            "text/html; charset=utf-8", inject_auth=True)
+                            "text/html; charset=utf-8")
         elif path == "/style.css":
             self._send_file(os.path.join(FRONTEND_DIR, "style.css"), "text/css; charset=utf-8")
         elif path == "/app.js":
@@ -1150,7 +1342,7 @@ class NexHandler(BaseHTTPRequestHandler):
             self._handle_plan(path, query)
         elif path == "/settings.html" or path == "/settings":
             self._send_file(os.path.join(FRONTEND_DIR, "settings.html"),
-                            "text/html; charset=utf-8", inject_auth=True)
+                            "text/html; charset=utf-8")
             return
         elif path.startswith("/api/tunnels/"):
             from tunnels import get_tunnels, reload_tunnels
@@ -1165,9 +1357,7 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if (path.startswith("/api/") or path == "/api"
-                or path == "/mcp" or path.startswith("/mcp/")) \
-                and not self._auth_ok():
+        if self._auth_gate():
             self._reject_auth()
             return
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
@@ -1242,6 +1432,9 @@ class NexHandler(BaseHTTPRequestHandler):
                                   "project_id": pid, "mode": "build",
                                   "approved_plan": approved_graph is not None})
             return
+        if path in ("/api/auth/session", "/api/auth/logout"):
+            self._handle_auth_session()
+            return
         if path == "/api/agent/run":
             self._handle_agent_run()
             return
@@ -1290,12 +1483,20 @@ class NexHandler(BaseHTTPRequestHandler):
             # POST /api/tunnels with {"tunnels":[{name,url,label}]}
             # adds tunnels at runtime; replaces env-derived defaults
             # when {"replace":true}.
-            from tunnels import reload_tunnels
+            # SECURITY: stdio entries are process execution — only
+            # allowlisted commands (built-in catalog + NEX_STDIO_ALLOW)
+            # are accepted; anything else is a 400.
+            from tunnels import reload_tunnels, validate_extra_entries
             body = self._read_json_body() or {}
             extra = body.get("tunnels") or []
             replace = bool(body.get("replace"))
             if not isinstance(extra, list):
                 self._send_json(400, {"error": "tunnels must be a list"})
+                return
+            problems = validate_extra_entries(extra)
+            if problems:
+                self._send_json(400, {"ok": False,
+                                      "error": "; ".join(problems)})
                 return
             fresh = reload_tunnels(extra=extra, replace=replace)
             # Persist user-added servers so they survive restarts.
@@ -1439,7 +1640,7 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         """DELETE support (settings page removes user-added MCP servers)."""
-        if not self._auth_ok():
+        if self._auth_gate():
             self._reject_auth()
             return
         parsed = urllib.parse.urlparse(self.path)
@@ -1684,7 +1885,12 @@ class NexHandler(BaseHTTPRequestHandler):
             def _router(name, args):
                 return reg.route(name, args or {})
             if "step" in body:
-                idx = int(body["step"])
+                try:
+                    idx = int(body["step"])
+                except (TypeError, ValueError):
+                    self._send_json(400, {"ok": False,
+                                          "error": "'step' must be an integer"})
+                    return
                 out = _mc.execute_plan_step(pid, idx, _router)
                 if out is None:
                     self._send_json(404, {"ok": False, "error": "no such plan"}); return
@@ -1913,21 +2119,25 @@ class NexHandler(BaseHTTPRequestHandler):
                     "logging":   {},
                 },
                 "instructions": (
-                    "Nex is an MCP tunnel. Local tools are unprefixed "
-                    "(list_files, read_file, write_file, run_command, "
-                    "search_files, log_event, recent_events, speak, "
-                    "who_am_i, list_platforms, tunnel_probe). Tools "
-                    "from connected editors are namespaced — e.g. "
+                    "Nex is an MCP tunnel. Tools from connected "
+                    "editors are namespaced — e.g. "
                     "roblox-studio.execute_luau or "
-                    "unreal-engine.spawn_actor. Use list_platforms to "
-                    "see what's reachable. For Roblox Studio / Unreal "
-                    "Engine, read the 'mcp://roblox-studio/guide' and "
-                    "'mcp://unreal-engine/guide' resources (or call the "
-                    "'roblox_explain_tools' / 'unreal_explain_tools' "
-                    "prompts) to get a full, explained catalog of every "
-                    "engine tool before you call one. Prefer read tools "
-                    "(get_*/list_*) before write tools, and confirm "
-                    "destructive steps with the user."
+                    "unreal-engine.spawn_actor. The only UNprefixed "
+                    "tools are the MCP introspection ones: who_am_i, "
+                    "list_platforms, tunnel_status, tunnel_probe. "
+                    "There are no other local tools — filesystem, "
+                    "shell, and host tools are server infrastructure, "
+                    "not capabilities, and calls to them are refused "
+                    "by the hard capability boundary. Use "
+                    "list_platforms to see what's reachable. For "
+                    "Roblox Studio / Unreal Engine, read the "
+                    "'mcp://roblox-studio/guide' and "
+                    "'mcp://unreal-engine/guide' resources (or call "
+                    "the 'roblox_explain_tools' / 'unreal_explain_tools' "
+                    "prompts) to get a full, explained catalog of "
+                    "every engine tool before you call one. Prefer "
+                    "read tools (get_*/list_*) before write tools, "
+                    "and confirm destructive steps with the user."
                 ),
             }
             if is_notification:
@@ -2036,7 +2246,16 @@ class NexHandler(BaseHTTPRequestHandler):
         # rejected here; this is a real gate, not a prompt instruction.
         from mcp.policy import authorize, current_policy
         from mcp.capability import ToolCapability
-        server = name.split(".", 1)[0] if "." in name else None
+        # Split into (server, BARE tool name) — the policy matches bare
+        # names. Passing the full "server.tool" name would let a
+        # connected server expose a tool literally named `run_command`
+        # (called as `evilserver.run_command`) that slips past
+        # ALWAYS_DENIED, the PROCESS-execution names, and
+        # tool-allow-list entries alike.
+        if "." in name:
+            server, tool_name = name.split(".", 1)
+        else:
+            server, tool_name = None, name
         cap = None
         for t in self._mcp_tools_list().get("tools", []):
             if t.get("name") == name:
@@ -2051,7 +2270,7 @@ class NexHandler(BaseHTTPRequestHandler):
                     source=cd.get("source", "conservative"),
                 )
                 break
-        decision = authorize(server, name, cap, current_policy())
+        decision = authorize(server, tool_name, cap, current_policy())
         if not decision.allowed:
             return {"content": [{"type": "text",
                                  "text": "blocked by the capability boundary: "
@@ -2366,7 +2585,6 @@ class NexHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         q = BUS.subscribe()
@@ -2407,10 +2625,9 @@ class NexHandler(BaseHTTPRequestHandler):
             raise
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        # Same-origin only: no CORS headers. Cross-origin preflights fail
+        # in the browser, which is the point (see _send_json note).
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     # ----- SSE -------------------------------------------------------------
@@ -2420,7 +2637,6 @@ class NexHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
@@ -2472,7 +2688,12 @@ class NexHandler(BaseHTTPRequestHandler):
         if not goal:
             self._send_json(400, {"ok": False, "error": "missing 'goal'"})
             return
-        max_milestones = int(body.get("max_milestones") or 6)
+        try:
+            max_milestones = int(body.get("max_milestones") or 6)
+        except (TypeError, ValueError):
+            self._send_json(400, {"ok": False,
+                                  "error": "'max_milestones' must be an integer"})
+            return
         resume = bool(body.get("resume", True))
 
         def _runner() -> None:
@@ -2713,17 +2934,22 @@ class NexHandler(BaseHTTPRequestHandler):
         # the speak.end event so the client applies the emotion when
         # the bubble completes, keeping the emotion synchronized with
         # the talking rather than firing before/after it.
+        # Trim the cumulative text once for the end-of-stream event.
+        # (Deltas preserve whitespace so concatenation reads naturally,
+        # but the final published text shouldn't have leading/trailing
+        # space.)
+        # NOTE: this MUST be computed before the fallback engine below
+        # uses it — the old ordering raised UnboundLocalError and killed
+        # the chat thread on every tag-less / model-less turn (no
+        # speak.end, no IDLE transition, face stuck in SPEAKING).
+        final_text = full_clean.strip()
+
         fallback_chosen = None
         if not seen_state:
             fb = fallback_state(user_text, final_text)
             if fb and fb not in ("IDLE", "SPEAKING"):
                 fallback_chosen = fb
 
-        # Trim the cumulative text once for the end-of-stream event.
-        # (Deltas preserve whitespace so concatenation reads naturally,
-        # but the final published text shouldn't have leading/trailing
-        # space.)
-        final_text = full_clean.strip()
         end_payload = {
             "type": "speak.end",
             "text": final_text,
@@ -2904,6 +3130,29 @@ def _stdio_sentinel(name: str) -> str:
 
 
 def main() -> None:
+    # --- TRUST BOOTSTRAP (operator environment, before anything else) ---
+    # CONNECTED != TRUSTED. The deployed server runs in STRICT SERVER
+    # MODE: an external tool call passes only if its server is in the
+    # trusted registry = built-in catalog servers + NEX_TRUSTED_SERVERS
+    # (operator environment — the model can never extend it).
+    # NEX_STRICT_SERVERS=0 restores the legacy permissive mode.
+    try:
+        from mcp.policy import Policy, set_policy
+        from tunnels import DEFAULT_TUNNELS as _CAT
+        _trusted = {t["name"] for t in _CAT if t.get("name")}
+        for _a in os.environ.get("NEX_TRUSTED_SERVERS", "").split(","):
+            _a = _a.strip()
+            if _a:
+                _trusted.add(_a)
+        _strict = os.environ.get("NEX_STRICT_SERVERS", "1").strip().lower()
+        _strict_on = _strict not in ("0", "false", "no", "off")
+        set_policy(Policy(strict_servers=_strict_on,
+                          trusted_servers=_trusted))
+        print("Policy: strict_servers=%s trusted=%s"
+              % (_strict_on, sorted(_trusted)))
+    except Exception as exc:  # noqa: BLE001
+        print("Policy: NOT configured (%s) — using core defaults" % exc)
+
     # Wire tools.py + observer.py to this server's EventBus, parser,
     # and emotion set. Doing it BEFORE we open the HTTP server means
     # any tool invoked via the very first request will publish to the
@@ -2963,7 +3212,18 @@ def main() -> None:
     print("NEX serving on http://%s:%s" % (HOST, PORT))
     print("Frontend dir: %s" % FRONTEND_DIR)
     print("Model:  %s  style=%s  model=%s" % (OLLAMA_HOST, API_STYLE, OLLAMA_MODEL))
-    print("Open:   http://localhost:%s" % PORT)
+    # The browser opens the ONE link below: it carries the token as a
+    # query param exactly once, the server swaps it for an HttpOnly
+    # `nex_auth` cookie and redirects to a clean URL. The token never
+    # appears in served HTML/JS (no window.NEX_AUTH).
+    print("Open:   http://localhost:%s/?nex_token=%s   "
+          "(one click sets the auth cookie)" % (PORT, AUTH_TOKEN))
+    src = ("env" if os.environ.get("NEX_AUTH_TOKEN", "").strip()
+           else _token_file_path())
+    print("Auth:   ALL /api + /mcp requests require the token "
+          "(browser: HttpOnly `nex_auth` cookie; CLI: X-Nex-Auth header "
+          "or Bearer). Source: %s" % src)
+    print("Token:  %s" % AUTH_TOKEN)
     print("Tags:   " + " ".join("[" + s + "]" for s in EMOTION_STATES))
     print("MCP:    POST /mcp + GET /mcp/sse (Streamable-HTTP, "
           "2025-06-18)")

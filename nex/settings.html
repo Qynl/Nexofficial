@@ -223,23 +223,26 @@
   <div class="toast" id="toast"></div>
 
   <script>
-  // Auth bootstrap (same as app.js): attach X-Nex-Auth when configured.
+  /* Auth: same as app.js — the server requires a token on every
+     /api + /mcp request, but browsers carry it in an HttpOnly
+     `nex_auth` cookie (set once via the /?nex_token= banner link or the
+     login card on the main page), which same-origin fetch sends
+     automatically. No token in JS. */
   (function () {
-    const TOKEN = window.NEX_AUTH || '';
-    if (!TOKEN) return;
-    const orig = window.fetch.bind(window);
-    window.fetch = (input, init) => {
-      try {
-        const url = typeof input === 'string' ? input : (input && input.url) || '';
-        if (url.startsWith('/api') || url.startsWith('/mcp')) {
-          init = init || {};
-          init.headers = Object.assign({}, init.headers || {},
-            { 'X-Nex-Auth': TOKEN });
-          return orig(input, init);
-        }
-      } catch (e) { /* fall through */ }
-      return orig(input, init);
-    };
+    // No cookie yet? Point the operator at the login card instead of
+    // showing an empty settings page with silent failures.
+    fetch('/api/health').then((r) => {
+      if (r.status !== 401) return;
+      const b = document.createElement('div');
+      b.id = 'auth-hint';
+      b.textContent = 'Not authenticated — open the main page and paste '
+        + 'the server token into the login card.';
+      b.style.cssText = 'position:fixed;left:50%;top:12px;transform:'
+        + 'translateX(-50%);padding:8px 14px;border-radius:10px;'
+        + 'background:rgba(255,122,122,.12);border:1px solid '
+        + 'rgba(255,122,122,.45);color:#ff9a9a;font-size:11px;z-index:9999';
+      document.body.appendChild(b);
+    }).catch(() => {});
   })();
 
   /* Settings page — talks to /api/settings/tunnels and /api/settings/connect.
@@ -324,7 +327,12 @@
     try {
       res = await fetch('/api/settings/tunnels').then(r => r.json());
     } catch (e) {
-      grid.innerHTML = '<div class="meta">Could not load: ' + e + '</div>';
+      // textContent, not innerHTML — the error string must never be
+      // parsed as markup.
+      const d = document.createElement('div');
+      d.className = 'meta';
+      d.textContent = 'Could not load: ' + e;
+      grid.appendChild(d);
       return;
     }
     platform = res.platform || null;
@@ -351,14 +359,21 @@
       // transport line
       const transport = document.createElement('div');
       transport.className = 'meta';
+      // Build with textContent nodes so command/args/url are never parsed
+      // as markup (the catalog is static today, but user-added servers may
+      // flow through this rendering later).
+      const label = document.createElement('span');
+      const code = document.createElement('code');
       if (c.kind === 'stdio' && c.command) {
         const argStr = (c.args || []).join(' ');
-        transport.innerHTML = 'transport: <code>stdio</code> · '
-              + '<code>' + c.command + (argStr ? ' ' + argStr : '') + '</code>';
+        label.textContent = 'transport: stdio · ';
+        code.textContent = c.command + (argStr ? ' ' + argStr : '');
       } else if (c.url) {
-        transport.innerHTML = 'transport: <code>http</code> · '
-              + '<code>' + c.url + '</code>';
+        label.textContent = 'transport: http · ';
+        code.textContent = c.url;
       }
+      transport.appendChild(label);
+      transport.appendChild(code);
       card.appendChild(transport);
       // tools + button
       const tools = document.createElement('div');

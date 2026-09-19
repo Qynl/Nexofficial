@@ -26,6 +26,10 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 HERE = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 
+# The server now always requires an auth token; the isolated boot below
+# sets it in the environment and every request carries it.
+MC_TOKEN = "mc-test-token"
+
 
 def _expect(cond, msg):
     print(("ok   - " if cond else "FAIL - ") + msg)
@@ -286,8 +290,9 @@ _expect(len(append_AAA_workflow([])) == 0,
         "append_AAA_workflow([]) returns an empty list")
 # ---------- 6. mc_tools.py: compile_check -----------------------------
 
-# Real Python — should pass.
-ws_dir = os.path.expanduser("~/NexWorkspace")
+# Real Python — should pass. (mc_tools' default sandbox root is
+# ~/nex_workspace — same as tools.py; keep them in lockstep.)
+ws_dir = os.path.expanduser("~/nex_workspace")
 os.makedirs(ws_dir, exist_ok=True)
 py_path = os.path.join(ws_dir, "test_mc_ok.py")
 with open(py_path, "w") as f:
@@ -316,7 +321,7 @@ os.unlink(bad_path)
 
 # Make sure the workspace dir exists for these next checks.
 import os as _os
-os.makedirs(_os.path.expanduser("~/NexWorkspace"), exist_ok=True)
+os.makedirs(_os.path.expanduser("~/nex_workspace"), exist_ok=True)
 
 
 # ---------- 7. mc_tools.py: json_path_query ----------------------------
@@ -346,7 +351,7 @@ _expect(res.get("ok") is True and res.get("value") == 42,
 
 # ---------- 8. mc_tools.py: diff_files ---------------------------------
 
-ws_dir = os.path.expanduser("~/NexWorkspace")
+ws_dir = os.path.expanduser("~/nex_workspace")
 fa = os.path.join(ws_dir, "test_mc_a.txt")
 fb = os.path.join(ws_dir, "test_mc_b.txt")
 with open(fa, "w") as f:
@@ -374,6 +379,7 @@ for _attempt in range(5):
     env["NEX_HOST"] = "127.0.0.1"
     env["NEX_PORT"] = str(port)
     env["NEX_OBSERVER_DISABLED"] = "1"
+    env["NEX_AUTH_TOKEN"] = MC_TOKEN
     proc = subprocess.Popen(
         [PYTHON, os.path.join(HERE, "server.py")],
         env=env, cwd=HERE,
@@ -384,8 +390,10 @@ for _attempt in range(5):
     ready = False
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/api/health", timeout=1) as r:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/health")
+            req.add_header("X-Nex-Auth", MC_TOKEN)
+            with urllib.request.urlopen(req, timeout=1) as r:
                 if r.status == 200:
                     ready = True; break
         except Exception:
@@ -402,6 +410,7 @@ port = int(BASE.rsplit(":", 1)[1])
 def _http(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method)
+    req.add_header("X-Nex-Auth", MC_TOKEN)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
