@@ -744,4 +744,46 @@ _expect(not [f for f in cj5.findings if f.get("source") == "observation"],
 _expect(stj5.open_bugs() == [],
         "judge: a healthy re-observation leaves no open bug")
 
+# ---------------------------------------------------------------------------
+# QUALITY BARS reach the TESTER (and stay labelled as quality)
+# ---------------------------------------------------------------------------
+# The tester is the adversarial judge of "is this any good?". It must be
+# handed the quality bar, and when it attacks a bar the finding must say so
+# — the label decides whether a repair chases "works" or "feels right".
+_seen_prompts = []
+
+def _llm_attacks(msgs):
+    _seen_prompts.append(msgs[-1]["content"])
+    import json as _json
+    return _json.dumps({"verdict": "WEAK", "attacks": [
+        {"criterion": "quality: the camera never snaps",
+         "attack": "camera teleports behind the player at the level edge",
+         "severity": "major"},
+        {"criterion": "player moves on input",
+         "attack": "holding both keys freezes the character",
+         "severity": "major"}]})
+
+_atk = critic.llm_test("make a shooter", "character_controller",
+                       ["player moves on input"], [],
+                       _llm_attacks,
+                       quality=["the camera never snaps",
+                                "acceleration is eased"])
+_expect(bool(_atk) and len(_atk) == 2, "both attacks become findings")
+_expect(_atk[0]["evidence"].get("quality_bar") == "the camera never snaps",
+        "an attack on a quality bar is labelled with that bar")
+_expect("quality_bar" not in _atk[1]["evidence"],
+        "a plain criterion attack carries no quality label")
+_expect(all(f["kind"] == "test_failure" for f in _atk),
+        "quality attacks stay test_failure findings (existing repair path)")
+_expect("QUALITY BAR" in _seen_prompts[0]
+        and "the camera never snaps" in _seen_prompts[0],
+        "the tester prompt contains the quality bar it must attack")
+
+# Without a bar the prompt stays exactly as before (no empty heading).
+_seen_prompts.clear()
+critic.llm_test("g", "s", ["c"], [], _llm_attacks)
+_expect("QUALITY BAR (judge the evidence against these too"
+        not in _seen_prompts[0],
+        "no quality bars -> no quality block in the tester prompt")
+
 print("\nAll critic + improve-loop tests passed.")

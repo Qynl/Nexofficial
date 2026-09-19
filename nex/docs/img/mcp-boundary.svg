@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="700" viewBox="0 0 1240 700" role="img" aria-label="The MCP-only boundary: policy, capability, registry">
+<title>The MCP-only boundary: policy, capability, registry</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<text x="40" y="44" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#e8edf5" text-anchor="start" opacity="1.0">The action surface is MCP — and nothing else</text>
+<text x="40" y="70" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">The agent can only act through tools that connected MCP servers expose. It has no shell, no filesystem, no arbitrary PC access.</text>
+<rect x="40" y="110" width="250" height="128" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="40" y="110" width="4" height="128" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="54" y="134" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">model proposes</text>
+<text x="54" y="155" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">"call roblox.play_solo"</text>
+<text x="54" y="173" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">plain tool name + args</text>
+<rect x="330" y="96" width="300" height="156" rx="10" fill="#141821" stroke="#e5484d" stroke-width="1.2" opacity="1.0"/>
+<rect x="330" y="96" width="4" height="156" rx="2" fill="#e5484d" stroke="#e5484d" stroke-width="0" opacity="1.0"/>
+<text x="344" y="120" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">policy + capability</text>
+<text x="344" y="141" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">classify: read · create ·</text>
+<text x="344" y="159" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">modify · destructive · test ·</text>
+<text x="344" y="177" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">code_exec · unknown</text>
+<text x="344" y="195" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">unknown -&gt; confirmation</text>
+<rect x="670" y="96" width="250" height="156" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="670" y="96" width="4" height="156" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="684" y="120" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">live registry</text>
+<text x="684" y="141" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">only tools that exist</text>
+<text x="684" y="159" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">RIGHT NOW on a connected</text>
+<text x="684" y="177" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">server; a name alone</text>
+<text x="684" y="195" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">is never enough</text>
+<rect x="960" y="96" width="240" height="156" rx="10" fill="#141821" stroke="#76b900" stroke-width="1.2" opacity="1.0"/>
+<rect x="960" y="96" width="4" height="156" rx="2" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<text x="974" y="120" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">MCP server</text>
+<text x="974" y="141" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Roblox Studio MCP,</text>
+<text x="974" y="159" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Unreal MCP, your own —</text>
+<text x="974" y="177" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the editor keeps the</text>
+<text x="974" y="195" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">last word</text>
+<line x1="290" y1="174" x2="330" y2="174" stroke="#a06bff" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<line x1="630" y1="174" x2="670" y2="174" stroke="#e5484d" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<line x1="920" y1="174" x2="960" y2="174" stroke="#4c8dff" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<text x="330" y="292" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#e5484d" text-anchor="start" opacity="1.0">refused before any server sees it</text>
+<rect x="330" y="312" width="870" height="40" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="348" y="338" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">x  paths pointing at secrets: ~/.ssh, .env, credentials</text>
+<rect x="330" y="360" width="870" height="40" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="348" y="386" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">x  cloud metadata IPs, localhost, private ranges (SSRF)</text>
+<rect x="330" y="408" width="870" height="40" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="348" y="434" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">x  a key sent to a host it does not belong to</text>
+<rect x="330" y="456" width="870" height="40" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="348" y="482" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">x  reasoning/'thinking' smuggled back as an argument</text>
+<rect x="330" y="504" width="870" height="40" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="348" y="530" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">x  code execution on a server the operator did not allow</text>
+<rect x="40" y="312" width="250" height="232" rx="9" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="58" y="338" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#76b900" text-anchor="start" opacity="1.0">what the agent CAN do</text>
+<text x="58" y="362" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  create parts / actors</text>
+<text x="58" y="386" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  write scripts</text>
+<text x="58" y="410" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  set properties</text>
+<text x="58" y="434" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  run the game</text>
+<text x="58" y="458" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  take screenshots</text>
+<text x="58" y="482" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  read the console</text>
+<text x="58" y="506" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">+  verify what it sees</text>
+<text x="40" y="606" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Two independent layers, on purpose: the policy decides WHAT is allowed, the registry decides WHAT EXISTS.</text>
+<text x="40" y="630" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Operators can relax a specific gate for a specific server (NEX_ALLOW_CODE_EXECUTION) — the model cannot.</text>
+<text x="40" y="654" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Even a fully compromised model can only use tools you connected and the editor accepted.</text>
+</svg>

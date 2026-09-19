@@ -1541,6 +1541,22 @@
         showToast(who + ': API key rejected — open Settings → Models & '
           + 'providers and check the key (Nex continues on the fallback).',
           'err');
+      } else if (evt.type === 'provider.paced') {
+        // The builder is deliberately NOT spending a request right now
+        // (headroom reserve or a full window). No toast on purpose — the
+        // chip tooltip carries the reason.
+        renderProvider(evt);
+      } else if (evt.type === 'provider.recovered') {
+        renderProvider(evt);
+        const chip = window.NexProviderChip;
+        const who = chip ? chip.providerLabel(evt.provider) : evt.provider;
+        showToast(who + ' is back — it builds again', 'info');
+      } else if (evt.type === 'provider.trouble') {
+        renderProvider(evt);
+        const chip = window.NexProviderChip;
+        const who = chip ? chip.providerLabel(evt.provider) : evt.provider;
+        showToast(who + ': ' + (evt.detail || evt.error_kind || 'problem'),
+          'err');
       } else if (evt.type === 'provider.call'
                  || evt.type === 'provider.status') {
         renderProvider(evt);

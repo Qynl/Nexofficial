@@ -199,6 +199,17 @@
       const primary = providerBits(status, b.provider);
       if (primary) lines.push(providerLabel(b.provider) + ': ' + primary);
     }
+    const wait = retryIn(status);
+    if (wait) {
+      lines.push('⏳ ' + providerLabel(b.provider) + ' is rate-limited — '
+        + 'tried again in ~' + wait + 's; ' + providerLabel(activeName)
+        + ' builds the same plan meanwhile');
+    }
+    const saving = pacing(status);
+    if (saving) {
+      lines.push('🌱 ' + providerLabel(saving) + ' is saving quota (headroom '
+        + 'reserve) — the fallback takes this one');
+    }
     const active = providerBits(status, activeName);
     if (active) lines.push(providerLabel(activeName) + ': ' + active);
     lines.push('builder acts through MCP tools only');
@@ -216,6 +227,29 @@
       if (!st) continue;
       if (st.key_mismatch) return 'mismatch';
       if (st.last_error_kind === 'auth_error') return 'rejected';
+    }
+    return '';
+  }
+
+  /* How long until the primary provider may be used again. A rate limit is
+   * temporary by definition, so the chip counts it down instead of leaving
+   * the operator with a dead-looking provider. */
+  function retryIn(status) {
+    if (!status) return 0;
+    const b = role(status, 'builder');
+    const st = providerState(status, b.provider);
+    if (!st) return 0;
+    return Math.max(0, Math.ceil(st.cooldown_s || 0));
+  }
+
+  /* Is the builder deliberately saving quota right now (headroom reserve)? */
+  function pacing(status) {
+    if (!status) return '';
+    const b = role(status, 'builder');
+    const names = [effective(b), b.provider].filter(Boolean);
+    for (const n of names) {
+      const st = providerState(status, n);
+      if (st && st.headroom) return n;
     }
     return '';
   }
@@ -266,6 +300,8 @@
     providerBits: providerBits,
     primaryMark: primaryMark,
     keyProblem: keyProblem,
+    retryIn: retryIn,
+    pacing: pacing,
     chipDetail: chipDetail,
     switchNote: switchNote,
     render: render,

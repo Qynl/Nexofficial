@@ -39,7 +39,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.project_state import (SYSTEM_BROKEN, SYSTEM_COMPLETE,
                                  SYSTEM_IN_PROGRESS, SYSTEM_PLANNED)
-from agent.recipes import (RECIPES_BY_ID, Recipe, checklist_for,
+from agent.recipes import (GENERIC_QUALITY_BARS, RECIPES_BY_ID, Recipe,
+                           checklist_for,
                            select_recipes)
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,9 @@ class SystemPlan:
     recipe: str = ""
     checklist: List[str] = field(default_factory=list)
     risks: List[str] = field(default_factory=list)
+    # The standard this system is held to (from the recipe library): what
+    # "good" means here, beyond "it runs".
+    quality: List[str] = field(default_factory=list)
     steps: List[Dict[str, str]] = field(default_factory=list)
     why: str = ""
     status: str = SYSTEM_PLANNED
@@ -103,6 +107,7 @@ class SystemPlan:
             "id": self.id, "title": self.title, "layer": self.layer,
             "provides": self.provides, "recipe": self.recipe,
             "checklist": list(self.checklist), "risks": list(self.risks),
+            "quality": list(self.quality),
             "steps": list(self.steps), "why": self.why,
             "status": self.status,
         }
@@ -167,6 +172,7 @@ def plan_from_recipes(goal: str, limit: int = 6) -> GamePlan:
         systems.append(SystemPlan(
             id=r.id, title=r.title, layer=r.system, provides=r.provides,
             recipe=r.id, checklist=list(r.checklist), risks=list(r.risks),
+            quality=list(r.quality),
             steps=[{"intent": s.intent, "evidence": s.evidence}
                    for s in r.steps],
             why="proven recipe for: " + r.provides))
@@ -260,6 +266,7 @@ def plan_with_model(goal: str,
             systems.append(SystemPlan(
                 id=r.id, title=r.title, layer=r.system, provides=r.provides,
                 recipe=r.id, checklist=list(r.checklist), risks=list(r.risks),
+                quality=list(r.quality),
                 steps=[{"intent": st.intent, "evidence": st.evidence}
                        for st in r.steps],
                 why=why or ("proven recipe for: " + r.provides)))
@@ -280,6 +287,7 @@ def plan_with_model(goal: str,
                 id=sid, title=str(item["name"])[:80], layer=layer,
                 provides=str(item.get("why") or "")[:160],
                 recipe="", checklist=cl,
+                quality=list(_generic_quality()),
                 why=str(item.get("why") or "")[:200]))
         if not systems:
             return None
@@ -344,6 +352,10 @@ def direct(goal: str, llm: Optional[Callable] = None,
         if ref and not s.checklist:
             s.checklist = list(ref.checklist)
             s.risks = list(ref.risks)
+        # The quality bar is never left empty: the library's own when the
+        # system is known, the generic bars otherwise.
+        if not s.quality:
+            s.quality = list(ref.quality) if ref else list(_generic_quality())
     gp.source = "model" if len(gp.systems) >= 3 else "recipes"
     return apply_status(gp, (memory or {}).get("systems") or {})
 
@@ -376,6 +388,18 @@ def _budget_steps(steps: List[Dict[str, Any]],
     return build[:max_steps] + play
 
 
+def _generic_quality() -> List[str]:
+    """Quality bars for a system the library does not know (model-invented).
+    Imported lazily so the module stays importable on its own."""
+    try:
+        from agent.recipes import GENERIC_QUALITY_BARS as g
+        return list(g)
+    except Exception:  # noqa: BLE001
+        return ["the player can tell what happened and why",
+                "nothing reads as a bug",
+                "it still behaves after five minutes of play"]
+
+
 def scope_envelope(system: Optional[SystemPlan],
                    remaining: Optional[List[SystemPlan]] = None,
                    max_steps: int = 4) -> Dict[str, Any]:
@@ -396,6 +420,10 @@ def scope_envelope(system: Optional[SystemPlan],
                      % (system.title, system.provides or ""),
         "system": system.id,
         "success": list(system.checklist),
+        # The quality bars travel with the envelope so the builder is TOLD
+        # what good means (and the critic can judge against it) instead of
+        # hoping a small model invents good taste.
+        "quality": list(getattr(system, "quality", []) or []),
         "steps": [dict(st) for st in _budget_steps(system.steps,
                                                    max_steps)],
         "do_not": [("do not restructure the project or refactor unrelated "
@@ -421,6 +449,13 @@ def scope_block(env: Dict[str, Any]) -> str:
         lines.append("SUCCESS CRITERIA (every one must be verifiable from "
                      "the running game):")
         lines += ["  - " + c for c in env["success"]]
+    if env.get("quality"):
+        # Not criteria (those are pass/fail) but the standard this system is
+        # held to. Stating it up front is what makes a small model aim at
+        # "feels right" instead of "compiles".
+        lines.append("QUALITY BAR (a working build that misses these is not "
+                     "finished):")
+        lines += ["  - " + q for q in env["quality"]]
     if env.get("do_not"):
         lines.append("DO NOT:")
         lines += ["  - " + d for d in env["do_not"]]

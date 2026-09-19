@@ -548,10 +548,37 @@ def find_unverified_criteria(state: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _engine_look(state: Any) -> List[str]:
+    """Engine-specific defect classes for this project ([] when unknown)."""
+    try:
+        from mcp_engines import playtest_guidance_for
+        return playtest_guidance_for(getattr(state, "engines", []) or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _split_bar(criterion: str) -> Any:
+    """Split a tester's `criterion` field into (quality_bar, criterion).
+
+    The TESTER prompt asks for `"quality: <the bar>"` when it attacks a
+    quality bar. Anything else is treated as a plain criterion, so the
+    classification is the model's own and never our guesswork.
+    """
+    c = (criterion or "").strip()
+    low = c.lower()
+    for prefix in ("quality bar:", "quality:", "bar:"):
+        if low.startswith(prefix):
+            bar = c[len(prefix):].strip()
+            return (bar[:200], bar[:120]) if bar else ("", c)
+    return ("", c)
+
+
 def llm_test(goal: str, system: str, criteria: List[str],
              observations: List[Dict[str, Any]],
              llm: Callable[[List[Dict[str, str]]], str],
              risks: Optional[List[str]] = None,
+             quality: Optional[List[str]] = None,
+             playtest: Optional[List[str]] = None,
              limit: int = 4) -> Optional[List[Dict[str, Any]]]:
     """TESTER role: try to BREAK the feature that was just built.
 
@@ -564,7 +591,8 @@ def llm_test(goal: str, system: str, criteria: List[str],
     try:
         from agent.roles import TESTER, system_prompt, tester_context
         prompt = (system_prompt(TESTER) + "\n\n"
-                  + tester_context(criteria, observations, risks=risks))
+                  + tester_context(criteria, observations, risks=risks,
+                                   quality=quality, playtest=playtest))
         reply = llm([{"role": "user", "content": prompt}])
         data = None
         m = re.search(r"\{.*\}", reply or "", re.S)
@@ -584,6 +612,10 @@ def llm_test(goal: str, system: str, criteria: List[str],
                 continue
             crit = str(atk.get("criterion") or "").strip()
             sev = str(atk.get("severity") or "").strip().lower()
+            # The tester marks an attack on a QUALITY BAR itself ("quality:
+            # <bar>") instead of us guessing from wording — a wrong guess
+            # would silently reclassify a real defect as taste.
+            bar, crit = _split_bar(crit)
             out.append({
                 "kind": "test_failure",
                 "severity": "minor" if sev == "minor" else "major",
@@ -591,7 +623,8 @@ def llm_test(goal: str, system: str, criteria: List[str],
                             % ((" on \"%s\"" % crit) if crit else "",
                                attack))[:400],
                 "evidence": {"source": "tester", "system": system,
-                             "criterion": crit},
+                             "criterion": crit,
+                             **({"quality_bar": bar} if bar else {})},
             })
         return out
     except Exception:  # noqa: BLE001
@@ -676,8 +709,11 @@ def critique(goal: str, state: Any, report: Any,
             crit_list = list((getattr(state, "criteria", {}) or {}).get(
                 scope_system) or [])
             if crit_list:
+                qual = (state.quality_for(scope_system)
+                        if hasattr(state, "quality_for") else [])
                 attacks = llm_test(goal, scope_system, crit_list,
-                                   current_obs, llm)
+                                   current_obs, llm, quality=qual,
+                                   playtest=_engine_look(state))
                 if attacks:
                     obs_findings.extend(attacks)
         findings += obs_findings

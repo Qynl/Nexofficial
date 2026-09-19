@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="900" viewBox="0 0 1240 900" role="img" aria-label="NEX architecture: browser, server, agent core, providers, MCP boundary">
+<title>NEX architecture: browser, server, agent core, providers, MCP boundary</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<text x="40" y="44" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#e8edf5" text-anchor="start" opacity="1.0">Architecture</text>
+<text x="40" y="70" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">one process, no dependencies beyond the Python standard library (plus your local Ollama)</text>
+<rect x="30" y="92" width="1180" height="150" rx="12" fill="#1b2130" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="46" y="116" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#4c8dff" text-anchor="start" opacity="1.0">Browser  ·  no secrets, no logic</text>
+<rect x="56" y="130" width="260" height="96" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="56" y="130" width="4" height="96" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="70" y="154" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">index.html + app.js</text>
+<text x="70" y="175" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">SSE event stream</text>
+<text x="70" y="193" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">toasts, state view</text>
+<rect x="336" y="130" width="260" height="96" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="336" y="130" width="4" height="96" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="350" y="154" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">provider_chip.js</text>
+<text x="350" y="175" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">active provider + model</text>
+<text x="350" y="193" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">rate-limit countdown</text>
+<rect x="616" y="130" width="260" height="96" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="616" y="130" width="4" height="96" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="630" y="154" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">webgl.js</text>
+<text x="630" y="175" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the face / animations</text>
+<rect x="896" y="130" width="288" height="96" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="896" y="130" width="4" height="96" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="910" y="154" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">settings.html</text>
+<text x="910" y="175" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">keys + models + roles</text>
+<text x="910" y="193" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">/api/settings/providers</text>
+<line x1="620" y1="242" x2="620" y2="282" stroke="#2b3446" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<text x="632" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">HTTP + SSE (cookie auth, same origin)</text>
+<rect x="30" y="282" width="1180" height="86" rx="12" fill="#1b2130" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="46" y="306" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#10a37f" text-anchor="start" opacity="1.0">server.py  ·  one process</text>
+<text x="46" y="330" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">token auth · /api/* · /mcp (dev bridge) · SSE bus · static files</text>
+<text x="46" y="352" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">no CORS escape hatch · keys never leave the server (masked to the page)</text>
+<line x1="620" y1="368" x2="620" y2="404" stroke="#2b3446" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<rect x="30" y="404" width="1180" height="300" rx="12" fill="#1b2130" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="46" y="428" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#a06bff" text-anchor="start" opacity="1.0">agent/  ·  the core (model-independent)</text>
+<rect x="56" y="444" width="218" height="122" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="56" y="444" width="4" height="122" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="70" y="468" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">design.py</text>
+<text x="70" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">design document</text>
+<text x="70" y="507" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">concept, loop, pillars</text>
+<rect x="290" y="444" width="218" height="122" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="290" y="444" width="4" height="122" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="304" y="468" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">director.py</text>
+<text x="304" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">recipes -&gt; systems</text>
+<text x="304" y="507" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">scope envelope</text>
+<text x="304" y="525" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">quality bar per system</text>
+<rect x="524" y="444" width="218" height="122" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="524" y="444" width="4" height="122" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="538" y="468" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">planner + loop</text>
+<text x="538" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">task graph</text>
+<text x="538" y="507" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">policy -&gt; registry</text>
+<text x="538" y="525" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">-&gt; execute</text>
+<rect x="758" y="444" width="218" height="122" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="758" y="444" width="4" height="122" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="772" y="468" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">observations.py</text>
+<text x="772" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">screenshots, logs,</text>
+<text x="772" y="507" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">state as</text>
+<text x="772" y="525" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">EVIDENCE</text>
+<rect x="992" y="444" width="218" height="122" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="992" y="444" width="4" height="122" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="1006" y="468" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">critic.py</text>
+<text x="1006" y="489" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">reviewer + tester</text>
+<text x="1006" y="507" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">rules first, then</text>
+<text x="1006" y="525" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the model</text>
+<rect x="56" y="578" width="420" height="106" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="56" y="578" width="4" height="106" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="70" y="602" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">project_state.py  ·  bounded memory</text>
+<text x="70" y="623" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">systems, criteria, quality bars, bugs,</text>
+<text x="70" y="641" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">decisions; every map capped, oldest first</text>
+<rect x="496" y="578" width="360" height="106" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="496" y="578" width="4" height="106" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="510" y="602" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">checkpoints.py</text>
+<text x="510" y="623" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">resume is a CLAIM: the world is</text>
+<text x="510" y="641" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">re-checked before trusting it</text>
+<rect x="876" y="578" width="334" height="106" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="876" y="578" width="4" height="106" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="890" y="602" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">verification.py</text>
+<text x="890" y="623" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">completion gate:</text>
+<text x="890" y="641" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">evidence or nothing</text>
+<line x1="620" y1="704" x2="620" y2="740" stroke="#2b3446" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<rect x="30" y="740" width="1180" height="130" rx="12" fill="#1b2130" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<text x="46" y="764" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#f0a000" text-anchor="start" opacity="1.0">agent/providers.py  ·  who is allowed to think</text>
+<rect x="56" y="776" width="272" height="78" rx="10" fill="#141821" stroke="#10a37f" stroke-width="1.2" opacity="1.0"/>
+<rect x="56" y="776" width="4" height="78" rx="2" fill="#10a37f" stroke="#10a37f" stroke-width="0" opacity="1.0"/>
+<text x="70" y="800" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">GPT (planner)</text>
+<text x="70" y="821" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">plans, tests, design</text>
+<text x="70" y="839" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">called rarely</text>
+<rect x="348" y="776" width="272" height="78" rx="10" fill="#141821" stroke="#76b900" stroke-width="1.2" opacity="1.0"/>
+<rect x="348" y="776" width="4" height="78" rx="2" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<text x="362" y="800" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">NVIDIA NIM (builder)</text>
+<text x="362" y="821" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">does the building</text>
+<text x="362" y="839" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">~40 RPM, paced</text>
+<rect x="640" y="776" width="272" height="78" rx="10" fill="#141821" stroke="#f0a000" stroke-width="1.2" opacity="1.0"/>
+<rect x="640" y="776" width="4" height="78" rx="2" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<text x="654" y="800" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">Ollama (local)</text>
+<text x="654" y="821" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">same plan, takes over</text>
+<text x="654" y="839" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">terminal fallback</text>
+<rect x="932" y="776" width="278" height="78" rx="10" fill="#141821" stroke="#e5484d" stroke-width="1.2" opacity="1.0"/>
+<rect x="932" y="776" width="4" height="78" rx="2" fill="#e5484d" stroke="#e5484d" stroke-width="0" opacity="1.0"/>
+<text x="946" y="800" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">mcp/  ·  the action surface</text>
+<text x="946" y="821" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">policy -&gt; capability -&gt; registry</text>
+<text x="946" y="839" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">no shell. no filesystem.</text>
+<text x="620" y="236" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="1" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0"></text>
+</svg>

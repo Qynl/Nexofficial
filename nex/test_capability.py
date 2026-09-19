@@ -228,4 +228,47 @@ d = policy_mod.authorize("engine", "zorken_quibble", unc,
 _expect(d.allowed is True and d.requires_confirmation is False,
         "confirm_unknown=False relaxes the unknown-tool gate")
 
+# ---------------------------------------------------------------------------
+# REAL ENGINE TOOL NAMES (Roblox Studio / Unreal MCP servers)
+# ---------------------------------------------------------------------------
+# The classifier is what keeps an autonomous run moving: an UNKNOWN tool
+# stalls on a confirmation prompt. Real engine tool names must land in the
+# right bucket, and the two names that decide whether a game can be played
+# at all must be TEST (not gated), because that is the step the whole
+# "look at the game" quality path depends on.
+_ENGINE_TOOLS = {
+    # Roblox Studio MCP
+    "play_solo": "test", "take_screenshot": "read",
+    "get_console_output": "read", "create_part": "create",
+    "insert_model": "create", "set_property": "modify",
+    "run_script": "code_execution", "execute_luau": "code_execution",
+    "get_datamodel_tree": "read",
+    # Unreal Engine MCP
+    "pie_start": "test", "get_output_log": "read",
+    "spawn_actor": "create", "compile_blueprint": "build",
+    "set_actor_property": "modify", "open_level": "modify",
+    "create_blueprint": "create", "import_asset": "create",
+    "execute_python": "code_execution",
+    # generic names that must not be misclassified
+    "create_script": "create", "run_game": "test", "run_tests": "test",
+    "set_health": "modify", "save_current_level": "modify",
+    "delete_actor": "destructive", "build": "build",
+}
+_bad = []
+for _name, _want in _ENGINE_TOOLS.items():
+    _got = cap.capability_for_tool({"name": _name, "description": ""
+                                    }).category
+    if _got != _want:
+        _bad.append("%s: %s != %s" % (_name, _got, _want))
+_expect(not _bad, "real engine tool names classify correctly: %s" % _bad)
+
+# Starting a playtest must NOT require confirmation (it is the quality path);
+# it is a TEST, and TEST is allowed outright.
+for _n in ("play_solo", "pie_start"):
+    _c = cap.capability_for_tool({"name": _n})
+    _d = policy_mod.authorize("roblox-studio", _n, _c)
+    _expect(_c.category == "test" and _d.allowed
+            and _d.requires_confirmation is False,
+            "%s runs a playtest with no confirmation gate" % _n)
+
 print("\nAll capability/policy tests passed.")

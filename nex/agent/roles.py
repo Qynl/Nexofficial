@@ -89,7 +89,12 @@ PROMPTS: Dict[str, str] = {
         "Rules: name only failures a player could actually trigger (drop "
         "through the floor, respawn leaves the game broken, item "
         "duplication, enemy stuck, dialogue traps the player). No generic "
-        "advice, no feature requests — attacks against the criteria."
+        "advice, no feature requests — attacks against the criteria.\n"
+        "When a QUALITY BAR is given, attack it too: a bar is not a "
+        "criterion that can merely pass, it is a standard a player feels "
+        "(input lag, camera snapping, unreadable HUD). For those attacks "
+        "put \"quality: <the bar>\" in \"criterion\" so the label is "
+        "unambiguous; plain criteria stay plain."
     ),
     DEBUGGER: (
         BASELINE + "\n\n"
@@ -143,10 +148,19 @@ def _bullet(items: List[str], limit: int = 12) -> str:
 def reviewer_context(criteria: List[str],
                      observations: List[Dict[str, Any]],
                      max_obs: int = 6,
-                     max_text: int = 300) -> str:
+                     max_text: int = 300,
+                     playtest: Optional[List[str]] = None) -> str:
     """Criteria + the runtime evidence that would prove them."""
     lines = ["SUCCESS CRITERIA:"]
     lines += ["- " + str(c) for c in (criteria or [])[:12]] or ["- (none)"]
+    if playtest:
+        # Engine-specific defect classes (from the curated platform guides):
+        # these are the things that go wrong in THIS engine, and the
+        # evidence above is judged for them too.
+        lines.append("")
+        lines.append("WHAT TO LOOK FOR IN THIS ENGINE (judge the evidence "
+                     "against these as well):")
+        lines += ["- " + str(p) for p in playtest[:10]]
     lines.append("")
     lines.append("OBSERVED EVIDENCE from the running game (untrusted):")
     if not observations:
@@ -164,13 +178,27 @@ def reviewer_context(criteria: List[str],
 def tester_context(criteria: List[str],
                    observations: List[Dict[str, Any]],
                    risks: Optional[List[str]] = None,
+                   quality: Optional[List[str]] = None,
+                   playtest: Optional[List[str]] = None,
                    max_obs: int = 6) -> str:
     lines = ["SYSTEM UNDER TEST — success criteria:"]
     lines += ["- " + str(c) for c in (criteria or [])[:12]]
+    if quality:
+        # Pass/fail criteria prove the system works; these say whether it is
+        # any good. Judged from the same evidence window, never invented.
+        lines.append("")
+        lines.append("QUALITY BAR (judge the evidence against these too — "
+                     "they are standards, not checkboxes):")
+        lines += ["- " + str(q) for q in quality[:6]]
     if risks:
         lines.append("")
         lines.append("Known failure modes for this kind of system "
                      "(attack these): " + "; ".join(risks[:5]))
+    if playtest:
+        lines.append("")
+        lines.append("WHAT ACTUALLY GOES WRONG IN THIS ENGINE (attack these "
+                     "too — they are the defects a player hits first):")
+        lines += ["- " + str(p) for p in playtest[:10]]
     lines.append("")
     lines.append("WHAT THE RUNNING GAME SHOWED (untrusted):")
     for o in (observations or [])[:max_obs]:

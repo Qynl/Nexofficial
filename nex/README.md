@@ -1,582 +1,559 @@
 # NEX
 
-A minimal, dependency-free visual + local runtime for the personal AI
-assistant **NEX**.
+**A local AI that builds games — through MCP tools, with a small model, and
+without ever touching your PC.**
 
-The resting face is two white rounded rectangles on a pure black background.
-The personality comes entirely from the animation engine.
+![NEX: the face and the provider chip](docs/img/face.svg)
 
-## Run
+NEX is two things at once:
+
+* a **face** — two white rounded rectangles on black, with an animation
+  engine instead of a spinner; and
+* an **agent** — a Director, a planner, a builder, a critic and a playtest
+  loop that turn one sentence ("make me a third person shooter") into a
+  project that is actually built, run, looked at and repaired.
+
+It runs on the Python standard library, talks to a local Ollama or a cloud
+model, and its *only* way to change your game is the MCP tools you connected.
 
 ```
 cd nex
+python server.py          # -> http://localhost:8787
+```
+
+No pip install. No build step. No node_modules.
+
+---
+
+## Table of contents
+
+1. [Why this exists](#1-why-this-exists)
+2. [Quick start](#2-quick-start)
+3. [Architecture](#3-architecture)
+4. [How a game gets good](#4-how-a-game-gets-good)
+5. [The providers: who is allowed to think](#5-the-providers-who-is-allowed-to-think)
+6. [The 40 RPM problem](#6-the-40-rpm-problem)
+7. [Failover: the plan never restarts](#7-failover-the-plan-never-restarts)
+8. [Memory that cannot grow forever](#8-memory-that-cannot-grow-forever)
+9. [The action surface is MCP](#9-the-action-surface-is-mcp)
+10. [Playtesting: the part everybody skips](#10-playtesting-the-part-everybody-skips)
+11. [Configuration](#11-configuration)
+12. [The UI](#12-the-ui)
+13. [Tests](#13-tests)
+14. [Files](#14-files)
+15. [Honest limits](#15-honest-limits)
+
+---
+
+## 1. Why this exists
+
+Most "AI makes a game" setups work like this: a strong model is asked to
+write a lot of code, and the result is judged by vibes. That has two
+problems. It gets expensive, and it is not reproducible.
+
+NEX is built the other way around: **the architecture carries the quality,
+not the model.** The target brain is a 20-billion-parameter local model
+(`gpt-oss:20b`). Model intelligence is a bonus; discipline is code.
+
+What that means concretely:
+
+| Instead of hoping the model… | NEX does this in code |
+| --- | --- |
+| picks a sane project structure | the **recipe library** supplies 15 proven system architectures with steps, checklists, risks and a quality bar |
+| stays on task | the **scope envelope** pins ONE system per round with a DO-NOT list; scope creep is a reported defect |
+| remembers the project | a **bounded project state** survives restarts: systems, criteria, quality bars, open bugs, decisions |
+| verifies its own work | a **completion gate**: a criterion is `pass` only with evidence from the *running* game |
+| knows what "good" means | per-system **quality bars**, stated in the prompt and judged by an adversarial tester |
+| plays the game | **playtest knowledge** per engine: what to capture, what to look at, what not to trust |
+
+![The quality path](docs/img/quality-path.svg)
+
+---
+
+## 2. Quick start
+
+```
+cd nex
+
+# optional: keys for cloud models (the local model needs none)
+cp .env.example .env && $EDITOR .env
+
 python server.py
 ```
 
-Then open:
+Open `http://localhost:8787`. On first boot a token is generated at
+`~/.nex/server_token` (0600); the banner link sets an HttpOnly cookie. Then:
+
+1. **Connect an engine.** Roblox Studio and Unreal Engine expose an MCP
+   server; NEX discovers its tools live. Without an engine NEX still
+   produces a full **build blueprint** (a real plan, honestly labelled as a
+   plan).
+2. **Describe the game.** `POST /api/project` runs the design stage and
+   shows a **Plan Page** — pillars, core loop, systems, milestones, quality
+   gates, the draft task graph.
+3. **Press START BUILD.** That graph is executed *as approved* — no silent
+   re-planning between your click and the work.
+4. **Watch.** The face works, the observation pane fills with screenshots
+   and console output, the chip shows which provider is building. Defects
+   become tasks; open defects block a system from being called complete.
+
+The model line is honest throughout: `COMPLETED` means the criteria were
+proven against the running game. Work that is finished but not yet proven is
+reported as `unverified`, and a run that stops early says why.
+
+---
+
+## 3. Architecture
+
+![NEX architecture](docs/img/architecture.svg)
+
+One Python process, one browser tab, and one hard rule: the browser holds no
+secrets and no logic, the server holds the keys, and the agent reaches the
+outside world only through MCP.
 
 ```
-http://localhost:8787
+Browser ──cookie-auth HTTP + SSE──> server.py ──> agent/ ──> providers (GPT / NIM / Ollama)
+                                        │
+                                        └──> mcp/  (policy -> capability -> registry) ──> Roblox / Unreal MCP
 ```
 
-Requires only the Python standard library.
+Three properties are worth calling out because they shape everything else:
 
-## Security
+* **No dependencies.** `server.py` is a stdlib HTTP server; the agent, the
+  critic and the provider layer are plain Python. Your local model is the
+  only external thing you need, and even that is optional for the plan.
+* **Model-independent roles.** DIRECTOR, PLANNER, BUILDER, REVIEWER, TESTER,
+  DEBUGGER and CRITIC are the *same* model called with different, tightly
+  scoped jobs. Each role sees only its own context — the Director never sees
+  the tool catalog, the Debugger sees one failed step — and every role's
+  output is validated by deterministic code before it is used.
+* **The action surface is MCP.** Not "MCP by convention" — the gateway order
+  is fixed and there is no flag that turns it off
+  (`mcp/policy.py`, `MCP_ONLY = True`).
 
-The HTTP API is **always authenticated** — there is no unauthenticated mode
-and no cross-origin (`Access-Control-Allow-Origin: *`) escape hatch.
+---
 
-- **Token source (in order):** the `NEX_AUTH_TOKEN` environment variable,
-  else a token file (default `~/.nex/server_token`, path overridable with
-  `NEX_TOKEN_FILE`). On first boot a random token is created and persisted
-  with `0600` permissions; it is stable across restarts.
-- **Browser auth = HttpOnly cookie.** Open the banner link
-  `http://localhost:8787/?nex_token=<token>` once: the server validates the
-  token, sets `nex_auth` with `HttpOnly; SameSite=Strict; Path=/` (plus
-  `Secure` on https origins, or always with `NEX_COOKIE_SECURE=1`) and
-  302-redirects to a clean URL. Every same-origin `/api` + `/mcp` request
-  (including `EventSource`) then carries the cookie automatically.
-  The token is **never** serialized into served HTML/JS — no
-  `window.NEX_AUTH` global — so an XSS bug cannot read the credential and
-  chain into MCP/stdio.
-- **CLI / programmatic clients** use the `X-Nex-Auth` request header or
-  `Authorization: Bearer <token>`; the headerless legacy SSE client may
-  use `?nex_auth=<token>` on `GET /api/events` only (masked in the access
-  log, never honored on any other path).
-- **TRUSTED SERVER REGISTRY (strict mode).** `CONNECTED != TRUSTED`: the
-  deployed server starts with `strict_servers=True`, so an external tool
-  call passes only if its server is in the trusted set = built-in catalog
-  servers + `NEX_TRUSTED_SERVERS` (comma-separated, operator environment).
-  Connecting a tunnel does not make it callable; the model can never
-  extend the registry. `NEX_STRICT_SERVERS=0` restores legacy permissive
-  mode (development only).
-- **HTTP MCP endpoint boundary (SSRF).** `POST /api/tunnels` accepts
-  `http(s)` endpoints on loopback (`127.0.0.1` / `localhost` / `::1`)
-  plus hosts listed in `NEX_HTTP_ALLOW`; cloud-metadata/LAN/arbitrary
-  hosts are a `400`, and a poisoned `~/.nex/tunnels.json` row is dropped
-  (fail-closed) on reload.
-- **Stdio MCP children are allowlisted.** `POST /api/tunnels` will only
-  start a stdio MCP server whose command is a built-in editor entrypoint or
-  explicitly listed in the `NEX_STDIO_ALLOW` environment variable (a
-  comma-separated list). Anything else is rejected with a `400`, and a
-  poisoned `~/.nex/tunnels.json` is dropped (never executed) on reload.
-  The HTTP API can never widen the list at runtime.
-- **MCP servers are untrusted peers.** Tool annotations
-  (`readOnlyHint` etc.) are treated as *untrusted hints* — they may only
-  RAISE caution, never lower it (severity-max with the name heuristic,
-  so a tool named `delete_project` claiming `readOnlyHint: true` is
-  still classified destructive). Unclassifiable tools (UNKNOWN) require
-  confirmation by default; external tools named `execute_command` /
-  `exec` always require confirmation; `run_command` (Nex's own shell)
-  is never authorized on any server. Policy matching uses the bare
-  tool name, so a connected server cannot slip a tool through by name
-  collision (`evilserver.run_command` is still denied).
-- **Operator capability registry** (`NEX_CAPABILITY_FILE`, default
-  `~/.nex/capabilities.json`) pins specific tools where the heuristics +
-  untrusted annotations are not enough:
-  `{"server": {"tool": {"category": "destructive",
-  "requires_confirmation": true}}}`. Same severity-max rule as
-  annotations: a pin can only RAISE caution, never downgrade a tool. The
-  file is operator infrastructure — the model never reads or writes it.
-- **Three classification layers** combine into the effective capability:
-  name heuristics + MCP annotations + the operator registry, with the
-  MORE dangerous value winning at every step.
-- **The SSE query token** (`?nex_auth=`) is only honored on
-  `/api/events` — nowhere else. All token comparisons are constant-time
-  (`hmac.compare_digest`).
-- **`test_escape.py` — the adversarial end-to-end proof.** It makes an
-  LLM-style attacker try to escape MCP through every reachable path
-  (internal tool names, `__internal__` prefixes, ghost servers, REST
-  shim, plan validation, LLM diagnosis, tunnel registration, SSRF URLs,
-  stdio commands, untrusted-but-connected servers, cookie bypass) and
-  asserts that nothing outside "authorized MCP call on a TRUSTED server"
-  ever causes an effect — with canaries (a sentinel file, the mock's call
-  log) and positive controls so a broken gate cannot fake a pass.
-- **Confirmation gate:** destructive / network / unknown / PROCESS
-  capabilities are held at a confirmation point in the agent loop
-  (`approver` hook, `agent.waiting_for_confirmation` event). The
-  default headless mode auto-approves (autonomous operation); wire a
-  real approver for interactive use.
+## 4. How a game gets good
 
-## The Game Director layer (small model, big engineering discipline)
+The diagram above shows the nine stages. In words:
 
-Nex is built so that a *small* local model (20B-class) can still ship
-sophisticated games. The model supplies reasoning; Nex supplies the
-engineering discipline around it — decomposition, memory, scope and
-verification are CODE, not hopes about the model.
+**The recipe library** (`agent/recipes.py`) knows 15 systems — character
+controller, level blockout, core loop, health/damage, enemy AI, combat, HUD,
+audio, save/load, objectives, inventory, progression, dialog, VFX, polish.
+Each one carries:
 
-```
-GAME REQUEST -> DIRECTOR (systems + build order + checklists)
-                  |
-                  v
-            SCOPE ENVELOPE (one objective, success criteria, DO-NOT)
-                  |
-                  v
-              PLANNER (few steps, one system)  ->  BUILDER (MCP tools)
-                  |
-          BUILD -> RUN -> OBSERVE -> REVIEWER -> TESTER -> CRITIC
-                  |
-        proven? --no--> DEBUGGER (smallest fix) --> repair plan
-             |
-            yes
-             v
-      SYSTEM VERIFIED -> next system
-```
+* proven **steps** with the evidence each step should produce,
+* a **completion checklist** (pass/fail criteria),
+* known **risks** (the classic failure modes of that system),
+* and a three-line **quality bar** — what "good" means there, as opposed to
+  "it runs".
 
-- **Director (`agent/director.py`)** decomposes a request into game
-  systems and orders them by dependency. Two sources: the **recipe
-  library** (deterministic, always available) and the **model** (may
-  refine, never remove). The structural roots — a player controller and a
-  playable space — and every checklist survive even a model that drops
-  them, and `NEX_MAX_SYSTEMS` bounds the decomposition so "make
-  everything" cannot happen.
-- **Recipes (`agent/recipes.py`)** are proven, engine-agnostic system
-  architectures (controller, inventory, enemy AI, weapon, quest, save,
-  HUD, audio, ...) with per-step *intents* and explicit **completion
-  checklists**. They carry no tool names: which MCP tool implements a
-  step is decided at plan time against the live registry.
-- **Every recipe ends with the playtest**: `Run the game → Observe →
-  Verify` are appended to each recipe centrally, and
-  `NEX_MAX_STEPS_PER_SYSTEM` deliberately bounds only the BUILD steps —
-  verification is not a budget item, so it can never fall off the end.
-- **Scope envelope (`scope_envelope`/`scope_block`)** is the anti-"I
-  improved the entire project" cage: ONE objective, the success criteria,
-  a step budget for the work (`NEX_MAX_STEPS_PER_SYSTEM`), and an explicit
-  DO-NOT list naming the other systems. Work that leaves the cage is named by
-  the critic (`scope_creep`), never silently accepted.
-- **Roles (`agent/roles.py`)** are the same model called with different,
-  tightly scoped jobs: DIRECTOR, PLANNER, BUILDER, REVIEWER, TESTER,
-  DEBUGGER, CRITIC. Each role sees only its own context (the Director
-  never sees the tool catalog; the Debugger sees one failed step) and
-  each role's output is **validated by deterministic code** before use.
-- **Bounded memory (`agent/project_state.py`)** is the model's
-  orientation — what exists, what works, what doesn't, what we're
-  building — never a chat log. Every collection is either **upserted**
-  (systems, assets, decisions, errors, failed tasks) or a **capped**
-  rolling window with an honest counter (`completed_count`). Runs report
-  their compaction to the UI; long autonomous sessions cannot poison
-  their own context.
-- **Mandatory verification.** "The tool call returned" is never proof.
-  A criterion is `evidence` (the step that produces it ran) until a clean
-  re-observation or the REVIEWER's verdict makes it `pass`. The
-  completion gate then refuses to report `COMPLETED` while the scoped
-  system still has unproven criteria — the run reports `PARTIAL` and
-  names exactly which criteria lack evidence from the running game.
+A checklist item says *"the HUD shows health"*. A quality bar says *"every
+readout stays legible against the busiest background in the game, and the HUD
+never hides the action"*. The first is a fact, the second is the difference
+between a prototype and a game somebody keeps playing — and a small model
+will not invent it, so the library supplies it.
 
-The UI shows the system map (planned / building / **built, not verified** /
-verified / broken) with the current objective, its checklist (criteria turn
-green only when proven) and the gate rows for anything unverified. A system
-whose work is done but whose criteria were never confirmed is labelled
-`unverified` — never `verified`.
+**The Director** (`agent/director.py`) turns a request into systems in
+dependency order, then hands the builder exactly ONE of them as a **scope
+envelope**: objective, steps, success criteria, quality bar, and a DO-NOT
+list naming the other systems. `NEX_MAX_STEPS_PER_SYSTEM` bounds the build
+steps — never the playtest steps, so verification cannot fall off the end of
+the budget.
 
-### Campaigns: a run works the game plan, not a single system
+**The blueprint** (`agent/blueprint.py`) is the deterministic document the
+builder works from: every step mapped to a *real* connected tool (`play_solo`,
+`take_screenshot`, `compile_blueprint` — the engine vocabulary is known, not
+guessed), the commands it depends on, the quality checks as their own kind,
+and the test plan. It is also what a run without an engine produces instead
+of pretending.
 
-`NEX_MAX_SYSTEMS_PER_RUN` (default 2) and `NEX_RUN_BUDGET_S` (default
-900s) bound how far one run gets: after a system's work is done the
-campaign scopes the next system and keeps going, announcing every step
-(`agent.system_started`, `agent.campaign_finished` /
-`agent.campaign_stopped` with the reason). Three things keep it honest:
+**The builder** works in batches: several tool calls per model call, halved
+automatically when the provider struggles, so a rate-limited provider cannot
+turn into one-request-per-step.
 
-* **Verification is not progress.** The campaign advances when the work
-  is done, not when it is proven; unproven systems are recorded as
-  `unverified` and the completion gate still names their criteria, so a
-  campaign run ends `PARTIAL` rather than claiming "AAA done".
-* **A quality target, not a feeling.** The critics score 1-10; `NEX_QUALITY_TARGET`
-  (default 0.6) is enforced in code — a PASS below the target becomes
-  another polish round (`agent.quality_gate`), bounded by
-  `NEX_MAX_QUALITY_ROUNDS`.
-* **The model is optional.** With no model (or a failed model call) the
-  plan comes from the RECIPE library matched against the live catalog by
-  deterministic rules (`agent.recipe_planned`) instead of a generic
-  skeleton: a create step finds a create tool, a configure step finds a
-  configure tool (never a create one), the playtest step finds the launch
-  tool and the observation step finds the capture tool. Steps whose
-  capability is missing are dropped and named, never invented.
-* **An approved plan is binding.** When the user approves a plan (START
-  BUILD), that graph is executed as approved: no campaign, no extra
-  system — the run does not extend work nobody signed off on.
+**The playtest** runs the actual game (see
+[§10](#10-playtesting-the-part-everybody-skips)) and **the observation step
+collects evidence**: screenshot, console/log, runtime state. Evidence is
+untrusted *data* — judged, never obeyed.
 
-### Without an engine: the BLUEPRINT
+**The reviewer** asks of each criterion: does the evidence prove it? A tool
+call that returned is `evidence`, never `pass`. **The tester** then attacks
+both the criteria and the quality bars, with the engine's classic defects
+supplied to it (a Roblox character that sinks, an Unreal pawn that never
+moves), and names which bar it is attacking.
 
-"No MCP servers are connected" is honest but useless on its own, so a
-blocked run now produces the **build blueprint**: every system in build
-order, the proven steps, the capability each step needs and the tool that
-would serve it (or "not connected"), the completion checklist, and the
-test plan that would prove it. It is published as `agent.blueprint`,
-persisted with the project (`state.blueprint_md`) and is explicitly a
-PLAN — nothing is reported as built.
+**The repair loop** puts findings into project memory as `known_bugs`, so the
+next plan repairs them instead of re-creating the same defect. A clean
+re-observation of the proving kind is what marks a bug fixed.
 
-Both entry points are directed. A run started from the agent loop gets a
-Director pass before planning; `START BUILD` on an approved plan
-(`server_run.run_agent_goal`, the route the UI drives) keeps that plan
-*exactly as approved* and still attributes it to the current system with
-its checklist — so an approved plan is executed as approved AND
-verifiable. Re-planning it would betray the approval; verifying it
-against nothing would betray the user.
+---
 
-### The capability boundary: connected is not trusted, trusted is not code execution
+## 5. The providers: who is allowed to think
 
-Nex's only action surface is MCP, and three separate decisions stand
-between a model output and the machine:
-
-1. **Server trust** (`NEX_TRUSTED_SERVERS`, strict mode by default):
-   connecting a server is an operator act, and it is not enough to call
-   its tools.
-2. **Tool classification** — every tool gets a category from its name and
-   from its (untrusted) MCP annotations, severity-max, plus the operator's
-   capability file. `CODE_EXECUTION` covers the tools that RUN code
-   (`execute_luau`, `run_python`, `run_script`, a terminal): whatever the
-   payload contains executes with the engine's privileges, so those tools
-   are never silently allowed. Ordinary editor tools (`create_script`,
-   `run_game`, `screenshot`, `read_console`, `save_place`) are classified
-   by exact token rules and stay friction-free.
-3. **The call's arguments** — `scan_arguments()` refuses OS primitives
-   inside an argument (`os.execute`, `io.popen`, `subprocess`,
-   `loadstring`, `dofile`, ...) and sensitive paths on *every* tool
-   (`~/.ssh`, `.aws`, `/etc/`, `.nex/` — Nex's own token), and
-   `scan_file_payload()` closes the laundering path where the payload is
-   written to a file and the file is executed.
-
-An autonomous run never approves anything for itself: a call that still
-requires confirmation stops the run, is reported (`agent.
-confirmation_required`) and appears in the UI. Two operator levers say
-"yes, deliberately": `NEX_ALLOW_CODE_EXECUTION=<server>` for code/process
-tools, `NEX_ALLOW_CONFIRMATIONS=<server>` for destructive/network/unknown
-names, or a per-tool `{"approved": true}` pin in the capability file.
-Escape payloads are refused even with every lever pulled
-(`test_escape.py`, section C).
-
-## The OBSERVE loop (build -> run -> observe -> fix -> verify)
-
-"Build succeeded" is not "the game works". Nex judges the RUNNING game:
-
-1. **Observe.** When an executed tool is a runtime observation (name
-   semantics: `screenshot`/`capture`, `logs`/`console`, `performance`/
-   `metrics`, `inspect_*`/`*_state`), its result is captured as a
-   structured Observation (`agent/observations.py`) — bounded text +
-   payload — stored in the project memory and published as an
-   `agent.observation` event (the UI shows it in the observation pane).
-   Observation text is untrusted data: judged, never obeyed.
-2. **Critique.** The critic (`find_observations` in `agent/critic.py`)
-   scans the LATEST observation per tool for structural defects:
-   crash signals in logs/metrics, empty scenes, physics defects
-   (floating, embedded, stuck, NaN positions), empty captures. Major
-   findings drive a REPLAN — the improvement planner receives the open
-   defects as project memory and an explicit repair-first instruction.
-3. **Remember.** Defects become `known_bugs` in the project state
-   (survive across runs + checkpoints). When a clean re-observation of
-   the proving kind arrives, the bug is marked `fixed` — the
-   re-observation is what proved the repair.
-4. **Experiment safety.** Before every improvement run the workspace is
-   snapshotted (tar, `agent/checkpoints.py`: `snapshot_workspace` /
-   `restore_workspace`, VCS + dependency noise excluded, keep-5
-   pruning). If the run makes things WORSE (more failed tasks than
-   before), the files are rolled back and the decision is recorded —
-   `agent.experiment_rolled_back`.
-
-The UI's command-center strip (Build / Verify / Runtime chips) and the
-collapsible observation rows track the loop live.
-
-To script against the server, export the token, e.g.
-`export NEX_AUTH_TOKEN="$(cat ~/.nex/server_token)"` and send it as
-`X-Nex-Auth`.
-
-## NEX 2.0 — Nex develops, it doesn't just generate
-
-Nex is an AI development agent: it takes a high-level idea and turns it
-into a genuinely developed project — planning, implementation, testing,
-criticism, iteration, and polish are all part of the product.
-
-**Understand before building.** `POST /api/project {goal}` runs the
-design stage first: the model answers the design questions (concept,
-genre, core loop, pillars, systems, world, audio, architecture,
-milestones, dependencies, acceptance criteria, tests, quality gates) as
-a STRUCTURED design document (`agent/design.py` — data, not Markdown),
-and a draft task plan is validated against the live MCP registry.
-Nothing is built until you approve.
-
-**The Plan Page.** `agent.design_ready` renders a real page in the UI:
-pillars, loop, systems, world, milestones, quality gates, honest
-dependency gaps, and the draft plan — with a START BUILD button
-(`POST /api/project/<id>/build`). The approved plan is PERSISTED with
-the project, and START BUILD builds EXACTLY that plan — no silent
-re-planning between approval and execution. If the critic later says
-REPLAN, the next plan is created deliberately (Plan B), never by
-accident. Nex keeps the face visible while it works; it never becomes
-a soulless terminal.
-
-**Build -> critique -> improve (bounded).** After building, the critic
-(`agent/critic.py`) asks "is this actually good?" — technical
-(unverified completions, stalls), design (work that contradicts the
-design doc or repeats the same pattern — structural repetition mining,
-never a hardcoded recipe), quality (placeholder content, open quality
-gates) — optionally merged with an LLM critique. PASS -> done.
-WEAK -> POLISH or REPLAN, and the agent goes back to work through the
-same pipeline. Bounded by `max_critique_cycles`; Nex doesn't churn
-forever, and it doesn't get a free pass after one iteration.
-
-**Design stability.** Design decisions can be LOCKED
-(`ProjectState.lock_decision`). The planner sees them; any step that
-re-litigates a locked decision is skipped by the deterministic design
-guard — Nex will not "helpfully" add a health bar 40 minutes after you
-locked "no health bar".
-
-**Persistent project memory.** Every project persists its design,
-decisions, milestones, critique cycles and completion state
-(`~/.nex/projects/<id>.json`; `GET /api/projects`,
-`GET /api/project/<id>`). Close the conversation, come back tomorrow,
-and Nex resumes from where the work actually stands.
-
-The face reacts to all of it: focused while designing, proud on a PASS
-verdict, confused on a WEAK one — and calm the rest of the time.
-
-## Capability boundary (hard invariant)
-
-Nex's AI acts ONLY through explicitly connected MCP servers. There is
-no flag, env var, or runtime call that turns this off
-(`mcp/policy.py` — `MCP_ONLY = True`).
-
-- The model-visible MCP surface (`/mcp` `tools/list`) contains ONLY:
-  MCP introspection tools + every connected server's tools.
-  Filesystem/shell/host tools are server infrastructure and are never
-  exposed to the agent.
-- MCP `resources/` expose protocol metadata only (`nex://about`,
-  `nex://tunnels`, per-server info, curated tool guides) — no
-  filesystem, log, workspace, or host-state resources.
-- **Layer separation (assistant vs. game agent).** The assistant layer
-  (chat, voice, face, observer) can SPEAK but never ACT: `observer.py`
-  imports no subprocess/registry/tools/MCP module and its only side
-  channel is publishing `speak.*` events to the bus. The action right
-  lives exclusively in the MCP gateway (`authorize()` → upstream call),
-  reachable only through an authorized plan step. `test_escape.py`
-  (section A7) proves it structurally (import scan) and behaviorally
-  (only speak events are ever emitted).
-- **The gateway order is fixed:**
-  `CONNECTED → SERVER TRUST (strict registry) → server allowlist →
-  tool allowlist → capability classification (heuristics + annotations
-  + operator registry, severity-max) → confirmation → MCP call`.
-
-## Files
-
-- `server.py` — Python stdlib HTTP server, SSE stream, REST API, Ollama
-  client (via `urllib`). No third-party Python packages.
-- `agent/director.py` — the Game Director: request -> systems, build
-  order, scope envelope (one objective, success criteria, DO-NOT).
-- `agent/recipes.py` — the proven system-architecture library with
-  per-system completion checklists (engine-agnostic, no tool names).
-- `agent/roles.py` — the specialized roles (planner/reviewer/tester/
-  debugger/critic) and their tightly scoped context builders.
-- `agent/blueprint.py` — the deterministic build blueprint (systems,
-  required capabilities, checklists, test plan) for runs without an
-  engine.
-- `agent/providers.py` — the provider layer: planner/builder roles, the
-  failover chains, client-side rate budgets, `.env` + `~/.nex/providers.json`
-  config, and the live status the UI reads. HTTP only — no OS surface.
-- `provider_chip.js` — the "who is building right now" chip (pure label
-  logic, covered by the node test harness).
-- `test_providers.py` — provider-layer tests: keys, roles, failover,
-  budget, batching, honesty when everything is down, MCP-only boundary.
-- `.env.example` — provider keys template (copy to `nex/.env`).
-- `test_director.py` — Director-layer tests: recipes, decomposition,
-  scope cage, bounded memory, roles, mandatory verification.
-- `mcp_engines.py` — **MCP-only** curated guide adapter for the Roblox
-  Studio and Unreal Engine MCP tools. Enriches the live `tools/list`
-  with rich explanations (what/when/params/examples/caveats), and
-  powers the `mcp://<platform>/guide` resources + the
-  `*_explain_tools` / `*_build_recipe` prompts. Does not touch the chat
-  persona or sandbox tools.
-- `index.html` — minimal markup, canvas + hidden debug panel.
-- `style.css` — black background + minimal UI affordances.
-- `webgl.js` — WebGL2 renderer. SDF-based rounded rectangles; no images,
-  no SVG, no GIFs, no sprite sheets.
-- `animations.js` — state machine, idle behavior library + scheduler,
-  multi-phase animations, easing library.
-- `app.js` — application glue: SSE, microphone (`getUserMedia`),
-  `AudioContext` + `AnalyserNode`, procedural music loop, debug panel,
-  keyboard shortcuts, mouse attention.
-
-## Providers — the planner and the builder are different roles
-
-The model layer is split in two, and the split is the point:
-
-```
-USER -> PLANNER (reasoning, architecture, decomposition)
-          |
-        exact build plan
-          |
-        BUILDER (does the work, often, in batches)
-          |
-        MCP only -> Roblox MCP / Unreal MCP
-```
+The model layer is split by *how often* a model is called, because that is
+what costs money and what runs into rate limits:
 
 | Role | Default | Why |
 | --- | --- | --- |
-| **Planner** | local model (`OLLAMA_MODEL`), or **GPT** when a key is set | called a handful of times per run: design document, systems, tests |
+| **Planner** | **GPT** when a key exists, else local | called a handful of times per run: design document, systems, tests, task graph |
 | **Builder** | **NVIDIA NIM** (`nvidia/nemotron-3-super-120b-a12b`) | called during the build loop; NIM is fast and free, but rate-limited |
+| **Fallback** | **Ollama locally** (`gpt-oss:20b`) | always present, always works |
 
-The local default is `gpt-oss:20b` — the small model the whole architecture
-is built around (the model is the reasoner, never the source of quality).
+Both roles are configurable down to the model id, the endpoint and the RPM
+budget — in the settings page or in `.env`. Model lists are fetched **live**
+(`/v1/models`, `/api/tags`), so the ids you see are the ones the endpoint
+really serves.
 
-Both are configurable per role (settings page → *Models & providers*), down
-to the model id, the endpoint and the RPM budget. A provider list is fetched
-**live** (`/v1/models` / `/api/tags`) so the model ids you see are the ones
-the endpoint actually serves.
+**Chains are explicit.** Only providers named in a role's `fallbacks` list
+are ever tried, so adding a provider or a catalog entry can never silently
+become the fallback. The one addition that is always made: **the local model
+is appended as the terminal fallback of every chain.** A NIM-only setup gets
+`['nim', 'local']` without any configuration, because "NVIDIA is rate-limited
+and nothing else is configured" must not be a dead end — the local model takes
+over exactly like GPT would.
 
-### Failover — the plan never restarts
+**Keys are bound to a host.** A key is remembered *and* the host it was
+entered for. Point the endpoint somewhere else and the key stops being sent
+(`key_mismatch`, visibly red in the UI) until you type it again for that host.
+That closes the obvious way to steal a key: change the base URL to your own
+server and wait for the `Authorization` header.
+
+**Provider URLs are not free-form**, because every call carries a credential:
+`http`/`https` only, no credentials inside the URL, cloud-metadata and
+link-local targets refused (`169.254.169.254`, `metadata.google.internal`,
+`fd00:ec2::254`, …), a URL pointing back at NEX itself refused, redirects
+followed **only within the same host**, and `NEX_PROVIDER_HOSTS` turns the
+whole thing into a strict allowlist.
+
+**Chain-of-thought is never the answer.** A reasoning model whose content got
+cut off returns its scratchpad; that is speculation, and it is thrown away as
+`bad_response` instead of being handed back to the agent as "the model's
+decision".
+
+**The conversation obeys the same rules as the build.** The streaming chat
+goes through the provider layer too (`Router.chat_stream`), so a rate-limited
+planner hands the answer to the next provider in the chain instead of failing,
+the call spends the RPM budget like any other, and the same `provider.*`
+events appear. Two details are deliberate: a provider is only swapped while
+nothing has been streamed yet (a second provider would repeat the visible
+answer), and a stream that dies mid-sentence ends there and is reported as
+trouble rather than restarted.
+
+---
+
+## 6. The 40 RPM problem
+
+![The 40 RPM budget](docs/img/rpm-budget.svg)
+
+NVIDIA publishes no usage endpoint and no per-model quota; ~40 requests/minute
+is the community baseline for a free key. So NEX counts the requests itself,
+and — more importantly — it does not spend everything it is allowed to.
+
+```
+soft cap = round(rpm x (1 - reserve))      40 RPM, reserve 25%  ->  30
+```
+
+Below the soft cap calls go out normally. Inside the reserve, the router looks
+for a candidate that can serve instead; if one exists the request **routes
+around** (`paced_skips++`), and if none exists it **chills** for a bounded
+moment (`max_chill_s`, 8 s) instead of sleeping forever. `min_interval_s`
+(1 s) keeps two calls from being hammered into the same instant. The point is
+not politeness: the next minute has budget again, so a burst of real work does
+not stall behind a wall of 429s.
+
+When the window is genuinely full, NEX marks the provider rate-limited and
+fails over — and the cooldown is `max(Retry-After, seconds_until_slot(),
+2 s)`, capped at 120 s. So "retry NVIDIA once the minute is over" is not a
+hope; it is what the cooldown computes.
+
+Every decision is visible:
+
+```
+provider.paced      {provider, reason: "headroom reserve (31 of 40 used, soft cap 30)",
+                     chill_s, purpose, budget_left}
+provider.trouble    a NON-rate-limit failure, with what happens next
+provider.recovered  the primary serves again after a detour: {provider, was, model}
+```
+
+Pacing is deliberately quiet in the UI (no toast, just the chip), because
+saving quota is not an incident. Problems are loud: a rate limit shows a
+countdown in the chip, and anything that is *not* a rate limit is announced as
+a toast — the user is told what failed and which model continues meanwhile.
+
+---
+
+## 7. Failover: the plan never restarts
+
+![Failover](docs/img/failover.svg)
 
 ```
 NIM: 429 / timeout / 5xx / RPM exhausted
         |
-        +--> GPT builds instead (same plan, same tasks)
+        +--> the next provider builds the SAME plan (same messages, same task graph)
         |
-        +--> after the cooldown NIM is the builder again
+        +--> when the window has room, NIM is the builder again (provider.recovered)
 
-NIM: 401 / 403  (key rejected — a CONFIG fault, not capacity)
+NIM: 401 / 403   (key rejected — a CONFIG fault, not capacity)
         |
-        +--> the same failover happens (a build is not lost to a typo)
-        +--> but it is announced: provider.auth_error, a red chip mark and a
-             toast, and the provider is parked for NEX_AUTH_BLOCK_S (900s)
-        +--> unblocked instantly by fixing the key (or the endpoint)
+        +--> failover still happens (a build is not lost to a typo)
+        +--> but it is announced: provider.auth_error, a red chip mark, a toast,
+             and the provider is parked for NEX_AUTH_BLOCK_S (900 s)
+        +--> unblocked instantly by fixing the key or the endpoint
 ```
 
-NVIDIA publishes no usage endpoint and no per-model quota (credits were
-removed in favour of unpublished rate limits, ~40 RPM is the community
-baseline), so Nex counts the requests itself:
-
-* **sliding-window budget per provider** (`NEX_NIM_RPM`, default 40) — when
-  the budget is spent the router routes around the provider *before* the
-  upstream 429 happens;
-* **cooldown with automatic recovery** — `Retry-After` is honoured, other
-  errors get 5–120s depending on the kind (timeout/server/auth);
-* **live state** — `available` / `rate_limited` / `cooling` / `error` /
-  `no_key`, exposed to the UI (`/api/providers`, `provider.*` SSE events);
-* **fallback order** — builder: `NIM -> GPT -> local`; planner:
-  `GPT -> NIM -> local`. The local model is always last and always works.
-  The chain is **explicit**: only providers named in the role's `fallbacks`
-  list are ever tried, so a new provider (or a new catalog entry) can never
-  silently become the fallback. A configured-but-unnamed provider can still
-  be *chosen* as the primary; it just never enters a chain on its own.
-  Set it in the settings page or with `NEX_BUILDER_FALLBACKS` /
-  `NEX_PLANNER_FALLBACKS` (comma-separated).
-
-Failover replaces the *hands*, never the plan: the same messages are sent to
-the fallback provider and the loop continues exactly where it was.
+The important part is what does *not* happen: the fallback does not restart
+planning, re-open the design document, or re-scope the system. It receives the
+same messages at the same position in the task graph and keeps going
+(`plan_continues: true`). A rate limit changes the hands, never the plan.
 
 Two more honesty rules in this layer:
 
-* **chain-of-thought is never the answer.** A reasoning model whose content
-  got cut off returns its scratchpad; that is speculation and it is thrown
-  away (`bad_response`) instead of being handed back to the agent as "the
-  model's decision".
-* **the rate budget belongs to the process, not to the settings.** Editing a
+* **The rate budget belongs to the process, not to the settings.** Editing a
   provider (endpoint, model, RPM) keeps the sliding window and the cooldowns —
   a settings change is not a quota reset.
+* **Batches, not tiny calls.** Failures of the same wave are diagnosed in ONE
+  call; if the batched answer is unusable the chunk is halved, never split
+  into one call per job. `NEX_BATCH_MAX_CALLS` (3) is a hard cap, so batching
+  can cost a retry, never multiply requests.
 
-### Batches, not tiny calls
+---
 
-A rate-limited builder must not spend one request per broken step. Failures
-of the same wave are collected and diagnosed in **one** call
-(`agent.repair_batched`); only a single pending failure gets its own focused
-call. If a batched answer is unusable, the chunk is **halved** — never split
-into one call per job:
+## 8. Memory that cannot grow forever
+
+![Memory](docs/img/memory.svg)
+
+A local model has a small context, so project memory is not a chat log — it is
+what exists, what works, what does not, and what is being built. Every
+collection is either **upserted** (systems, assets, decisions, errors) or a
+**capped** rolling window, and compaction reports what it dropped instead of
+silently forgetting:
 
 ```
-8 failures -> 1 batched call -> unusable? -> 2 half calls -> hard cap
-             3 provider requests TOTAL (NEX_BATCH_MAX_CALLS, default 3)
+completed 60 · failed 12 · assets 30 · decisions 25 · pending 40
+systems 24 · knowledge 40 · known bugs 50 · observations 30
+criteria 12 per system · quality bars 6 per system
 ```
 
-Anything that still has no answer stays without one: the deterministic
-repairs take over and the step fails honestly. Batching can cost a retry,
-never a repair — and it can never multiply requests.
+Resume is treated as a *claim*, not a fact: after a restart the world is
+re-checked (are the servers up? do the tools still exist?) before a checkpoint
+is trusted — and a workspace snapshot is taken before every improvement run,
+so a run that makes things **worse** is rolled back
+(`agent.experiment_rolled_back`).
 
-### Keys
+---
 
-Highest precedence first:
+## 9. The action surface is MCP
+
+![The MCP boundary](docs/img/mcp-boundary.svg)
+
+`CONNECTED != TRUSTED`, and `TRUSTED != CODE EXECUTION`. Three independent
+decisions stand between a model output and your machine:
+
+1. **Server trust** (strict mode by default) — connecting a server is an
+   operator act, and it is not enough to call its tools. The model can never
+   extend the registry.
+2. **Tool classification** — name heuristics + MCP annotations + the
+   operator's capability file, with the *more dangerous* value winning at
+   every step. A tool named `delete_project` claiming `readOnlyHint: true` is
+   still destructive. Unclassifiable tools require confirmation. Code
+   execution tools are never silently allowed.
+3. **The call's arguments** — OS primitives inside an argument
+   (`os.execute`, `io.popen`, `subprocess`, `loadstring`, `dofile`, …) and
+   sensitive paths (`~/.ssh`, `.aws`, `/etc/`, `.nex/` — NEX's own token) are
+   refused on *every* tool, including the write to a file that would be
+   executed later.
+
+An autonomous run never approves anything for itself: a call that still
+requires confirmation stops the run and is reported in the UI. Operators have
+two deliberate levers — `NEX_ALLOW_CODE_EXECUTION=<server>` and
+`NEX_ALLOW_CONFIRMATIONS=<server>` — and the model has neither.
+
+`test_escape.py` makes an LLM-style attacker try every reachable escape path
+(internal tool names, `__internal__` prefixes, ghost servers, REST shim, plan
+validation, LLM diagnosis, tunnel registration, SSRF URLs, stdio commands,
+untrusted-but-connected servers, cookie bypass) and asserts that nothing
+outside "authorized MCP call on a trusted server" ever causes an effect — with
+canaries and positive controls, so a broken gate cannot fake a pass.
+
+---
+
+## 10. Playtesting: the part everybody skips
+
+"Play Solo started" is not a playtest. **NEX ships the knowledge of what to
+look at per engine** (`mcp_engines.py`), because that is exactly the kind of
+thing a small model cannot be expected to derive:
+
+* **Roblox Studio** — the character standing *on* the floor or a stud above
+  it, the camera passing through a wall, parts that should be anchored,
+  a player stuck in a corner, the console line printed before the failure,
+  and whether `stop_play` leaves the place clean.
+* **Unreal Engine** — whether the controlled pawn actually moves
+  (`PossessedBy`, input mapping, collision), the camera clipping and popping,
+  anything floating or sinking, navigation/AI not running at all, and the
+  output log *before* touching anything.
+
+Each platform's guide also states what is *not* proof ("PIE started" is not
+"the game works") and the classic mistakes ("fixing by guessing"). The
+guidance flows into the prompts that judge the run: the reviewer gets it as
+"what to look for in this engine", the adversarial tester as "what actually
+goes wrong in this engine". The observation step pairs it with real tools
+(`take_screenshot`, `get_console_output`, `get_output_log`, `pie_start`), and
+the curated tool guides — 15 Roblox tools, 24 Unreal tools, each with purpose,
+when-to-use, parameters, example and caveats — are how the builder knows which
+tool implements a step in the first place.
+
+Engine tool names are also first-class in the classifier and the planner:
+`play_solo` and `pie_start` are **test** tools (never gated, because that is
+the step the whole quality path depends on), `stop_play`/`pie_stop` end a run,
+`open_level`/`save_level` modify a project, `compile_blueprint` builds it. A
+false "test" costs nothing; a tool classified `unknown` costs a whole system,
+because it stalls on a confirmation prompt.
+
+---
+
+## 11. Configuration
+
+Keys, in precedence order:
 
 1. process environment (`NVIDIA_API_KEY`, `OPENAI_API_KEY`, …)
 2. `.env` — `nex/.env`, repo-root `.env`, `~/.nex/.env`
-   (template: `nex/.env.example`)
 3. settings page → `~/.nex/providers.json` (0600)
 
-Keys are **never** sent back to the browser: the API returns them masked
-(`nvapi-…9f2`). A key is also **bound to the host it was entered for**: if
-the endpoint is later pointed somewhere else, the key stops being sent
-(`key_mismatch`, visibly red in the UI) until it is typed again for the new
-host. That closes the obvious way to steal a key: change the base URL to your
-own server and wait for the Authorization header.
-
-Provider URLs are not free-form either — they are outbound requests with a
-credential attached, so:
-
-* `http`/`https` only, no credentials inside the URL;
-* cloud metadata and link-local targets are refused
-  (`169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254`,
-  `100.100.100.200`, `fe80::/10`) — that is the classic SSRF escalation;
-* a base URL pointing at Nex itself is refused (loop);
-* **redirects are only followed within the same host** — otherwise a 302
-  would hand the Authorization header to a third party;
-* `NEX_PROVIDER_HOSTS=host1,host2` turns the whole thing into a strict
-  allowlist (loopback is always allowed, so local Ollama keeps working).
-
-And whatever the provider answers, it is text: the builder's only action
-surface is the MCP registry — it cannot reach the machine.
-
-Environment knobs:
+The full template with comments is [`nex/.env.example`](.env.example). The
+short version:
 
 ```
-NVIDIA_API_KEY=nvapi-...            # builder (build.nvidia.com)
-OPENAI_API_KEY=sk-...               # planner
-OLLAMA_HOST / OLLAMA_MODEL          # local fallback
-NEX_PLANNER_PROVIDER=local|gpt|nim  # default: gpt if a key exists, else local
-NEX_BUILDER_PROVIDER=nim|gpt|local  # default: nim if a key exists, else local
+NVIDIA_API_KEY=nvapi-...             # builder (build.nvidia.com)
+OPENAI_API_KEY=sk-...                # planner
+OLLAMA_HOST / OLLAMA_MODEL           # local fallback (gpt-oss:20b)
+NEX_PLANNER_PROVIDER=local|gpt|nim
+NEX_BUILDER_PROVIDER=nim|gpt|local
 NEX_PLANNER_MODEL / NEX_BUILDER_MODEL
-NEX_NIM_RPM=40                      # client-side budget for the NIM free tier
-NEX_BATCH_MAX_CALLS=3               # hard cap for one batched diagnosis
-NEX_AUTH_BLOCK_S=900                # park a provider whose key was rejected
+NEX_NIM_RPM=40                       # client-side budget for the NIM free tier
+NEX_BUILDER_FALLBACKS=gpt,local       # explicit chain (local is always terminal)
+NEX_AUTH_BLOCK_S=900                 # park a provider whose key was rejected
+NEX_BATCH_MAX_CALLS=3                # hard cap for one batched diagnosis
 NEX_PROVIDER_HOSTS=                  # optional strict allowlist for endpoints
-NEX_BUILDER_FALLBACKS=gpt,local      # explicit chain (nothing implicit)
-NEX_PROVIDERS_FILE=~/.nex/providers.json   # where the settings page stores
+NEX_MAX_SYSTEMS_PER_RUN=2            # how far one run gets
+NEX_RUN_BUDGET_S=900                 # wall-clock budget for one run
+NEX_ALLOW_CODE_EXECUTION=<server>    # operator lever, per server
 ```
 
-### The chip
+---
 
-Top right of the UI: which provider is **building right now**, plus the model
-that is *really* answering (after a failover that is the fallback's model, not
-the configured one), with the planner on a dim second line. Amber + pulse
-means a failover is running, grey is the local model, red means no provider at
-all. A **rejected key and a key bound to another host get their own red mark**
-(`⚠key`) so a config fault cannot be mistaken for a capacity problem. The
-tooltip carries the quota (`28/40 RPM`), the cooldown, the auth block and the
-reason the previous provider stepped aside.
+## 12. The UI
 
-## Ollama
+The face is WebGL2 (SDF rounded rectangles — no images, no sprites), driven by
+a state machine with an idle behaviour library. It reflects what is happening:
+focused while designing, proud on a PASS verdict, confused on a WEAK one,
+calm the rest of the time.
 
-Optional. Configure via env:
+The **provider chip** (top right) shows which provider is *building right
+now*, the model that is *really* answering (after a failover that is the
+fallback's model, not the configured one), the planner on a dim second line,
+the quota (`12/40 this minute`), the cooldown countdown (⏳), the headroom
+reserve (🌱) and the auth block. Amber + pulse means a failover is running;
+grey is the local model; red means no provider at all; a **rejected key or a
+key bound to another host gets its own red mark** so a config fault cannot be
+mistaken for a capacity problem.
+
+Beyond that: the **Plan Page** (design document + draft plan + START BUILD),
+the **system map** (planned / building / built-not-verified / verified /
+broken), the **observation pane** (screenshots, logs, state — collapsed and
+labelled as data), and the **debug panel** (backtick) for forcing states and
+idle behaviours.
+
+Backend → frontend is a JSON SSE stream (`/api/events`): `state`, `speak`,
+`agent.*`, `provider.*`. The frontend never asks for animation parameters —
+those are generated locally by the behaviour engine.
+
+---
+
+## 13. Tests
+
+No test framework, no fixtures: each file is a script that prints one `ok`
+line per assertion and exits non-zero on failure.
 
 ```
-OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=gpt-oss:20b
+cd nex
+for t in test_agent.py test_architecture.py test_capability.py test_critic.py \
+         test_design.py test_director.py test_escape.py test_mc.py test_mcp.py \
+         test_mcp_engines.py test_model_planner.py test_observe.py \
+         test_providers.py test_security.py test_settings.py \
+         test_stdio_mcp.py test_upstream.py test.py; do
+    python3 "$t" || break
+done
+node test.js
+
+# needs a running server started with NEX_TRUSTED_SERVERS=fake-roblox:
+python3 test_mcp_tunnel.py
 ```
 
-The face animates entirely offline. Without Ollama, a chat turn surfaces a
-visible ERROR state, delivers a short "can't reach the model" fallback reply
-(speak.delta → speak.end), and returns to IDLE — the face never sticks in
-SPEAKING.
+The suite covers the security model adversarially (an LLM-style attacker is
+run against the gateway), the provider layer (pacing, recovery, failover,
+budgets, batching, key/host binding, SSRF), the Director and critic layers
+(recipes, scope cage, quality bars, bounded memory, mandatory verification),
+the MCP engines and tunnels, and the browser-side chip and state logic.
 
-## Backend → frontend events (SSE)
+Current state: **1482 assertions across the Python suite, 339 in the node
+harness, 0 failures.** `test_escape.py` alone is 99 of them, and it is
+deliberately hostile: it tries to escape through every path it can reach.
 
-Sent as JSON over `text/event-stream`:
+---
+
+## 14. Files
 
 ```
-data: {"type":"state","state":"LISTENING","params":{},"ts":...}
-data: {"type":"speak","text":"hello","ts":...}
+nex/
+├── server.py              stdlib HTTP server, SSE, REST API, Ollama client
+├── index.html, style.css, app.js, webgl.js, animations.js
+├── settings.html          keys, models, roles
+├── provider_chip.js       "who is building right now" (pure label logic)
+├── mcp_engines.py         curated Roblox/Unreal knowledge: tools + playtests
+├── tunnels.py             MCP tunnel registration (allowlisted, fail-closed)
+├── mcp/
+│   ├── policy.py          MCP_ONLY, classification, confirmation, scan_arguments
+│   ├── capability.py      tool categories, severity-max with annotations
+│   └── registry.py        what actually exists right now
+├── agent/
+│   ├── design.py          the design document (data, not Markdown)
+│   ├── director.py        request -> systems, scope envelope, quality bars
+│   ├── recipes.py         15 system architectures + quality bars
+│   ├── blueprint.py       deterministic blueprint + test plan
+│   ├── roles.py           DIRECTOR/PLANNER/BUILDER/REVIEWER/TESTER/DEBUGGER/CRITIC
+│   ├── planner.py, model_planner.py, task_graph.py
+│   ├── loop.py            the run loop: build -> run -> observe -> repair
+│   ├── server_run.py      the server-side run (design, plan, build)
+│   ├── observations.py    screenshots/logs/state as structured evidence
+│   ├── critic.py          findings, judges, adversarial tester
+│   ├── verification.py    the completion gate
+│   ├── checkpoints.py     snapshots, resume reconciliation, rollback
+│   ├── providers.py       roles, chains, pacing, budgets, key binding
+│   └── project_state.py   bounded memory
+├── docs/img/              the diagrams in this README (SVG, generated —
+│                          `python3 docs/img/_make_diagrams.py` regenerates)
+└── test_*.py, test.js     the suite
 ```
 
-The frontend never asks the backend for animation parameters — those are
-generated locally by the behavior engine.
+---
 
-## Debug panel
+## 15. Honest limits
 
-Press `` ` `` (backtick) to toggle the developer panel. Buttons let you
-force any state, force individual idle behaviors, toggle the microphone,
-toggle the music loop, trigger WAKE / ERROR, and send chat messages.
+* **A free NIM key is for prototyping.** Unpublished per-model limits, no
+  usage API, and ~40 RPM as the baseline. NEX paces and counts, but it cannot
+  raise your quota — production use wants a paid tier or a local model.
+* **Playing is not the same as judging.** NEX captures screenshots, logs and
+  runtime state and judges them; it does not feel whether a jump is *fun*.
+  The quality bars make the criteria explicit and checkable, which is as far
+  as an automatable loop can honestly go.
+* **The local model is the weakest link, not the architecture.** Every stage
+  degrades gracefully without a model (recipes decide, rules judge), but a
+  stronger planner still produces better *ideas*.
+* **MCP servers are third-party code you chose to trust.** NEX refuses what
+  it can see (paths, OS primitives, untrusted annotations, unknown tools) —
+  the editor keeps the last word.
+
+---
+
+Personal project. The face is the interface; the discipline is the product.

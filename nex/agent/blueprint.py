@@ -37,10 +37,11 @@ _CAP_RULES = (
                 "test", "tests", "measure")),
     ("observe", ("screenshot", "capture", "log", "logs", "console",
                  "observe", "inspect", "profile", "metrics", "telemetry",
-                 "performance", "monitor")),
+                 "performance", "monitor", "output")),
     ("build", ("build", "compile", "package", "bake", "cook", "deploy",
                "export")),
-    ("run", ("run", "launch", "play", "playtest", "simulate")),
+    ("run", ("run", "launch", "play", "playtest", "simulate", "pie",
+             "session", "runtime")),
     ("write_code", ("script", "code", "luau", "lua", "python", "file",
                     "module", "source")),
     ("create", ("create", "add", "spawn", "generate", "import", "insert",
@@ -49,6 +50,34 @@ _CAP_RULES = (
                    "connect", "adjust", "attach", "parent", "tune", "enable",
                    "disable")),
 )
+
+
+# Tool-name vocabulary per capability class, REAL engine first. The generic
+# intent rules below answer "which word of the intent matches a tool?", this
+# table answers the better question: "which of the connected tools is the
+# tool an engine developer would actually use for this?" — so a plan names
+# `play_solo`/`pie_start` for a run step instead of whatever happens to
+# share a word with the sentence.
+_TOOL_TOKENS: Dict[str, tuple] = {
+    "run": ("play_solo", "pie_start", "start_pie", "play_in_editor",
+            "start_play", "run_game", "launch", "playtest", "play"),
+    "observe": ("take_screenshot", "screenshot", "capture", "get_output_log",
+                "get_console_output", "get_logs", "console", "logs",
+                "profile", "metrics"),
+    "verify": ("verify_game", "verify_asset", "validate", "check", "assert",
+               "automation_test", "run_tests", "measure"),
+    "build": ("compile_blueprint", "build_project", "package_project",
+              "compile", "build", "package", "bake", "cook"),
+    "create": ("create_part", "create_instance", "create_character",
+               "create_actor", "spawn_actor", "create_blueprint",
+               "create_level", "insert_model", "create", "spawn", "insert",
+               "add_component", "instantiate"),
+    "configure": ("set_property", "set_actor_property", "set_component_property",
+                  "set_actor_transform", "set_attributes", "set", "apply",
+                  "assign", "parent", "tag", "weld"),
+    "write_code": ("create_script", "edit_script", "set_script_source",
+                   "execute_luau", "script", "code", "module", "source"),
+}
 
 
 def _words(text: str) -> List[str]:
@@ -94,8 +123,18 @@ def _match_tool(cap: str, intent: str, tool_names: List[str]) -> str:
     needs a screenshot capability, and `engine.screenshot` provides it" —
     or "nothing connected provides it".
     """
-    keys = _rule_words().get(cap, ())
+    # 1) the real-engine vocabulary first (exact tool-name shapes)
+    tokens = _TOOL_TOKENS.get(cap, ())
     best = ""
+    for tok in tokens:
+        for name in tool_names or []:
+            if tok in name.lower():
+                if not best or len(name) < len(best):
+                    best = name
+        if best:
+            return best
+    # 2) the generic intent vocabulary
+    keys = _rule_words().get(cap, ())
     for name in tool_names or []:
         low = name.lower()
         for k in keys:
@@ -131,6 +170,7 @@ def build_blueprint(goal: str,
     systems: List[Dict[str, Any]] = []
     for s in (game_plan.systems if game_plan is not None else []):
         steps = []
+        quality = [str(q) for q in (getattr(s, "quality", None) or [])]
         for st in (getattr(s, "steps", None) or []):
             intent = st.get("intent", "") if isinstance(st, dict) else str(st)
             cap = capability_for_intent(intent)
@@ -152,6 +192,8 @@ def build_blueprint(goal: str,
             "provides": s.provides,
             "risks": list(getattr(s, "risks", []) or []),
             "checklist": list(getattr(s, "checklist", []) or []),
+            # The standard, not the pass/fail criteria: what "good" means.
+            "quality": quality,
             "steps": steps,
             "ready": bool(steps) and all(x["status"] == "ready"
                                          for x in steps),
@@ -179,9 +221,17 @@ def test_plan(systems: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
     out: List[Dict[str, str]] = []
     for s in systems or []:
+        # Quality bars first: they are what separates a prototype from a
+        # game, and they are checkable by looking at the running game.
+        for q in s.get("quality", []) or []:
+            out.append({"system": s.get("id", ""), "kind": "quality",
+                        "criterion": str(q),
+                        "proves": "judged against the running game "
+                                  "(screenshot / log / feel)"})
         for c in s.get("checklist", []) or []:
             out.append({"system": s.get("id", ""),
                         "criterion": c,
+                        "kind": "criterion",
                         "prove_by": "run the game and observe: " + c,
                         "status": "unproven"})
     return out
@@ -214,6 +264,12 @@ def blueprint_markdown(bp: Dict[str, Any]) -> str:
             lines.append("Done only when ALL of these are proven:")
             for c in s["checklist"]:
                 lines.append("- [ ] %s" % c)
+        if s.get("quality"):
+            lines.append("")
+            lines.append("Quality bar (a build that misses these is not "
+                         "finished):")
+            for q in s["quality"]:
+                lines.append("- [ ] %s" % q)
         lines.append("")
     missing = bp.get("missing_capabilities") or []
     if missing:
@@ -222,8 +278,16 @@ def blueprint_markdown(bp: Dict[str, Any]) -> str:
                   ""]
     tests = bp.get("tests") or []
     if tests:
-        lines += ["## Test plan", ""]
-        for t in tests:
-            lines.append("- **%s**: %s" % (t["system"], t["criterion"]))
+        quality = [t for t in tests if t.get("kind") == "quality"]
+        functional = [t for t in tests if t.get("kind") != "quality"]
+        lines += ["## Test plan", "",
+                  "Every check below is made against the RUNNING game — a "
+                  "tool call returning is not a result.", ""]
+        for t in functional:
+            lines.append("- **%s** — %s" % (t["system"], t["criterion"]))
+        if quality:
+            lines += ["", "Quality checks (judged, not just measured):", ""]
+            for t in quality:
+                lines.append("- **%s** — %s" % (t["system"], t["criterion"]))
         lines.append("")
     return "\n".join(lines)

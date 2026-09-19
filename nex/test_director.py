@@ -745,4 +745,91 @@ finally:
     os.environ.pop("NEX_MAX_SYSTEMS_PER_RUN", None)
     os.environ.pop("NEX_RUN_BUDGET_S", None)
 
+# ---------------------------------------------------------------------------
+# QUALITY BARS travel with the plan
+# ---------------------------------------------------------------------------
+# A checklist proves a system works; the quality bars are what make it good.
+# They must exist for every planned system, survive into the envelope (so the
+# builder is TOLD the standard), show up in the planner prompt, and never
+# leak into the pass/fail criteria list.
+_gp_q = director_mod.direct("Make a third person shooter with enemies")
+_expect(all(s.quality for s in _gp_q.systems),
+        "every planned system carries quality bars")
+_expect(all(len(s.quality) == 3 for s in _gp_q.systems),
+        "each system gets three quality bars (more would be noise)")
+_env_q = director_mod.scope_envelope(_gp_q.systems[0], _gp_q.remaining())
+_expect(bool(_env_q["quality"])
+        and all(isinstance(x, str) for x in _env_q["quality"]),
+        "the envelope carries the quality bars")
+_expect(not set(_env_q["quality"]) & set(_env_q["success"]),
+        "quality bars stay distinct from the pass/fail success criteria")
+_block_q = director_mod.scope_block(_env_q)
+_expect("QUALITY BAR" in _block_q
+        and _env_q["quality"][0][:40] in _block_q,
+        "the planner prompt states the quality bar")
+_expect(_block_q.index("SUCCESS CRITERIA") < _block_q.index("QUALITY BAR"),
+        "criteria come first, then the standard they are measured against")
+
+# A system a MODEL invented (not in the recipe library) still gets bars.
+def _llm_q(_msgs):
+    import json as _json
+    return _json.dumps({"systems": ["character_controller"], "extra_systems": [
+        {"name": "grappling_hook", "layer": "gameplay",
+         "checklist": ["hook attaches to surfaces"],
+         "why": "movement variety"}], "game": "parkour"})
+
+_gp_extra = director_mod.direct("Make a parkour game", llm=_llm_q)
+_extra = [x for x in _gp_extra.systems if x.id == "grappling_hook"]
+_expect(bool(_extra) and bool(_extra[0].quality),
+        "a model-invented system gets generic quality bars, never none")
+_expect(_extra[0].quality == recipes.GENERIC_QUALITY_BARS,
+        "the generic bars are the documented fallback")
+_known = [x for x in _gp_extra.systems if x.id == "character_controller"]
+_expect(bool(_known) and _known[0].quality
+        == recipes.RECIPES_BY_ID["character_controller"].quality,
+        "a model-picked recipe keeps the library's own quality bars")
+
+# The library itself: every recipe has bars, unknown ids never crash.
+_expect(all(r.quality for r in recipes.RECIPES),
+        "every recipe in the library defines quality bars")
+_expect(recipes.quality_for("does_not_exist")
+        == recipes.GENERIC_QUALITY_BARS,
+        "quality_for() falls back for unknown ids")
+_expect("quality" in recipes.RECIPES[0].to_dict(),
+        "a recipe serialises its quality bars")
+
+# The BLUEPRINT (the document the builder works from) must state the bar
+# and plan with REAL engine tools, not with whatever shares a word.
+_bp_q = blueprint_mod.build_blueprint(
+    "third person shooter", _gp_q,
+    ["create_part", "set_property", "play_solo", "take_screenshot",
+     "get_console_output", "create_script", "verify_game", "insert_model"])
+_bp_first = _bp_q["systems"][0]
+_expect(_bp_first["quality"] == _gp_q.systems[0].quality,
+        "the blueprint carries the quality bar of each system")
+_q_tests = [t for t in _bp_q["tests"] if t.get("kind") == "quality"]
+_c_tests = [t for t in _bp_q["tests"] if t.get("kind") == "criterion"]
+_expect(bool(_q_tests) and bool(_c_tests),
+        "quality checks and pass/fail criteria stay separate in the plan")
+_expect(all(t.get("proves") for t in _q_tests),
+        "every quality check says how it is judged")
+_bp_md = blueprint_mod.blueprint_markdown(_bp_q)
+_expect("Quality bar" in _bp_md and "Quality checks" in _bp_md,
+        "the blueprint document shows the bars and the quality checks")
+_expect("against the RUNNING game" in _bp_md,
+        "the document states that checks happen against the running game")
+
+_tools_of = {st["needs"]: st.get("tool") for st in _bp_first["steps"]}
+_expect(_tools_of.get("run") == "play_solo",
+        "the plan runs the game with the engine's real playtest tool "
+        "(%r)" % (_tools_of.get("run"),))
+_expect(_tools_of.get("observe") in ("take_screenshot",
+                                     "get_console_output"),
+        "the observe step uses a real observation tool (%r)"
+        % (_tools_of.get("observe"),))
+_expect(not any(st["needs"] == "unknown" for st in _bp_first["steps"]),
+        "no step of a known system is left unclassified")
+_expect(_bp_first["ready"] is True,
+        "with real engine tools connected the system plans as ready")
+
 print("\nAll Director-layer tests passed.")

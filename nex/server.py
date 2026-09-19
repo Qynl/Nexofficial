@@ -854,10 +854,24 @@ def _iter_openai_tokens(messages):
 
 
 def model_chat_stream(messages):
-    """Generator yielding content tokens from the configured model.
+    """Generator yielding content tokens for the PLANNER role.
 
-    Wraps _iter_ollama_tokens / _iter_openai_tokens. Retries once on
-    transient connection errors."""
+    Streams through the provider layer (`Router.chat_stream`), which means
+    the conversation obeys the same rules as the agent: the role's chain,
+    the reserve/pacing, the cooldowns, the key/host binding — and a rate
+    limit hands the answer to the next provider instead of failing.
+
+    Falls back to the legacy direct transport only if the router itself is
+    unavailable (e.g. an embedding of this module without a provider layer).
+    """
+    try:
+        yield from ROUTER.chat_stream(_providers.ROLE_PLANNER, messages)
+        return
+    except _providers.AllProvidersFailed as exc:
+        # Honest failure with the provider-level reason attached.
+        raise RuntimeError("model unreachable: " + str(exc)[:300]) from None
+    except NameError:  # ROUTER not wired (bare import) -> legacy path
+        pass
     iter_fn = _iter_openai_tokens if API_STYLE == "openai" else _iter_ollama_tokens
     last_exc = None
     for attempt in range(2):
@@ -1113,8 +1127,11 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path in ("/", "/index.html", "/style.css", "/app.js", "/webgl.js",
-                    "/animations.js", "/provider_chip.js", "/providers.js",
+        # Only paths this server actually serves — a HEAD must never claim a
+        # file exists that a GET would 404 on.
+        if path in ("/", "/index.html", "/settings.html", "/settings",
+                    "/style.css", "/app.js", "/webgl.js", "/animations.js",
+                    "/provider_chip.js",
                     "/api/health", "/api/state", "/api/events"):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")

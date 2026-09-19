@@ -293,4 +293,52 @@ _expect(g_dangle.ready() == [],
         "dangling dep id -> task not ready (no crash)")
 
 
+# ---------------------------------------------------------------------------
+# QUALITY BARS have a path through the system (glass, not decoration)
+# ---------------------------------------------------------------------------
+# state -> task graph -> serialisation -> tester. If any hop drops them the
+# builder and the tester never learn the standard, which is the whole point.
+import agent.director as director_q  # noqa: E402
+import agent.recipes as recipes_q  # noqa: E402
+import agent.server_run as server_run_q  # noqa: E402
+
+_gp_q = director_q.direct("Make a third person shooter")
+_state_q = project_state.ProjectState()
+for _s in _gp_q.systems:
+    _state_q.set_criteria(_s.id, _s.checklist)
+    _state_q.set_quality(_s.id, _s.quality)
+_first_q = _gp_q.systems[0]
+_expect(_state_q.quality_for(_first_q.id) == _first_q.quality,
+        "the project state remembers the quality bar of a system")
+_expect(_state_q.quality_for("NOT A SYSTEM") == []
+        and _state_q.quality_for("") == [],
+        "unknown systems have no quality bars (no accidental inheritance)")
+
+_tg_q = task_graph.TaskGraph()
+_tg_q.add(task_graph.Task(id="t1", name="build", stage="build",
+                          system=_first_q.id, criteria=["player moves"]))
+_scope_q = {"system": _first_q.id, "success": ["player moves"],
+            "quality": list(_first_q.quality)}
+server_run_q._attach_scope(_tg_q, _scope_q)
+_expect(_tg_q.get("t1").quality == _first_q.quality,
+        "the scope envelope hands the quality bar to the task")
+_round = task_graph.TaskGraph.from_dict(_tg_q.to_dict())
+_expect(_round.get("t1").quality == _first_q.quality,
+        "quality bars survive graph serialisation (save / resume)")
+
+# Memory stays bounded: the bar map is capped like every other map.
+_state_big = project_state.ProjectState()
+for i in range(60):
+    _state_big.set_quality("sys_%d" % i, ["bar %d" % i])
+_state_big.compact_memory()
+_expect(len(_state_big.quality) <= 48,
+        "the quality map is capped with the rest of the memory: %d"
+        % len(_state_big.quality))
+_expect(all(len(v) <= 6 for v in _state_big.quality.values()),
+        "a single system never stores an unbounded number of bars")
+
+# An unknown system id never crashes the library lookup.
+_expect(recipes_q.quality_for("made_up") == recipes_q.GENERIC_QUALITY_BARS,
+        "the library answers with generic bars for an unknown system")
+
 print("\nAll agent tests passed.")

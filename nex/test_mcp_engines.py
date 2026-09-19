@@ -238,4 +238,55 @@ if proc and proc.stderr:
         print(err[-1500:])
         print("--- end stderr ---")
 
+# ---------------------------------------------------------------------------
+# PLAYTEST KNOWLEDGE (what makes the built game actually good)
+# ---------------------------------------------------------------------------
+# Hitting play_solo is not a playtest. The curated guides must say what to
+# LOOK at, per engine, so the observation/verification steps judge the game
+# instead of the tool call. And the platform detection must survive the
+# names real users give their MCP servers, or the knowledge is never used.
+for _plat, _must in (("roblox-studio", "character"),
+                     ("unreal-engine", "pawn")):
+    _g = mcp_engines.playtest_guidance(_plat)
+    _expect(len(_g) >= 6, "%s playtest guidance is substantial (%d lines)"
+            % (_plat, len(_g)))
+    _expect(any(_must in line.lower() for line in _g),
+            "%s guidance names its key observation (%s)" % (_plat, _must))
+    _res_plat = mcp_engines.platform_guide_resource(_plat)
+    _expect(("play_solo" if _plat == "roblox-studio" else "pie_start")
+            in _res_plat and "## How to playtest this game" in _res_plat,
+            "%s guidance points at the real playtest tool" % _plat)
+    _expect(any("not proven" in line.lower()
+                or "not the " in line.lower() for line in _g),
+            "%s guidance says a tool call is not proof" % _plat)
+
+_expect(mcp_engines.playtest_guidance("blender") == [],
+        "an engine without curated playtest knowledge returns nothing")
+_expect(len(mcp_engines.playtest_guidance_for(["roblox-studio", "unreal-engine"]))
+        <= 14, "merged guidance stays bounded")
+_expect(len(set(mcp_engines.playtest_guidance_for(
+            ["roblox", "roblox-studio"]))) == len(
+        mcp_engines.playtest_guidance_for(["roblox-studio"])),
+        "the same platform named twice is not duplicated")
+
+# Real server names must resolve, or the knowledge never reaches a prompt.
+for _name, _want in (("roblox", "roblox-studio"),
+                     ("Roblox Studio MCP", "roblox-studio"),
+                     ("roblox_studio_mcp", "roblox-studio"),
+                     ("unreal_engine_5", "unreal-engine"),
+                     ("UE5 MCP", "unreal-engine")):
+    _expect(mcp_engines.normalize_platform(_name) == _want,
+            "server name %r resolves to %s" % (_name, _want))
+_expect(mcp_engines.normalize_platform("some-random-server") is None,
+        "an unrelated server name is not forced into a platform")
+_expect(mcp_engines.normalize_platform("") is None and
+        mcp_engines.normalize_platform(None) is None,
+        "empty/None platform names are safe")
+
+# The MCP resource carries the playtest section (that is how a model reads
+# it over the protocol).
+_res = mcp_engines.platform_guide_resource("roblox-studio")
+_expect("## How to playtest this game" in _res,
+        "the platform resource documents how to playtest")
+
 print("\nAll mcp_engines tests passed.")

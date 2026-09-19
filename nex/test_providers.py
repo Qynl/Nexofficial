@@ -85,6 +85,7 @@ class FakeHTTP:
         self.calls = []          # (url, body)
         self.headers = []        # outgoing headers, per call
         self.gets = []
+        self.streams = []        # streaming calls: (url, body)
 
     def push(self, host, answer):
         self.script.setdefault(host, []).append(answer)
@@ -118,6 +119,44 @@ class FakeHTTP:
             return 200, {"message": {"content": ans}}, {}
         return 200, {"choices": [{"message": {"content": ans}}]}, {}
 
+    # --- streaming transport (Router.chat_stream) ----------------------
+    def stream(self, url, body, headers=None, timeout=60):
+        """Yield NDJSON/SSE lines. A scripted (host, "tokens") entry is a
+        list of token strings; an Exception entry raises before the first
+        token, exactly like a rejected connection."""
+        self.streams.append((url, body))
+        self.headers.append(dict(headers or {}))
+        ans = self._answer_for(url)
+        if isinstance(ans, Exception):
+            raise ans
+        if isinstance(ans, str) and ans.startswith("AFTER:"):
+            # tokens first, THEN the failure (mid-answer break)
+            for tok in ans[len("AFTER:"):].split("|"):
+                yield tok
+            raise providers.ProviderError(providers.ERR_NETWORK,
+                                          "stream broke mid-answer")
+        if isinstance(ans, dict):
+            toks = ans.get("tokens") or []
+            fail_after = ans.get("fail_after")
+        else:
+            toks = str(ans).split("|")
+            fail_after = None
+        is_ollama = "127.0.0.1:11434" in url or "localhost" in url
+        for i, tok in enumerate(toks):
+            if fail_after is not None and i == fail_after:
+                raise providers.ProviderError(providers.ERR_NETWORK,
+                                              "stream broke mid-answer")
+            if is_ollama:
+                yield json.dumps({"message": {"content": tok}, "done": False})
+            else:
+                yield "data: " + json.dumps(
+                    {"choices": [{"delta": {"content": tok},
+                                  "finish_reason": None}]})
+        if is_ollama:
+            yield json.dumps({"message": {"content": ""}, "done": True})
+        else:
+            yield "data: [DONE]"
+
     def get(self, url, headers=None, timeout=30):
         self.gets.append(url)
         self.headers.append(dict(headers or {}))
@@ -131,16 +170,19 @@ class FakeHTTP:
         return 200, {"data": []}
 
 
-def mk_router(http, clock=None, rpm=2, bus=None):
+def mk_router(http, clock=None, rpm=2, bus=None, pacing=False):
+    """Router for tests. Pacing (real sleeps) is OFF unless a test asks for
+    it — the rest of the suite is about routing, not about wall-clock time."""
+    no_pace = {} if pacing else {"min_interval_s": 0.0, "max_chill_s": 0.0}
     specs = {
         "local": providers.ProviderSpec(
             "local", model="gpt-oss:20b", base_url="http://127.0.0.1:11434",
-            kind=providers.KIND_OLLAMA),
+            kind=providers.KIND_OLLAMA, **no_pace),
         "nim": providers.ProviderSpec(
             "nim", api_key="nvapi-testkey", model="nvidia/nemotron-3-super-120b-a12b",
-            rpm=rpm, cooldown_s=20.0),
+            rpm=rpm, cooldown_s=20.0, **no_pace),
         "gpt": providers.ProviderSpec(
-            "gpt", api_key="sk-testkey", model="gpt-5.1"),
+            "gpt", api_key="sk-testkey", model="gpt-5.1", **no_pace),
     }
     roles = {
         providers.ROLE_PLANNER: {"provider": "gpt", "model": "gpt-5.1"},
@@ -148,7 +190,8 @@ def mk_router(http, clock=None, rpm=2, bus=None):
                                  "model": "nvidia/nemotron-3-super-120b-a12b"},
     }
     return providers.Router(specs, roles, bus=bus, clock=clock or Clock(),
-                            transport={"post": http.post, "get": http.get})
+                            transport={"post": http.post, "get": http.get,
+                                       "stream": http.stream})
 
 
 class Bus:
@@ -946,5 +989,372 @@ r_ex.set_role("planner", "nim")
 _expect(r_ex.role_model("planner") == "nvidia/nemotron-3-super-120b-a12b",
         "switching a role's provider adopts the NEW provider's model "
         "(got %r)" % r_ex.role_model("planner"))
+
+# ===========================================================================
+# 13. PACING, RECOVERY AND THE LOCAL MODEL AS THE LAST RESORT
+# ===========================================================================
+
+print("=== 13. rate-budget pacing + recovery ===")
+
+# --- Ollama takes over when NIM is limited and NO other provider is set ----
+h_local = FakeHTTP()
+h_local.push("integrate.api.nvidia.com", http_error("n", 429, "", retry_after=30))
+h_local.push("127.0.0.1:11434", "ollama built it")
+r_local = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     model="gpt-oss:20b", min_interval_s=0.0,
+                                     max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=40,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"planner": {"provider": "nim", "fallbacks": ["gpt"]},
+     "builder": {"provider": "nim", "fallbacks": ["gpt"]}},
+    transport={"post": h_local.post, "get": h_local.get})
+_expect(r_local.chain("builder") == ["nim", "local"],
+        "with only NIM configured the chain is NIM -> local (%s)"
+        % r_local.chain("builder"))
+_expect(r_local.chat("builder", MESSAGES) == "ollama built it",
+        "…so a rate-limited NIM hands over to Ollama automatically")
+_expect(r_local._last_served["builder"] == "local", "Ollama served the call")
+
+# --- the rate-limit cooldown lasts until the window has room --------------
+cl = Clock()
+h_win = FakeHTTP()
+h_win.push("integrate.api.nvidia.com", http_error("n", 429, "", retry_after=5))
+h_win.push("integrate.api.nvidia.com", "nim back")
+h_win.push("127.0.0.1:11434", "ollama")
+r_win = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=2,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl, transport={"post": h_win.post, "get": h_win.get})
+r_win.chat("builder", MESSAGES)                     # rate limited
+blocked_for = r_win.states["nim"].to_dict()["cooldown_s"]
+_expect(blocked_for >= 5, "the cooldown honours Retry-After (%.0fs)" % blocked_for)
+cl.advance(6)
+_expect(r_win.chat("builder", MESSAGES) == "nim back",
+        "after the wait NIM is tried AGAIN (not skipped forever)")
+
+# --- our own window is the clock: the cooldown waits for a free slot ------
+cl2 = Clock()
+h_full = FakeHTTP()
+h_full.push("integrate.api.nvidia.com", "nim ok")
+h_full.push("127.0.0.1:11434", "ollama")
+r_full = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=2, reserve=0.0,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl2, transport={"post": h_full.post, "get": h_full.get})
+r_full.chat("builder", MESSAGES)
+r_full.chat("builder", MESSAGES)
+_expect(r_full.states["nim"].used_in_window() == 2, "the window is full")
+_expect(r_full.chat("builder", MESSAGES) == "ollama",
+        "the overflow goes to the local model")
+_expect(r_full.states["local"] is not None, "…and local served it")
+cl2.advance(61)
+r_full.chat("builder", MESSAGES)
+_expect(len([c for c in h_full.calls if "integrate" in c[0]]) == 3,
+        "…and a minute later NIM is used again by itself")
+
+# --- the reserve keeps headroom: fallback absorbs work before the cap ----
+h_res2 = FakeHTTP()
+h_res2.push("integrate.api.nvidia.com", "nim ok")
+h_res2.push("127.0.0.1:11434", "ollama")
+r_res2 = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=4, reserve=0.5,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    transport={"post": h_res2.post, "get": h_res2.get})
+_expect(r_res2.states["nim"].soft_cap() == 2,
+        "rpm=4 with a 50%% reserve stops spending at 2")
+r_res2.chat("builder", MESSAGES)
+r_res2.chat("builder", MESSAGES)
+res3 = r_res2.chat("builder", MESSAGES)
+_expect(res3 == "ollama",
+        "the third call is routed around though the hard cap is 4")
+_expect(r_res2.states["nim"].paced_skips == 1, "the pacing skip is counted")
+_expect(r_res2.states["nim"].to_dict()["headroom"] is True,
+        "…and the state reports 'headroom' for the UI")
+_expect(len([c for c in h_res2.calls if "integrate" in c[0]]) == 2,
+        "NIM was called exactly twice — the reserve is real")
+
+# --- with a full window and no fallback, it CHILLS instead of hammering --
+cl3 = Clock()
+h_chill = FakeHTTP()
+h_chill.push("integrate.api.nvidia.com", "nim ok")
+r_chill = providers.Router(
+    {"nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=1, reserve=0.0,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": []}},
+    clock=cl3, transport={"post": h_chill.post, "get": h_chill.get})
+r_chill.chat("builder", MESSAGES)
+calls_before = len(h_chill.calls)
+out_chill = None
+try:
+    out_chill = r_chill.chat("builder", MESSAGES)
+except providers.AllProvidersFailed:
+    out_chill = None
+_expect(len(h_chill.calls) == calls_before,
+        "a full window with NO fallback does not send another request")
+_expect(out_chill is None,
+        "…it raises instead (the caller degrades honestly, no invented text)")
+
+# --- pacing events are emitted -------------------------------------------
+h_ev = FakeHTTP()
+h_ev.push("integrate.api.nvidia.com", "nim ok")
+h_ev.push("127.0.0.1:11434", "ollama")
+bus_ev = Bus()
+r_ev = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=2, reserve=0.5,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    bus=bus_ev, transport={"post": h_ev.post, "get": h_ev.get})
+r_ev.chat("builder", MESSAGES)
+r_ev.chat("builder", MESSAGES)
+paced = [e for e in bus_ev.events if e.get("type") == "provider.paced"]
+_expect(paced, "a pacing decision is visible to the UI")
+_expect("headroom" in str(paced[0].get("reason", "")),
+        "…with the reason spelled out: %s" % paced[0].get("reason"))
+fbs_ev = [e for e in bus_ev.events if e.get("type") == "provider.fallback"]
+_expect(fbs_ev and fbs_ev[-1]["to"] == "local",
+        "…and the chip then shows the local model as the serving builder")
+_expect(bus_ev.events.index(paced[0]) < bus_ev.events.index(fbs_ev[-1]),
+        "the pacing decision comes BEFORE the hand-off it causes")
+
+# --- the plan does not restart: identical messages on every provider -----
+msgs_before = None
+h_same = FakeHTTP()
+h_same.push("integrate.api.nvidia.com", http_error("n", 503, "gateway"))
+h_same.push("127.0.0.1:11434", "ollama")
+r_same = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x",
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    transport={"post": h_same.post, "get": h_same.get})
+r_same.chat("builder", MESSAGES, purpose="repair")
+sent = [b["messages"] for _u, b in h_same.calls]
+_expect(len(sent) == 2 and sent[0] == sent[1],
+        "NIM and the local model receive the SAME messages (plan untouched)")
+
+# --- non-rate-limit trouble is announced, with what happens next ---------
+h_tr = FakeHTTP()
+h_tr.push("integrate.api.nvidia.com", urllib.error.URLError("timed out"))
+h_tr.push("127.0.0.1:11434", "ollama")
+bus_tr = Bus()
+r_tr = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x",
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    bus=bus_tr, transport={"post": h_tr.post, "get": h_tr.get})
+r_tr.chat("builder", MESSAGES)
+trouble = [e for e in bus_tr.events if e.get("type") == "provider.trouble"]
+_expect(len(trouble) == 1,
+        "a non-rate-limit failure is announced (provider.trouble)")
+_expect("timed out" in trouble[0]["detail"]
+        and "retried automatically" in trouble[0]["detail"],
+        "…and says what happens next: %s" % trouble[0]["detail"])
+rate_only = [e for e in bus_tr.events
+             if e.get("type") == "provider.trouble"
+             and e.get("error_kind") == "rate_limit"]
+_expect(not rate_only, "a rate limit is NOT reported as trouble (it is pacing)")
+
+# --- coming back is announced too ----------------------------------------
+cl4 = Clock()
+h_back = FakeHTTP()
+h_back.push("integrate.api.nvidia.com", http_error("n", 429, "", retry_after=3))
+h_back.push("127.0.0.1:11434", "ollama")
+bus_back = Bus()
+r_back = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=40,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"builder": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl4, bus=bus_back, transport={"post": h_back.post, "get": h_back.get})
+r_back.chat("builder", MESSAGES)
+cl4.advance(5)
+h_back.script["integrate.api.nvidia.com"] = ["nim again"]
+r_back.chat("builder", MESSAGES)
+recovered = [e for e in bus_back.events if e.get("type") == "provider.recovered"]
+_expect(len(recovered) == 1, "NIM returning is announced (provider.recovered)")
+_expect(recovered[0]["was"] == "local" and recovered[0]["provider"] == "nim",
+        "…naming both sides: %s -> %s" % (recovered[0]["was"],
+                                          recovered[0]["provider"]))
+
+# ---------------------------------------------------------------------------
+# 13b. ENDPOINT URLS: the version segment belongs to exactly one side
+# ---------------------------------------------------------------------------
+# A base URL is written the way providers document it (`.../v1`) and the
+# OpenAI-compatible path is `/v1/chat/completions`. Appending naively gives
+# `.../v1/v1/chat/completions` — a 404 that looks like a provider that is
+# down, and silently fails the build over to the local model forever.
+_URL_CASES = [
+    ("https://integrate.api.nvidia.com/v1", "openai",
+     "https://integrate.api.nvidia.com/v1/chat/completions",
+     "https://integrate.api.nvidia.com/v1/models"),
+    ("https://api.openai.com/v1/", "openai",
+     "https://api.openai.com/v1/chat/completions",
+     "https://api.openai.com/v1/models"),
+    ("http://my-host:8080", "openai",
+     "http://my-host:8080/v1/chat/completions",
+     "http://my-host:8080/v1/models"),
+    ("http://127.0.0.1:11434", "ollama",
+     "http://127.0.0.1:11434/api/chat",
+     "http://127.0.0.1:11434/api/tags"),
+    ("http://127.0.0.1:11434/v1", "ollama",
+     "http://127.0.0.1:11434/api/chat",
+     "http://127.0.0.1:11434/api/tags"),
+]
+for _base, _kind, _want_chat, _want_models in _URL_CASES:
+    _sp = providers.ProviderSpec("u", api_key="k", model="m",
+                                 base_url=_base, kind=_kind)
+    _expect(_sp.chat_url == _want_chat,
+            "%s -> %s (got %s)" % (_base, _want_chat, _sp.chat_url))
+    _expect(_sp.models_url == _want_models,
+            "%s models -> %s (got %s)" % (_base, _want_models, _sp.models_url))
+_expect(providers.ProviderSpec(
+        "u", api_key="k", model="m",
+        base_url="https://integrate.api.nvidia.com/v1").chat_url
+        == "https://integrate.api.nvidia.com/v1/chat/completions",
+        "the documented NIM base URL produces the documented endpoint")
+
+# ---------------------------------------------------------------------------
+# 14. STREAMING goes through the SAME rules as chat()
+# ---------------------------------------------------------------------------
+# The chat/voice conversation is a stream, and a stream that bypasses the
+# provider layer would ignore the chain, the pacing, the cooldowns and the
+# key binding — and would burn NIM budget without counting it. These checks
+# pin the streaming path to the routing rules.
+txt = providers._extract_text  # (keep the import used)
+
+
+def _stream(router, role="planner", msgs=None):
+    return list(router.chat_stream(role, msgs or [{"role": "user",
+                                                   "content": "hi"}],
+                                   purpose="chat"))
+
+
+# 1) The chain is respected: planner = gpt -> local, and gpt streams.
+h = FakeHTTP()
+h.push("api.openai.com", "Hello| there")
+h.push("127.0.0.1:11434", "should not be used")
+bus = Bus()
+r = mk_router(h, bus=bus)
+out = _stream(r)
+_expect(out == ["Hello", " there"],
+        "the streaming call streams through the chain: %r" % (out,))
+_expect(h.calls == [] and len(h.streams) == 1,
+        "streaming uses the streaming transport, not the blocking one")
+_expect(h.streams[0][0] == "https://api.openai.com/v1/chat/completions",
+        "the stream hits the provider's chat endpoint exactly once: %s"
+        % h.streams[0][0])
+_expect("v1/v1" not in h.streams[0][0],
+        "the API version is never doubled (a 404 would look like a provider "
+        "failure)")
+_expect(h.streams[0][1].get("stream") is True,
+        "the request asks the provider to stream: %r"
+        % h.streams[0][1].get("stream"))
+_expect(r.states["gpt"].total_calls == 1 and r.states["gpt"].total_ok == 1,
+        "a streamed call is counted like any other call")
+# The mock provider is unlimited (rpm=0); give it a budget and prove the
+# streamed call SPENDS it — an uncounted chat stream would silently starve
+# the builder's minute.
+r.states["gpt"].rpm = 40
+_stream(r)
+_expect(r.states["gpt"].used_in_window() == 1,
+        "a streamed call spends the provider's RPM budget")
+_expect(r.states["gpt"].to_dict()["soft_cap"] == 30,
+        "the streamed budget obeys the same reserve (soft cap 30 of 40)")
+_expect(any(e.get("type") == "provider.call" for e in bus.events),
+        "a streamed call emits the normal provider.call event")
+
+# 2) A rate limit on the primary hands the answer to the next provider —
+#    with the SAME messages, before anything was streamed.
+h2 = FakeHTTP()
+h2.push("api.openai.com", providers.ProviderError(providers.ERR_RATE_LIMIT,
+                                                  "429", retry_after=5))
+h2.push("127.0.0.1:11434", "Local| answer")
+bus2 = Bus()
+r2 = mk_router(h2, bus=bus2)
+out2 = _stream(r2)
+_expect(out2 == ["Local", " answer"],
+        "a rate-limited primary fails over mid-conversation: %r" % (out2,))
+fb = [e for e in bus2.events if e.get("type") == "provider.fallback"]
+_expect(bool(fb) and fb[0]["from"] == "gpt" and fb[0]["to"] == "local",
+        "the streaming failover is announced: %r" % (fb[:1],))
+_expect(fb and fb[0].get("plan_continues") is True,
+        "a streamed failover does not restart anything")
+_expect(r2.states["gpt"].status in ("cooling", "rate_limited"),
+        "the failed primary is parked for streamed calls too: %s"
+        % r2.states["gpt"].status)
+_expect(r2.states["gpt"].to_dict()["cooldown_s"] > 0,
+        "…with a real cooldown, so the next turn does not hammer it again")
+_expect(h2.headers[-1].get("Authorization") is None,
+        "the local provider gets no key header on the fallback")
+
+# 3) Text already delivered is never duplicated: a mid-stream break ends
+#    the answer and is reported, instead of restarting on another provider.
+h3 = FakeHTTP()
+h3.push("api.openai.com", {"tokens": ["Half", " answer"],
+                           "fail_after": 1})
+h3.push("127.0.0.1:11434", "SHOULD NOT APPEAR")
+bus3 = Bus()
+r3 = mk_router(h3, bus=bus3)
+out3 = _stream(r3)
+_expect(out3 == ["Half"],
+        "a mid-stream failure yields the partial answer only: %r" % (out3,))
+_expect(not [e for e in bus3.events if e.get("type") == "provider.fallback"],
+        "no fallback after text was streamed (no duplicated answer)")
+_expect(any(e.get("type") == "provider.trouble" for e in bus3.events),
+        "a mid-stream break is reported as trouble")
+
+# 4) An empty stream is not an answer: the router tries the next provider.
+h4 = FakeHTTP()
+h4.push("api.openai.com", {"tokens": []})
+h4.push("127.0.0.1:11434", "Second| try")
+r4 = mk_router(h4)
+out4 = _stream(r4)
+_expect(out4 == ["Second", " try"],
+        "an empty stream is treated as a failed attempt: %r" % (out4,))
+
+# 5) No provider at all -> AllProvidersFailed (the caller degrades honestly).
+h5 = FakeHTTP()
+r5 = mk_router(h5)
+# Take the key away (that is what "not configured" means) and park the local
+# provider: then nothing in the chain can serve a stream.
+r5.specs["gpt"].api_key = ""
+r5.specs["gpt"].api_key_env = ""
+r5.states["local"].mark_error(providers.ERR_RATE_LIMIT, "429")
+try:
+    out5 = _stream(r5)
+    _expect(False, "no usable provider must raise, got %r" % (out5,))
+except providers.AllProvidersFailed:
+    _expect(True, "streaming raises AllProvidersFailed when nothing serves")
+
+# 6) The server's chat stream goes through the router (no bypass).
+import server as server_mod  # noqa: E402
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "server.py"), encoding="utf-8").read()
+_expect("ROUTER.chat_stream(_providers.ROLE_PLANNER, messages)" in src,
+        "model_chat_stream routes the conversation through the provider layer")
 
 print("\nAll provider-layer tests passed.")

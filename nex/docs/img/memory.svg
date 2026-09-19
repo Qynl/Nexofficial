@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" role="img" aria-label="Bounded memory: what is kept, how it is capped">
+<title>Bounded memory: what is kept, how it is capped</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<text x="40" y="44" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#e8edf5" text-anchor="start" opacity="1.0">Memory that cannot grow forever</text>
+<text x="40" y="70" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">A local model has a small context. The project state is the memory that survives runs, and every part of it is capped — the oldest entries go first.</text>
+<rect x="40" y="108" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="40" y="108" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="54" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">goals + systems</text>
+<text x="54" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the game plan, status</text>
+<text x="54" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">per system</text>
+<text x="291" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 24</text>
+<rect x="325" y="108" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="325" y="108" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="339" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">criteria</text>
+<text x="339" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">pass/fail per system</text>
+<text x="339" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">(max 12 per system)</text>
+<text x="576" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 12</text>
+<rect x="610" y="108" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="610" y="108" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="624" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">quality bars</text>
+<text x="624" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the standard per system</text>
+<text x="624" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">(max 6 per system)</text>
+<text x="861" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 6</text>
+<rect x="895" y="108" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="895" y="108" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="909" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">decisions ledger</text>
+<text x="909" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">locked design decisions</text>
+<text x="909" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">conflicts are flagged</text>
+<text x="1146" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 30</text>
+<rect x="40" y="244" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="40" y="244" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="54" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">known bugs</text>
+<text x="54" y="289" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">open defects with the</text>
+<text x="54" y="307" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">observation that found them</text>
+<text x="291" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 50</text>
+<rect x="325" y="244" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="325" y="244" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="339" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">observations</text>
+<text x="339" y="289" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">screenshots, logs, state</text>
+<text x="339" y="307" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">as evidence, collapsed</text>
+<text x="576" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 30</text>
+<rect x="610" y="244" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="610" y="244" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="624" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">completed / failed</text>
+<text x="624" y="289" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">what worked, what did</text>
+<text x="624" y="307" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">not; the exact count is kept</text>
+<text x="861" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 60</text>
+<rect x="895" y="244" width="265" height="116" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="895" y="244" width="4" height="116" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="909" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">knowledge</text>
+<text x="909" y="289" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">facts learned about</text>
+<text x="909" y="307" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the project</text>
+<text x="1146" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="normal" fill="#f0a000" text-anchor="end" opacity="1.0">cap 40</text>
+<rect x="40" y="396" width="1120" height="92" rx="10" fill="#141821" stroke="#f0a000" stroke-width="1.2" opacity="1.0"/>
+<text x="58" y="424" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#f0a000" text-anchor="start" opacity="1.0">compact_memory() runs once per cycle</text>
+<text x="58" y="448" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">caps are enforced idempotently; the return value says exactly what was dropped, so the loop can tell the user instead of silently forgetting.</text>
+<text x="58" y="470" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">resume-after-restart re-checks reality (servers up? tools still there?) before trusting a checkpoint.</text>
+<rect x="40" y="508" width="545" height="120" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<text x="58" y="536" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#4c8dff" text-anchor="start" opacity="1.0">what is NOT remembered</text>
+<text x="58" y="560" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">- the full model conversation</text>
+<text x="58" y="582" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">- raw tool output beyond the evidence window</text>
+<text x="58" y="604" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">- anything the model only claimed</text>
+<rect x="615" y="508" width="545" height="120" rx="10" fill="#141821" stroke="#76b900" stroke-width="1.2" opacity="1.0"/>
+<text x="633" y="536" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#76b900" text-anchor="start" opacity="1.0">why this matters with a small local model</text>
+<text x="633" y="560" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">- the plan, the standard and the open defects survive</text>
+<text x="633" y="582" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">- a restart — the model only has to be good</text>
+<text x="633" y="604" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">- enough for one batch at a time</text>
+</svg>

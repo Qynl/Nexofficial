@@ -86,6 +86,14 @@ class ProjectState:
     # Explicit completion criteria per system (from the recipe library /
     # the Director). The mandatory-verification gate reads this.
     criteria: Dict[str, List[str]] = field(default_factory=dict)
+    # The STANDARD each system is held to (from the recipe library), as
+    # opposed to `criteria` which are pass/fail. Quality bars feed the
+    # tester/reviewer prompts, never the completion gate.
+    quality: Dict[str, List[str]] = field(default_factory=dict)
+    # Which engines (MCP platforms) this project is being built in — set once
+    # per run from the live registry. The critic uses it to bring the right
+    # engine-specific defect knowledge into the playtest review.
+    engines: List[str] = field(default_factory=list)
     # Evidence per criterion: {"system": {"criterion": "pass"|"fail"|note}}
     criteria_evidence: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # Durable project knowledge the model learned (engine quirks, working
@@ -204,9 +212,37 @@ class ProjectState:
         if clean:
             self.criteria[key] = clean[:12]
 
+    def set_engines(self, platforms: List[str]) -> None:
+        """Remember the engines this project is built in (bounded, ordered,
+        deduped). Idempotent — safe to call on every run/resume."""
+        clean: List[str] = []
+        for p in platforms or []:
+            p = str(p).strip().lower()
+            if p and p not in clean:
+                clean.append(p[:40])
+        if clean:
+            self.engines = clean[:6]
+
     def criteria_for(self, system: str) -> List[str]:
         key = (system or "").strip().lower().replace(" ", "_")
         return list(self.criteria.get(key) or [])
+
+    def set_quality(self, system: str, items: List[str]) -> None:
+        """Record the quality bar for a system (bounded, deduped)."""
+        key = (system or "").strip().lower().replace(" ", "_")
+        if not key:
+            return
+        clean: List[str] = []
+        for it in items or []:
+            it = str(it).strip()
+            if it and it not in clean:
+                clean.append(it[:200])
+        if clean:
+            self.quality[key] = clean[:6]
+
+    def quality_for(self, system: str) -> List[str]:
+        key = (system or "").strip().lower().replace(" ", "_")
+        return list(self.quality.get(key) or [])
 
     def mark_criterion(self, system: str, criterion: str, ok: bool,
                        note: str = "") -> None:
@@ -320,6 +356,11 @@ class ProjectState:
             trimmed["knowledge"] = over
             for k in list(self.knowledge.keys())[:over]:
                 self.knowledge.pop(k, None)
+        if len(self.quality) > LIMITS["systems"]:
+            trimmed["quality"] = len(self.quality) - LIMITS["systems"]
+            for k in list(self.quality.keys())[
+                    :len(self.quality) - LIMITS["systems"]]:
+                self.quality.pop(k, None)
         if len(self.criteria_evidence) > LIMITS["systems"] * 2:
             trimmed["criteria_evidence"] = (
                 len(self.criteria_evidence) - LIMITS["systems"] * 2)
@@ -423,6 +464,8 @@ class ProjectState:
             "known_bugs": self.known_bugs,
             "systems": self.systems,
             "criteria": self.criteria,
+            "quality": self.quality,
+            "engines": list(self.engines),
             "criteria_evidence": self.criteria_evidence,
             "knowledge": self.knowledge,
             "completed_count": self.completed_count,
@@ -455,6 +498,8 @@ class ProjectState:
         # Game-Director fields (tolerant of older checkpoints without them).
         s.systems = d.get("systems", {}) or {}
         s.criteria = d.get("criteria", {}) or {}
+        s.quality = d.get("quality", {}) or {}
+        s.engines = [str(x) for x in (d.get("engines", []) or [])][:6]
         s.criteria_evidence = d.get("criteria_evidence", {}) or {}
         s.knowledge = d.get("knowledge", {}) or {}
         s.completed_count = int(d.get("completed_count")

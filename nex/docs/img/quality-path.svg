@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="780" viewBox="0 0 1240 780" role="img" aria-label="The quality path: recipe library, blueprint, build, playtest, judge, repair">
+<title>The quality path: recipe library, blueprint, build, playtest, judge, repair</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<text x="40" y="44" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#e8edf5" text-anchor="start" opacity="1.0">How a game gets good (with a 20-billion-parameter brain)</text>
+<text x="40" y="70" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">The model supplies the wording and the code. The ARCHITECTURE supplies the standard: proven structures, a stated quality bar, a real playtest, and a judge that must name</text>
+<text x="40" y="90" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">what it saw.</text>
+<rect x="40" y="108" width="300" height="170" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="40" y="108" width="4" height="170" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="54" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">1 · recipe library</text>
+<text x="54" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">15 systems with proven steps,</text>
+<text x="54" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">checklists, known risks and</text>
+<text x="54" y="189" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">a three-line QUALITY BAR</text>
+<text x="54" y="207" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">(what 'good' means here)</text>
+<rect x="380" y="108" width="300" height="170" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="380" y="108" width="4" height="170" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="394" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">2 · scope envelope</text>
+<text x="394" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">ONE system per round;</text>
+<text x="394" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">objective, steps, criteria,</text>
+<text x="394" y="189" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">quality bar, do-not list</text>
+<text x="394" y="207" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">(anti-scope-creep)</text>
+<rect x="720" y="108" width="300" height="170" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="720" y="108" width="4" height="170" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="734" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">3 · blueprint</text>
+<text x="734" y="153" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">deterministic document:</text>
+<text x="734" y="171" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">steps mapped to REAL tools</text>
+<text x="734" y="189" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">(play_solo, take_screenshot),</text>
+<text x="734" y="207" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">quality checks as its own kind</text>
+<rect x="40" y="308" width="300" height="170" rx="10" fill="#141821" stroke="#76b900" stroke-width="1.2" opacity="1.0"/>
+<rect x="40" y="308" width="4" height="170" rx="2" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<text x="54" y="332" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">4 · builder (batches)</text>
+<text x="54" y="353" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">3 tool calls per model call,</text>
+<text x="54" y="371" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">MCP tools only,</text>
+<text x="54" y="389" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">halved automatically when</text>
+<text x="54" y="407" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the provider struggles</text>
+<rect x="380" y="308" width="300" height="170" rx="10" fill="#141821" stroke="#f0a000" stroke-width="1.2" opacity="1.0"/>
+<rect x="380" y="308" width="4" height="170" rx="2" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<text x="394" y="332" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">5 · playtest</text>
+<text x="394" y="353" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">play_solo / pie_start runs</text>
+<text x="394" y="371" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the actual game. Studio's edit</text>
+<text x="394" y="389" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">mode proves nothing — a</text>
+<text x="394" y="407" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">tool call returning is not a result</text>
+<rect x="720" y="308" width="300" height="170" rx="10" fill="#141821" stroke="#4c8dff" stroke-width="1.2" opacity="1.0"/>
+<rect x="720" y="308" width="4" height="170" rx="2" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="734" y="332" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">6 · observe</text>
+<text x="734" y="353" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">screenshot + console/log +</text>
+<text x="734" y="371" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">runtime state become</text>
+<text x="734" y="389" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">EVIDENCE (untrusted data,</text>
+<text x="734" y="407" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">never instructions)</text>
+<rect x="40" y="508" width="300" height="170" rx="10" fill="#141821" stroke="#10a37f" stroke-width="1.2" opacity="1.0"/>
+<rect x="40" y="508" width="4" height="170" rx="2" fill="#10a37f" stroke="#10a37f" stroke-width="0" opacity="1.0"/>
+<text x="54" y="532" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">7 · reviewer</text>
+<text x="54" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">per criterion: proven only</text>
+<text x="54" y="571" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">with evidence. A clean tool call</text>
+<text x="54" y="589" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">is 'evidence', not 'pass'</text>
+<rect x="380" y="508" width="300" height="170" rx="10" fill="#141821" stroke="#e5484d" stroke-width="1.2" opacity="1.0"/>
+<rect x="380" y="508" width="4" height="170" rx="2" fill="#e5484d" stroke="#e5484d" stroke-width="0" opacity="1.0"/>
+<text x="394" y="532" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">8 · tester (adversarial)</text>
+<text x="394" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">attacks the system AND the</text>
+<text x="394" y="571" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">quality bar, with the engine's</text>
+<text x="394" y="589" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">classic defects supplied</text>
+<text x="394" y="607" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">(character sinks, pawn won't move)</text>
+<rect x="720" y="508" width="300" height="170" rx="10" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<rect x="720" y="508" width="4" height="170" rx="2" fill="#a06bff" stroke="#a06bff" stroke-width="0" opacity="1.0"/>
+<text x="734" y="532" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#e8edf5" text-anchor="start" opacity="1.0">9 · repair loop</text>
+<text x="734" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">findings -&gt; project memory</text>
+<text x="734" y="571" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">-&gt; next plan fixes them.</text>
+<text x="734" y="589" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Open defects block a system</text>
+<text x="734" y="607" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">from being called complete</text>
+<line x1="340" y1="193" x2="380" y2="193" stroke="#a06bff" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<line x1="680" y1="193" x2="720" y2="193" stroke="#a06bff" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<path d="M 870 282 L 870 296 L 190 296 L 190 306" fill="none" stroke="#4c8dff" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#arrow)" opacity="1.0"/>
+<text x="430" y="288" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#4c8dff" text-anchor="start" opacity="1.0">the plan is written -&gt; now build it</text>
+<line x1="340" y1="393" x2="380" y2="393" stroke="#76b900" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<line x1="680" y1="393" x2="720" y2="393" stroke="#f0a000" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<path d="M 870 482 L 870 496 L 190 496 L 190 506" fill="none" stroke="#10a37f" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#arrow)" opacity="1.0"/>
+<text x="430" y="488" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#10a37f" text-anchor="start" opacity="1.0">look at it -&gt; judge it</text>
+<line x1="340" y1="593" x2="380" y2="593" stroke="#10a37f" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<line x1="680" y1="593" x2="720" y2="593" stroke="#e5484d" stroke-width="1.8" marker-end="url(#arrow)" opacity="1.0"/>
+<path d="M 870 682 L 870 736 L 1180 736 L 1180 86 L 530 86 L 530 106" fill="none" stroke="#a06bff" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#arrow)" opacity="1.0"/>
+<text x="560" y="754" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">what was learned goes back in: the goal stays, the defects become tasks</text>
+<text x="1040" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the bar is</text>
+<text x="1040" y="172" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">stated, not</text>
+<text x="1040" y="194" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">hoped for</text>
+<rect x="1032" y="208" width="168" height="130" rx="9" fill="#141821" stroke="#a06bff" stroke-width="1.2" opacity="1.0"/>
+<text x="1046" y="232" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#a06bff" text-anchor="start" opacity="1.0">quality bar</text>
+<text x="1046" y="254" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">input responds in</text>
+<text x="1046" y="272" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the same frame</text>
+<text x="1046" y="290" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the camera never</text>
+<text x="1046" y="308" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">clips or snaps</text>
+<text x="1040" y="366" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">checked against</text>
+<text x="1040" y="384" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">the RUNNING game</text>
+</svg>

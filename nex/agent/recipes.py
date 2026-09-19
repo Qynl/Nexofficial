@@ -64,6 +64,11 @@ class Recipe:
     checklist: List[str] = field(default_factory=list)
     risks: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    # What "good" means for this system, beyond "it runs" — the difference
+    # between a working prototype and a game people keep playing. A checklist
+    # item is pass/fail; a quality bar is a standard. The builder is told
+    # about them and the critic judges against them.
+    quality: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -74,6 +79,7 @@ class Recipe:
             "checklist": list(self.checklist),
             "risks": list(self.risks),
             "tags": list(self.tags),
+            "quality": list(self.quality),
         }
 
 
@@ -94,7 +100,7 @@ _PLAYTEST_STEPS = (
 
 
 def _r(rid, title, system, provides, requires=(), steps=(), checklist=(),
-       risks=(), tags=()):
+       risks=(), tags=(), quality=None):
     built = [RecipeStep(*s) if isinstance(s, tuple) else s for s in steps]
     if not any("run the game" in (st.intent or "").lower()
                or "observe" in (st.intent or "").lower()
@@ -108,7 +114,111 @@ def _r(rid, title, system, provides, requires=(), steps=(), checklist=(),
     return Recipe(
         id=rid, title=title, system=system, provides=provides,
         requires=list(requires), steps=built,
-        checklist=list(checklist), risks=list(risks), tags=list(tags))
+        checklist=list(checklist), risks=list(risks), tags=list(tags),
+        quality=list(quality_for(rid) if quality is None else quality))
+
+
+# ---------------------------------------------------------------------------
+# QUALITY BARS — what "good" means per system
+# ---------------------------------------------------------------------------
+# A checklist says "the HUD exists and shows health". A quality bar says
+# "every readout stays legible against the busiest background". The first is
+# pass/fail; the second is the difference between a prototype and a game
+# somebody keeps playing — and a small model will not invent it, so the
+# library supplies it.
+#
+# Rules for these strings: engine-agnostic, observable in the running game,
+# about the PLAYER's experience (feel, readability, pacing) — never about
+# implementation. Three per system; more is noise.
+QUALITY_BARS: Dict[str, List[str]] = {
+    "character_controller": [
+        "input responds in the same frame - no visible lag between key and motion",
+        "the camera never clips through geometry and never snaps",
+        "acceleration and deceleration are eased, so movement has weight",
+    ],
+    "level_blockout": [
+        "the space reads at a glance: where to go is obvious without a marker",
+        "landmarks stay visible from the start and stay distinguishable",
+        "no dead end without a payoff, no invisible wall where a path is expected",
+    ],
+    "core_loop": [
+        "the loop closes: reach a goal, see the result, want another round",
+        "the first goal is reachable in under two minutes of play",
+        "repeating the loop gives a visible payoff (score, progress, unlock)",
+    ],
+    "health_damage": [
+        "damage and healing are readable at a glance in the HUD",
+        "hit feedback lands in the same beat (visual + sound + number)",
+        "death and respawn never leave the player stuck or invisible",
+    ],
+    "enemy_ai": [
+        "enemies telegraph intent before acting - a player can react",
+        "an enemy can be outplayed with movement, not only with more damage",
+        "no teleporting, no walking through walls, no frozen poses",
+    ],
+    "combat_system": [
+        "hit feedback reads instantly: impact, sound and damage number in one beat",
+        "attacks have wind-up and recovery - they feel weighty, not instant",
+        "difficulty scales by behaviour, not only by bigger health numbers",
+    ],
+    "ui_hud": [
+        "every readout stays legible against the busiest background",
+        "the HUD never hides the action - the centre of the screen stays clear",
+        "state changes are noticeable without being loud",
+    ],
+    "audio": [
+        "every important action has an audible response",
+        "the mix keeps actions and dialogue clear above ambience",
+        "no repeated sound that reads as a bug (no double-trigger, no loop click)",
+    ],
+    "save_load": [
+        "loading restores exactly what was saved - nothing silently defaults",
+        "a save never corrupts an existing one (write then swap, or version it)",
+        "the player can see that the game saved",
+    ],
+    "objectives": [
+        "the current objective always answers 'what do I do next?'",
+        "completion is unambiguous: shown, then cleared - never left hanging",
+        "objectives follow the world instead of pointing at deleted things",
+    ],
+    "inventory": [
+        "what the player carries and what is equipped is always visible",
+        "an unusable item says WHY (locked, no room, wrong context)",
+        "pick-up and use are immediate - no menu detour for the common case",
+    ],
+    "progression": [
+        "progress is visible and bounded: the player knows how far along they are",
+        "rewards arrive at a pace that keeps the loop worth repeating",
+        "no wrong early choice can make a reward unobtainable",
+    ],
+    "dialog": [
+        "dialogue is skippable and never traps input",
+        "speakers are unmistakable (framing, camera or portrait)",
+        "branches always have an obvious way back to the main path",
+    ],
+    "vfx_feedback": [
+        "effects communicate state - they are not decoration",
+        "effects stay readable and never obscure the gameplay area",
+        "intensity scales with importance: a big moment looks bigger",
+    ],
+    "polish_pass": [
+        "no placeholder text, no missing references, no default names in player-facing content",
+        "every other system's quality bars were checked against the running game",
+        "five minutes of play without a single error line in the log",
+    ],
+}
+
+# For a system the library does not know (e.g. one a model invented).
+GENERIC_QUALITY_BARS: List[str] = [
+    "the player can tell what happened and why",
+    "nothing reads as a bug: no flicker, no stuck state, no dead input",
+    "it still behaves after five minutes of play",
+]
+
+
+def quality_for(recipe_id: str) -> List[str]:
+    """Quality bars for a system id (generic bars when the id is unknown)."""
+    return list(QUALITY_BARS.get(recipe_id) or GENERIC_QUALITY_BARS)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-label="The 40 RPM budget: reserve, soft cap, chill, rate-limited">
+<title>The 40 RPM budget: reserve, soft cap, chill, rate-limited</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<text x="40" y="44" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="700" fill="#e8edf5" text-anchor="start" opacity="1.0">The 40 RPM budget — calmly not using everything</text>
+<text x="40" y="70" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Free NVIDIA NIM keys allow ~40 requests/minute with no usage API. Nex counts them itself and leaves headroom, so the next minute always has budget.</text>
+<rect x="60" y="130" width="1080" height="86" rx="10" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="74.0" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="100.3" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="126.6" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="152.9" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="179.2" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="205.5" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="231.8" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="258.1" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="284.4" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="310.70000000000005" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="337.0" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="363.3" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="389.6" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="415.90000000000003" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="442.2" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="468.5" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="494.8" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="521.1" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="547.4000000000001" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="573.7" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="600.0" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="626.3000000000001" y="150" width="20.3" height="46" rx="4" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<rect x="652.6" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="678.9" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="705.2" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="731.5" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="757.8000000000001" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="784.1" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="810.4" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="836.7" y="150" width="20.3" height="46" rx="4" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<rect x="863.0" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="889.3000000000001" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="915.6" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="941.9" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="968.2" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="994.5" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="1020.8000000000001" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="1047.1" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="1073.4" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<rect x="1099.7" y="150" width="20.3" height="46" rx="4" fill="#232c3c" stroke="#232c3c" stroke-width="0" opacity="1.0"/>
+<text x="74" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">requests in the current 60-second window</text>
+<text x="1126" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">40 = the published free-tier budget</text>
+<text x="74" y="212" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#76b900" text-anchor="start" opacity="1.0">1-22 normal build traffic</text>
+<text x="540" y="212" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#f0a000" text-anchor="start" opacity="1.0">23-30 deliberate pause zone</text>
+<text x="1126" y="212" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">31-40 reserve</text>
+<text x="60" y="262" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#f0a000" text-anchor="start" opacity="1.0">reserve 25 %   soft cap = round(40 x 0.75) = 30</text>
+<text x="60" y="284" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">min_interval_s = 1 s   max_chill_s = 8 s   NEX_NIM_RPM overrides the budget</text>
+<rect x="60" y="320" width="1080" height="52" rx="9" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="60" y="320" width="5" height="52" rx="3" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<text x="80" y="352" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#76b900" text-anchor="start" opacity="1.0">below the soft cap</text>
+<text x="520" y="352" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">the call goes out normally</text>
+<rect x="60" y="382" width="1080" height="52" rx="9" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="60" y="382" width="5" height="52" rx="3" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="80" y="414" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#4c8dff" text-anchor="start" opacity="1.0">inside the reserve, a fallback exists</text>
+<text x="520" y="414" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">the request routes around it (paced_skips++) and the fallback serves</text>
+<rect x="60" y="444" width="1080" height="52" rx="9" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="60" y="444" width="5" height="52" rx="3" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<text x="80" y="476" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#f0a000" text-anchor="start" opacity="1.0">inside the reserve, no fallback</text>
+<text x="520" y="476" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">bounded chill (&lt;= max_chill_s), then the call goes out</text>
+<rect x="60" y="506" width="1080" height="52" rx="9" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="60" y="506" width="5" height="52" rx="3" fill="#e5484d" stroke="#e5484d" stroke-width="0" opacity="1.0"/>
+<text x="80" y="538" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e5484d" text-anchor="start" opacity="1.0">window completely full</text>
+<text x="520" y="538" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#e8edf5" text-anchor="start" opacity="1.0">chill if a slot is near, else mark rate_limited and fail over</text>
+<text x="60" y="588" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Every decision is visible: the chip shows the countdown and the headroom, the log shows provider.paced / provider.trouble / provider.recovered.</text>
+</svg>

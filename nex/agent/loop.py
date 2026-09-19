@@ -291,6 +291,15 @@ class AutonomousAgent:
                    servers=[s.name for s in self.registry.servers])
         if state is None:
             state = ProjectState(goal=goal)
+        # Which engines are live in THIS run: the project memory carries it so
+        # later reviews (critic/tester) know which engine's defect classes to
+        # look for — a Roblox character sinks, an Unreal pawn never moves.
+        try:
+            from mcp_engines import normalize_platform
+            _plats = [normalize_platform(s.name) for s in self.registry.servers]
+            state.set_engines([p for p in _plats if p])
+        except Exception:  # noqa: BLE001
+            pass
 
         # --- Resume from a checkpoint (RECONCILE-ON-RESUME) -----------------
         # A checkpoint is a claim; reality may have moved (servers down,
@@ -492,6 +501,18 @@ class AutonomousAgent:
         return report
 
     # ------------------------------------------------------------------
+    def _engine_look_for(self, state: ProjectState) -> List[str]:
+        """Engine-specific 'what to look at' lines for the running playtest.
+
+        Comes from the curated platform guides; empty when no engine is
+        known (the review then stays exactly as it was).
+        """
+        try:
+            from mcp_engines import playtest_guidance_for
+            return playtest_guidance_for(getattr(state, "engines", []) or [])
+        except Exception:  # noqa: BLE001
+            return []
+
     def _review_system(self, goal: str, state: ProjectState) -> None:
         """REVIEWER role: prove/fail the scoped system's criteria from the
         runtime evidence. Scoped context, validated output, never fatal."""
@@ -507,7 +528,9 @@ class AutonomousAgent:
             obs = list(getattr(state, "observations", []) or [])
             reply = self.llm([{"role": "user", "content":
                                system_prompt(REVIEWER) + "\n\n"
-                               + reviewer_context(crit, obs)}])
+                               + reviewer_context(
+                                   crit, obs,
+                                   playtest=self._engine_look_for(state))}])
             data = reviewer_json(reply)
             if not data:
                 return
@@ -900,6 +923,7 @@ class AutonomousAgent:
                 state.upsert_system(sys_plan.id, recipe=sys_plan.recipe,
                                     notes=sys_plan.why)
                 state.set_criteria(sys_plan.id, sys_plan.checklist)
+                state.set_quality(sys_plan.id, getattr(sys_plan, "quality", []) or [])
             cur = gp.current()
             env = scope_envelope(cur, gp.remaining(),
                                  max_steps=self.max_steps_per_system)

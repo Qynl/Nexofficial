@@ -320,6 +320,16 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _next_candidate(chain: List[str], index: int) -> str:
+    """Human sentence fragment for "who takes over"."""
+    rest = [n for n in chain[index + 1:]]
+    if not rest:
+        return "no fallback is configured"
+    if len(rest) == 1:
+        return "%s continues the build" % rest[0]
+    return "%s or %s continues the build" % (rest[0], rest[-1])
+
+
 class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Follow redirects only within the same host.
 
@@ -563,7 +573,11 @@ class ProviderSpec:
 
     FIELDS = ("kind", "base_url", "model", "api_key", "api_key_env", "rpm",
               "timeout", "cooldown_s", "label", "enabled", "temperature",
-              "max_tokens", "batch_max", "note", "key_host")
+              "max_tokens", "batch_max", "note", "key_host",
+              # pacing: how much of the RPM window is held back for
+              # interactive/manual calls, how close two requests may sit,
+              # and how long a single call may WAIT instead of spending quota.
+              "reserve", "min_interval_s", "max_chill_s")
 
     def __init__(self, name: str, **kw: Any) -> None:
         base = dict(DEFAULT_PROVIDERS.get(name, {}))
@@ -588,6 +602,11 @@ class ProviderSpec:
         self.temperature = _as_float(base.get("temperature"), 0.2)
         self.max_tokens = _as_int(base.get("max_tokens"), 0)
         self.batch_max = _as_int(base.get("batch_max"), 6)
+        # Keep 25% of a limited window in reserve: a build can always be
+        # paused, but the 41st request in a minute cannot be taken back.
+        self.reserve = min(0.9, max(0.0, _as_float(base.get("reserve"), 0.25)))
+        self.min_interval_s = max(0.0, _as_float(base.get("min_interval_s"), 1.0))
+        self.max_chill_s = max(0.0, _as_float(base.get("max_chill_s"), 8.0))
         self.enabled = bool(base.get("enabled", True))
         self.note = str(base.get("note") or "")
 
@@ -644,17 +663,31 @@ class ProviderSpec:
         return any(h in self.base_url for h in ("127.0.0.1", "localhost", "::1"))
 
     # -- urls -------------------------------------------------------------
+    def _endpoint(self, suffix: str) -> str:
+        """Base URL + endpoint, WITHOUT doubling the API version.
+
+        A base URL is written the way every provider documents it —
+        ``https://integrate.api.nvidia.com/v1`` — and the OpenAI-compatible
+        endpoint is ``/v1/chat/completions``, so appending naively produces
+        ``/v1/v1/chat/completions`` and a 404 that looks like a provider
+        failure. The version segment belongs to exactly one of the two.
+        """
+        base = (self.base_url or "").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-len("/v1")]
+        return base + suffix
+
     @property
     def chat_url(self) -> str:
         if self.kind == KIND_OLLAMA:
-            return self.base_url + "/api/chat"
-        return self.base_url + "/v1/chat/completions"
+            return self._endpoint("/api/chat")
+        return self._endpoint("/v1/chat/completions")
 
     @property
     def models_url(self) -> str:
         if self.kind == KIND_OLLAMA:
-            return self.base_url + "/api/tags"
-        return self.base_url + "/v1/models"
+            return self._endpoint("/api/tags")
+        return self._endpoint("/v1/models")
 
     def masked(self) -> Dict[str, Any]:
         return {
@@ -669,6 +702,7 @@ class ProviderSpec:
             "unconfigured_reason": self.unconfigured_reason,
             "rpm": self.rpm, "timeout": self.timeout,
             "cooldown_s": self.cooldown_s, "enabled": self.enabled,
+            "reserve": self.reserve, "min_interval_s": self.min_interval_s,
             "configured": self.configured, "note": self.note,
         }
 
@@ -695,6 +729,10 @@ class ProviderState:
         self.auth_failures = 0
         self.batch_splits = 0
         self.last_retry_after: Optional[float] = None
+        self.reserve_ratio = 0.25
+        self.last_call_clock = 0.0
+        self.chills = 0
+        self.paced_skips = 0
         # A rejected key is a CONFIG problem: it blocks the provider for much
         # longer than a rate limit and is only lifted by fixing the config.
         self.auth_blocked_until = 0.0
@@ -713,6 +751,20 @@ class ProviderState:
         if self.rpm <= 0:
             return 10 ** 6
         return max(0, self.rpm - self.used_in_window())
+
+    def soft_cap(self) -> int:
+        """Where we STOP spending and start saving (rpm minus the reserve)."""
+        if self.rpm <= 0:
+            return 10 ** 6
+        return max(1, int(round(self.rpm * (1.0 - self.reserve_ratio))))
+
+    def seconds_until_slot(self) -> float:
+        """Seconds until the oldest request leaves the window (0 if room)."""
+        now = self._clock()
+        self._trim(now)
+        if self.rpm <= 0 or len(self._window) < self.rpm:
+            return 0.0
+        return max(0.0, 60.0 - (now - self._window[0]))
 
     def reserve(self) -> bool:
         """Take one request slot. False = local budget exhausted."""
@@ -777,8 +829,14 @@ class ProviderState:
             self.rate_limited += 1
             self.status = ST_RATE_LIMITED
             self.last_retry_after = retry_after
-            wait = retry_after if retry_after else 20.0
-            self.cooldown_until = now + max(2.0, min(float(wait), 300.0))
+            # Retry when it can ACTUALLY work again: either the moment the
+            # provider asked for (Retry-After) or the moment our own window
+            # frees a slot — whichever is later. That is what makes "after
+            # the minute is over, NIM is tried again" true instead of
+            # hopeful: a fixed 20s cooldown would just hit the wall again.
+            window_wait = self.seconds_until_slot()
+            wait = max(float(retry_after or 0.0), window_wait, 2.0)
+            self.cooldown_until = now + min(wait, 120.0)
         elif kind in (ERR_TIMEOUT, ERR_NETWORK):
             self.status = ST_COOLING
             self.cooldown_until = now + 5.0
@@ -820,6 +878,10 @@ class ProviderState:
             "rate_limited": self.rate_limited,
             "auth_failures": self.auth_failures,
             "batch_splits": self.batch_splits,
+            "soft_cap": self.soft_cap(),
+            "chills": self.chills,
+            "paced_skips": self.paced_skips,
+            "headroom": self.rpm > 0 and self.used_in_window() >= self.soft_cap(),
         }
 
 
@@ -868,6 +930,7 @@ class Router:
             st = self.states.setdefault(name, ProviderState(name, spec.rpm,
                                                             self._clock))
             st.rpm = spec.rpm
+            st.reserve_ratio = spec.reserve
             if not spec.enabled:
                 st.status = ST_DISABLED
             elif not spec.configured:
@@ -900,6 +963,7 @@ class Router:
             if state is None:
                 state = ProviderState(name, spec.rpm, self._clock)
             state.rpm = spec.rpm
+            state.reserve_ratio = spec.reserve
             if current is not None and (
                     current.base_url != spec.base_url
                     or current.api_key != spec.api_key
@@ -962,7 +1026,12 @@ class Router:
         for name in self.fallbacks(role):
             if name in self.specs and name not in order:
                 order.append(name)
-        if not order and "local" in self.specs:
+        # The LOCAL model is the terminal fallback and cannot be removed from
+        # a chain: it is the only provider that cannot lose a key, run out of
+        # quota or answer with a 5xx. Everything else is explicit — but if
+        # NIM is rate-limited and no GPT is configured, Ollama takes over
+        # without anyone having to configure that.
+        if "local" in self.specs and "local" not in order:
             order.append("local")
         return order
 
@@ -978,6 +1047,279 @@ class Router:
             pass
 
     # -- transport --------------------------------------------------------
+    # -- event helpers (shared by chat() and chat_stream()) ---------------
+    def _emit_failure(self, name: str, spec: ProviderSpec, state: ProviderState,
+                      role: str, purpose: str, exc: ProviderError,
+                      chain: List[str], index: int) -> None:
+        """One failed attempt: status + (when it is not the quota) trouble."""
+        self._emit({
+            "type": "provider.status", "provider": name,
+            "role": role, "status": state.status,
+            "error_kind": exc.kind, "error": str(exc)[:200],
+            "detail": self._detail_line(), "purpose": purpose,
+            "roles": self.role_snapshot(),
+        })
+        if exc.kind != ERR_RATE_LIMIT:
+            # "if it's not a rate limit error it tells me" — a timeout, a
+            # 5xx or an unusable answer is NOT the quota and the operator
+            # should hear about it, even though the work continues on the
+            # next provider.
+            human = {
+                ERR_TIMEOUT: "timed out",
+                ERR_SERVER: "answered with a server error (5xx)",
+                ERR_NETWORK: "is unreachable",
+                ERR_PARSE: "returned an unusable answer",
+                ERR_CONFIG: "is misconfigured",
+                ERR_BAD_REQUEST: "rejected the request",
+            }.get(exc.kind, exc.kind)
+            self._emit({
+                "type": "provider.trouble", "provider": name,
+                "role": role, "error_kind": exc.kind,
+                "error": str(exc)[:200], "purpose": purpose,
+                "retry_in_s": round(max(0.0, state.cooldown_until
+                                        - self._clock()), 1),
+                "detail": "%s %s — %s; %s is retried automatically"
+                          % (spec.label or name, human,
+                             _next_candidate(chain, index),
+                             spec.label or name),
+                "roles": self.role_snapshot(),
+            })
+        if exc.kind == ERR_AUTH:
+            # NOT a quiet failover: the key is wrong/expired and the operator
+            # has to know. The call still continues on the next provider so a
+            # build is not lost to a config mistake.
+            self._emit({
+                "type": "provider.auth_error", "provider": name,
+                "role": role, "status": state.status,
+                "auth_blocked_s": state.to_dict()["auth_blocked_s"],
+                "error": str(exc)[:200], "purpose": purpose,
+                "detail": ("key rejected — fix %s in the settings; "
+                           "Nex continues on the fallback provider"
+                           % (spec.label or name)),
+                "roles": self.role_snapshot(),
+            })
+
+    def _emit_serving(self, name: str, spec: ProviderSpec, role: str,
+                      purpose: str, primary: str, chain: List[str]) -> None:
+        """A provider (not necessarily the primary) answered."""
+        previous = self._last_served.get(role, "")
+        switched = previous not in (None, "", name)
+        self._last_served[role] = name
+        if name != primary:
+            # The plan does NOT change — only the hands.
+            self._emit({"type": "provider.fallback", "role": role,
+                        "from": primary, "to": name,
+                        "error_kind": (self.states[primary].last_error_kind
+                                       if primary in self.states else ""),
+                        "purpose": purpose, "plan_continues": True,
+                        "roles": self.role_snapshot()})
+            return
+        self._emit({"type": "provider.call", "role": role,
+                    "provider": name, "model": self.role_model(role),
+                    "purpose": purpose, "recovered": switched,
+                    "roles": self.role_snapshot()})
+        if switched:
+            # A rate limit is temporary by definition. When the window has
+            # room again the primary is simply used again — and that is worth
+            # saying out loud.
+            self._emit({"type": "provider.recovered", "role": role,
+                        "provider": name,
+                        "model": self.role_model(role),
+                        "was": previous,
+                        "detail": "%s is available again — %s is the "
+                                  "builder again"
+                                  % (spec.label or name, purpose or role),
+                        "roles": self.role_snapshot()})
+
+    # ------------------------------------------------------------------
+    # streaming
+    # ------------------------------------------------------------------
+    def _stream_http(self, url: str, body: Dict[str, Any],
+                     headers: Dict[str, str], timeout: float):
+        """Default streaming transport: POST, yield decoded lines.
+
+        Kept as a thin, injectable seam (``_transport["stream"]``) so tests
+        never open a socket — the same discipline as the non-streaming
+        transport.
+        """
+        data = json.dumps(body).encode("utf-8")
+        hdrs = dict(headers or {})
+        hdrs.setdefault("Content-Type", "application/json")
+        req = urllib.request.Request(url, data=data, headers=hdrs,
+                                     method="POST")
+        with _OPENER.open(req, timeout=timeout) as resp:
+            for raw in resp:
+                yield raw.decode("utf-8", errors="replace")
+
+    def _stream_call(self, spec: ProviderSpec,
+                     messages: List[Dict[str, str]],
+                     temperature: Optional[float] = None):
+        """Stream one provider call. Raises ProviderError before the first
+        token if the provider cannot serve it at all."""
+        try:
+            validate_base_url(spec.base_url)
+        except ValueError as exc:
+            raise ProviderError(ERR_CONFIG, str(exc)) from None
+        if spec.key_mismatch:
+            raise ProviderError(ERR_CONFIG,
+                                "key/endpoint mismatch: "
+                                + spec.unconfigured_reason)
+        headers: Dict[str, str] = {}
+        if spec.key:
+            headers["Authorization"] = "Bearer " + spec.key
+        temp = spec.temperature if temperature is None else temperature
+        if spec.kind == KIND_OLLAMA:
+            body: Dict[str, Any] = {"model": spec.model, "messages": messages,
+                                    "stream": True,
+                                    "options": {"temperature": temp}}
+        else:
+            body = {"model": spec.model, "messages": messages,
+                    "stream": True, "temperature": temp}
+            mt = spec.max_tokens
+            if mt:
+                body["max_tokens"] = mt
+        stream = self._transport.get("stream") or self._stream_http
+        try:
+            lines = stream(spec.chat_url, body, headers, spec.timeout)
+            for raw in lines:
+                line = (raw or "").strip()
+                if not line:
+                    continue
+                if spec.kind == KIND_OLLAMA:
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    chunk = (obj.get("message") or {}).get("content")
+                    if chunk:
+                        yield chunk
+                    if obj.get("done"):
+                        return
+                    continue
+                if line.startswith("data:"):
+                    line = line[len("data:"):].strip()
+                if not line or line == "[DONE]":
+                    if line == "[DONE]":
+                        return
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                chunk = delta.get("content")
+                if chunk:
+                    yield chunk
+                if choices[0].get("finish_reason"):
+                    return
+        except urllib.error.HTTPError as exc:
+            raise _classify_http_error(exc) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            kind = ERR_TIMEOUT if "timed out" in repr(exc).lower() else ERR_NETWORK
+            raise ProviderError(kind, "unreachable: %r" % (exc,)) from None
+
+    def chat_stream(self, role: str, messages: List[Dict[str, str]],
+                    purpose: str = "",
+                    temperature: Optional[float] = None):
+        """Stream a chat answer for `role` through the SAME chain as chat().
+
+        Yields content tokens. The routing rules are not duplicated: the
+        chain order, the pacing/reserve check, the cooldown and the key
+        binding are the ones the non-streaming call uses, and the same
+        events are emitted.
+
+        One deliberate difference: a provider is only swapped while NOTHING
+        has been streamed yet. Once tokens reached the caller a second
+        provider would repeat the visible answer, so the stream ends there
+        and the failure is reported instead (an honest partial answer beats
+        a duplicated one).
+        """
+        chain = self.chain(role)
+        attempts: List[Dict[str, Any]] = []
+        primary = chain[0] if chain else ""
+        for index, name in enumerate(chain):
+            spec = self.specs.get(name)
+            state = self.states.get(name)
+            if spec is None or state is None:
+                continue
+            if not spec.configured:
+                state.mark_missing_key()
+                attempts.append({"provider": name, "error": "not configured"})
+                continue
+            if not state.available():
+                attempts.append({"provider": name, "error": state.status})
+                continue
+            if self._pace(role, chain, index, name, spec, state, purpose) \
+                    == "skip":
+                attempts.append({"provider": name, "error": "pacing"})
+                continue
+            if not state.reserve():
+                state.mark_error(ERR_RATE_LIMIT,
+                                 "local RPM budget exhausted (%d/min)"
+                                 % spec.rpm)
+                attempts.append({"provider": name, "error": "rpm_budget"})
+                self._emit({"type": "provider.status",
+                            "roles": self.role_snapshot(),
+                            "note": "budget exhausted"})
+                continue
+            state.total_calls += 1
+            state.last_call_ts = time.time()
+            state.last_call_clock = self._clock()
+            first: Optional[str] = None
+            try:
+                stream = self._stream_call(spec, messages, temperature)
+                for token in stream:
+                    first = token
+                    break
+            except ProviderError as exc:
+                state.mark_error(exc.kind, str(exc), exc.retry_after)
+                attempts.append({"provider": name, "error": exc.kind,
+                                 "detail": str(exc)[:200]})
+                self._emit_failure(name, spec, state, role, purpose, exc,
+                                   chain, index)
+                continue
+            except Exception as exc:  # noqa: BLE001 — transport surprises
+                state.mark_error(ERR_NETWORK, repr(exc))
+                attempts.append({"provider": name, "error": ERR_NETWORK,
+                                 "detail": repr(exc)[:200]})
+                self._emit_failure(name, spec, state, role, purpose,
+                                   ProviderError(ERR_NETWORK, repr(exc)),
+                                   chain, index)
+                continue
+            if not first:
+                # A connection that opens and says nothing is not an answer.
+                exc = ProviderError(ERR_PARSE, "empty stream from provider")
+                state.mark_error(exc.kind, str(exc))
+                attempts.append({"provider": name, "error": exc.kind,
+                                 "detail": str(exc)[:200]})
+                self._emit_failure(name, spec, state, role, purpose, exc,
+                                   chain, index)
+                continue
+            state.mark_ok()
+            state.total_ok += 1
+            self._emit_serving(name, spec, role, purpose, primary, chain)
+            yield first
+            try:
+                for token in stream:
+                    yield token
+            except ProviderError as exc:
+                # Mid-answer failure: the caller already has text. Do NOT
+                # restart on another provider (that would duplicate it) —
+                # record it and let the stream end.
+                state.mark_error(exc.kind, str(exc), exc.retry_after)
+                self._emit_failure(name, spec, state, role, purpose, exc,
+                                   chain, index)
+            except Exception as exc:  # noqa: BLE001
+                state.mark_error(ERR_NETWORK, repr(exc))
+                self._emit_failure(name, spec, state, role, purpose,
+                                   ProviderError(ERR_NETWORK, repr(exc)),
+                                   chain, index)
+            return
+        raise AllProvidersFailed(role, attempts)
+
     def _call(self, spec: ProviderSpec, messages: List[Dict[str, str]],
               temperature: Optional[float] = None,
               max_tokens: Optional[int] = None,
@@ -1026,6 +1368,84 @@ class Router:
         return text
 
     # -- public API -------------------------------------------------------
+    # -- pacing: spend the rate budget on purpose, not by accident --------
+    def _has_candidate(self, chain: List[str], after: int) -> bool:
+        """Is there a usable provider further down the chain?"""
+        for name in chain[after + 1:]:
+            spec = self.specs.get(name)
+            state = self.states.get(name)
+            if spec and state and spec.configured and state.available():
+                return True
+        return False
+
+    def _chill(self, seconds: float, name: str, state: ProviderState,
+               purpose: str, reason: str) -> None:
+        """Wait a bounded moment instead of spending quota we do not have."""
+        if seconds <= 0:
+            return
+        state.chills += 1
+        self._emit({"type": "provider.paced", "provider": name,
+                    "reason": reason, "chill_s": round(seconds, 1),
+                    "purpose": purpose, "roles": self.role_snapshot()})
+        time.sleep(seconds)
+
+    def _pace(self, role: str, chain: List[str], index: int, name: str,
+              spec: ProviderSpec, state: ProviderState, purpose: str) -> str:
+        """Decide whether this provider may spend a request right now.
+
+        The NIM free tier is ~40 requests/minute with unpublished per-model
+        limits, and going over is not recoverable — a 429 is a wasted request.
+        So a limit is not a goal to reach, it is a ceiling to stay under:
+
+          * a RESERVE (25% by default) is held back, so a build never eats
+            the entire allowance of the minute;
+          * while inside the reserve, a request is routed around to the
+            fallback if one is usable (the plan continues either way);
+          * if this is the only option left, it CHILLS for a bounded moment
+            instead of hammering — and only calls when the window has room;
+          * consecutive calls to the same provider keep a minimum spacing.
+
+        Returns "call" (go ahead, possibly after a short chill) or "skip".
+        """
+        if state.rpm <= 0:
+            return "call"
+        used = state.used_in_window()
+        if used >= state.rpm:
+            # Hard ceiling reached: the next request WOULD be a 429.
+            wait = state.seconds_until_slot()
+            if wait <= spec.max_chill_s:
+                self._chill(wait, name, state, purpose, "window full")
+                return "call"
+            state.mark_error(ERR_RATE_LIMIT,
+                             "RPM window full (%d/min) — next slot in %.0fs" %
+                             (state.rpm, wait))
+            self._emit({"type": "provider.paced", "provider": name,
+                        "reason": "window full",
+                        "chill_s": round(wait, 1), "purpose": purpose,
+                        "budget_left": 0, "roles": self.role_snapshot()})
+            return "skip"
+        if used >= state.soft_cap():
+            # Inside the reserve: let a fallback absorb the work and keep the
+            # remaining allowance for whatever comes next.
+            if self._has_candidate(chain, index):
+                state.paced_skips += 1
+                self._emit({"type": "provider.paced", "provider": name,
+                            "reason": "headroom reserve (%d of %d used, "
+                                      "soft cap %d)" % (used, state.rpm,
+                                                        state.soft_cap()),
+                            "chill_s": 0, "purpose": purpose,
+                            "budget_left": state.rpm - used,
+                            "roles": self.role_snapshot()})
+                return "skip"
+            wait = min(state.seconds_until_slot(), spec.max_chill_s)
+            self._chill(wait, name, state, purpose, "headroom, no fallback")
+        # Minimum spacing between two calls to the same provider.
+        gap = self._clock() - state.last_call_clock
+        if spec.min_interval_s and gap < spec.min_interval_s:
+            self._chill(spec.min_interval_s - gap, name, state, purpose,
+                        "pacing")
+        return "call"
+
     def chat(self, role: str, messages: List[Dict[str, str]],
              purpose: str = "", temperature: Optional[float] = None,
              max_tokens: Optional[int] = None,
@@ -1035,7 +1455,7 @@ class Router:
         chain = self.chain(role)
         attempts: List[Dict[str, Any]] = []
         primary = chain[0] if chain else ""
-        for name in chain:
+        for index, name in enumerate(chain):
             spec = self.specs.get(name)
             state = self.states.get(name)
             if spec is None or state is None:
@@ -1047,6 +1467,10 @@ class Router:
             if not state.available():
                 attempts.append({"provider": name, "error": state.status})
                 continue
+            if self._pace(role, chain, index, name, spec, state, purpose) \
+                    == "skip":
+                attempts.append({"provider": name, "error": "pacing"})
+                continue
             if not state.reserve():
                 state.mark_error(ERR_RATE_LIMIT,
                                  "local RPM budget exhausted (%d/min)" % spec.rpm)
@@ -1057,51 +1481,19 @@ class Router:
                 continue
             state.total_calls += 1
             state.last_call_ts = time.time()
+            state.last_call_clock = self._clock()
             try:
                 text = self._call(spec, messages, temperature, max_tokens, timeout)
             except ProviderError as exc:
                 state.mark_error(exc.kind, str(exc), exc.retry_after)
                 attempts.append({"provider": name, "error": exc.kind,
                                  "detail": str(exc)[:200]})
-                self._emit({
-                    "type": "provider.status", "provider": name,
-                    "role": role, "status": state.status,
-                    "error_kind": exc.kind, "error": str(exc)[:200],
-                    "detail": self._detail_line(), "purpose": purpose,
-                    "roles": self.role_snapshot(),
-                })
-                if exc.kind == ERR_AUTH:
-                    # NOT a quiet failover: the key is wrong/expired and the
-                    # operator has to know. The call still continues on the
-                    # fallback so a build is not lost to a config mistake.
-                    self._emit({
-                        "type": "provider.auth_error", "provider": name,
-                        "role": role, "status": state.status,
-                        "auth_blocked_s": state.to_dict()["auth_blocked_s"],
-                        "error": str(exc)[:200], "purpose": purpose,
-                        "detail": ("key rejected — fix %s in the settings; "
-                                   "Nex continues on the fallback provider"
-                                   % (spec.label or name)),
-                        "roles": self.role_snapshot(),
-                    })
+                self._emit_failure(name, spec, state, role, purpose, exc,
+                                   chain, index)
                 continue
             state.mark_ok()
             state.total_ok += 1
-            switched = self._last_served.get(role) not in (None, name)
-            self._last_served[role] = name
-            if name != primary:
-                # The plan does NOT change — only the hands.
-                self._emit({"type": "provider.fallback", "role": role,
-                            "from": primary, "to": name,
-                            "error_kind": (self.states[primary].last_error_kind
-                                           if primary in self.states else ""),
-                            "purpose": purpose, "plan_continues": True,
-                            "roles": self.role_snapshot()})
-            else:
-                self._emit({"type": "provider.call", "role": role,
-                            "provider": name, "model": self.role_model(role),
-                            "purpose": purpose, "recovered": switched,
-                            "roles": self.role_snapshot()})
+            self._emit_serving(name, spec, role, purpose, primary, chain)
             return text
         raise AllProvidersFailed(role, attempts)
 

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-label="NEX: two white eyes on black, with the provider chip">
+<title>NEX: two white eyes on black, with the provider chip</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker></defs>
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<text x="48" y="52" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="34" font-weight="700" fill="#e8edf5" text-anchor="start" opacity="1.0">NEX</text>
+<text x="48" y="84" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">a local assistant that builds games through MCP — and shows you which model is doing it</text>
+<rect x="48" y="108" width="500" height="300" rx="10" fill="#000000" stroke="#222a38" stroke-width="1.2" opacity="1.0"/>
+<rect x="150" y="196" width="92" height="128" rx="30" fill="#ffffff" stroke="#ffffff" stroke-width="1.2" opacity="1.0"/>
+<rect x="258" y="196" width="92" height="128" rx="30" fill="#ffffff" stroke="#ffffff" stroke-width="1.2" opacity="1.0"/>
+<text x="298" y="384" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="middle" opacity="1.0">the resting face</text>
+<text x="604" y="128" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">provider chip (always visible)</text>
+<rect x="604" y="152" width="548" height="38" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="604" y="152" width="5" height="38" rx="3" fill="#76b900" stroke="#76b900" stroke-width="0" opacity="1.0"/>
+<text x="622" y="176" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#76b900" text-anchor="start" opacity="1.0">NVIDIA NIM · builder</text>
+<text x="1140" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">12 / 40 this minute</text>
+<rect x="604" y="198" width="548" height="38" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="604" y="198" width="5" height="38" rx="3" fill="#10a37f" stroke="#10a37f" stroke-width="0" opacity="1.0"/>
+<text x="622" y="222" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#10a37f" text-anchor="start" opacity="1.0">GPT-5.1 · planner</text>
+<text x="1140" y="222" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">used sparingly</text>
+<rect x="604" y="244" width="548" height="38" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="604" y="244" width="5" height="38" rx="3" fill="#f0a000" stroke="#f0a000" stroke-width="0" opacity="1.0"/>
+<text x="622" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#f0a000" text-anchor="start" opacity="1.0">gpt-oss:20b · local</text>
+<text x="1140" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">always available</text>
+<rect x="604" y="290" width="548" height="38" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="604" y="290" width="5" height="38" rx="3" fill="#e5484d" stroke="#e5484d" stroke-width="0" opacity="1.0"/>
+<text x="622" y="314" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e5484d" text-anchor="start" opacity="1.0">NIM rate-limited</text>
+<text x="1140" y="314" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">back in ~38 s - local builds meanwhile</text>
+<rect x="604" y="336" width="548" height="38" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="604" y="336" width="5" height="38" rx="3" fill="#4c8dff" stroke="#4c8dff" stroke-width="0" opacity="1.0"/>
+<text x="622" y="360" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#4c8dff" text-anchor="start" opacity="1.0">pacing (headroom)</text>
+<text x="1140" y="360" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">saving quota: 31 of 40 used, soft cap 30</text>
+<rect x="604" y="382" width="548" height="38" rx="8" fill="#141821" stroke="#2b3446" stroke-width="1.2" opacity="1.0"/>
+<rect x="604" y="382" width="5" height="38" rx="3" fill="#e5484d" stroke="#e5484d" stroke-width="0" opacity="1.0"/>
+<text x="622" y="406" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#e5484d" text-anchor="start" opacity="1.0">key warning</text>
+<text x="1140" y="406" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" font-weight="normal" fill="#93a1b8" text-anchor="end" opacity="1.0">rejected / bound to another host</text>
+<text x="48" y="462" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="normal" fill="#93a1b8" text-anchor="start" opacity="1.0">Everything the agent does to your game goes through MCP tools. It never gets a shell, a filesystem or the PC.</text>
+</svg>

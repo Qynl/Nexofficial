@@ -45,6 +45,9 @@ class Task:
     # the checklist criteria it is meant to prove (mandatory verification).
     system: str = ""
     criteria: List[str] = field(default_factory=list)
+    # The standard this system is held to (recipe quality bars). Feeds the
+    # tester/reviewer prompts — not the completion gate.
+    quality: List[str] = field(default_factory=list)
     notes: str = ""
 
 
@@ -148,7 +151,8 @@ class TaskGraph:
                     "error_signature": t.error_signature,
                     "llm_diagnosed": t.llm_diagnosed,
                     "expect": t.expect, "system": t.system,
-                    "criteria": t.criteria, "notes": t.notes,
+                    "criteria": t.criteria, "quality": t.quality,
+                    "notes": t.notes,
                 }
                 for t in self._tasks.values()
             ]
@@ -173,6 +177,7 @@ class TaskGraph:
                 expect=td.get("expect"),
                 system=td.get("system", "") or "",
                 criteria=list(td.get("criteria", []) or []),
+                quality=list(td.get("quality", []) or []),
                 notes=td.get("notes", ""),
             ))
         return g

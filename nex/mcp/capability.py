@@ -57,6 +57,8 @@ CATEGORIES = (READ, CREATE, MODIFY, BUILD, TEST, CODE_EXECUTION,
 # severity-max rule only ever moves tools toward caution.
 _CAT_HINTS: Dict[str, tuple] = {
     READ: ("get", "read", "list", "find", "search", "inspect", "query",
+           "console_output", "output_log", "datamodel_tree", "editor_state",
+           "open_scripts", "actor_details",
            "describe", "fetch", "status", "state", "discover", "export",
            "download", "show", "peek", "analyze",
            # observation + editor inspection (screenshot/log/console are
@@ -71,15 +73,33 @@ _CAT_HINTS: Dict[str, tuple] = {
            "diff", "compare", "check"),
     CREATE: ("create", "add", "new", "spawn", "make", "generate", "import",
              "place", "insert", "build_asset", "add_actor", "create_actor",
-             "duplicate", "clone", "instantiate"),
+             "duplicate", "clone", "instantiate",
+             "create_part", "create_instance", "create_blueprint",
+             "create_level", "create_widget", "insert_model", "insert_asset",
+             "spawn_actor", "add_component", "add_widget", "attach_component"),
     MODIFY: ("set", "update", "edit", "modify", "change", "apply", "adjust",
              "configure", "write", "animate", "move", "transform", "rename",
              "save", "undo", "redo", "pause", "resume", "stop", "teleport",
-             "group", "align", "snap", "parent", "tag", "label", "assign"),
+             "group", "align", "snap", "parent", "tag", "label", "assign",
+             "open_level", "load_level", "save_level", "save_place",
+             "save_current_level", "weld", "sculpt", "paint_terrain",
+             "retarget", "rig_character", "set_actor_transform",
+             "set_actor_property", "set_component_property",
+             "pie_stop", "exit_play"),
     BUILD: ("compile", "build", "package", "bake", "cook", "deploy",
-            "export_package"),
+            "export_package",
+            "compile_blueprint", "build_project", "package_project",
+            "cook_content", "bake_lighting"),
+    # Engine vocabulary. These are WHOLE tool names (the matcher is a
+    # substring test on the lowercased name), chosen so real Roblox Studio /
+    # Unreal MCP tools land in the right bucket instead of UNKNOWN — an
+    # UNKNOWN tool stalls an autonomous run on a confirmation prompt, and a
+    # false TEST costs nothing (TEST is not confirmation-gated).
     TEST: ("run", "launch", "play", "test", "simulate", "verify",
-           "playtest", "inspect_runtime"),
+           "playtest", "inspect_runtime",
+           "play_solo", "start_play", "stop_play", "start_pie", "pie_start",
+           "play_in_editor", "run_playtest", "automation_test",
+           "start_session"),
     DESTRUCTIVE: ("delete", "remove", "destroy", "erase", "drop", "reset",
                   "purge", "wipe", "kill", "terminate", "clear", "uninstall"),
     NETWORK: ("fetch_url", "http_request", "http_get", "httpget", "upload",

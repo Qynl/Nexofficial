@@ -117,11 +117,14 @@ def _attach_scope(graph, scope) -> None:
         return
     sysname = scope.get("system") or ""
     crit = list(scope.get("success") or [])[:4]
+    qual = list(scope.get("quality") or [])[:4]
     for t in graph.all():
         if not getattr(t, "system", ""):
             t.system = sysname
         if not getattr(t, "criteria", None):
             t.criteria = list(crit)
+        if not getattr(t, "quality", None):
+            t.quality = list(qual)
 
 
 def _direct(goal: str, state, llm_call, reachable: bool,
@@ -152,6 +155,7 @@ def _direct(goal: str, state, llm_call, reachable: bool,
                 state.upsert_system(sys_plan.id, recipe=sys_plan.recipe,
                                     notes=sys_plan.why)
                 state.set_criteria(sys_plan.id, sys_plan.checklist)
+                state.set_quality(sys_plan.id, sys_plan.quality)
         cur = gp.current()
         if cur is None:
             return None, gp
@@ -166,6 +170,7 @@ def _direct(goal: str, state, llm_call, reachable: bool,
                  "source": gp.source, "current": cur.id,
                  "objective": env.get("objective"),
                  "success": env.get("success"),
+                 "quality": env.get("quality"),
                  "systems": [{"id": s.id, "title": s.title,
                               "layer": s.layer, "status": s.status,
                               "criteria": len(s.checklist)}
@@ -200,6 +205,8 @@ def _build_plan(goal: str, reg, llm_call, reachable: bool,
                 t.system = sysname
             if not getattr(t, "criteria", None):
                 t.criteria = list(scope.get("success") or [])[:4]
+            if not getattr(t, "quality", None):
+                t.quality = list(scope.get("quality") or [])[:4]
     return graph, None
 
 
