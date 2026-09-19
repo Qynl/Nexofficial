@@ -66,6 +66,8 @@
       model: r.model || '',
       active: r.active || '',
       serving: r.serving || '',
+      active_model: r.active_model || '',
+      serving_model: r.serving_model || '',
       fallback: !!r.fallback,
     };
   }
@@ -98,17 +100,29 @@
     return 'local';
   }
 
+  /* A rejected key is a config problem, not a hiccup: it gets its own mark
+   * so it cannot be mistaken for a rate-limit failover. */
+  function primaryMark(status, name) {
+    const st = providerState(status, name);
+    if (!st) return ' ⛔';
+    if (st.key_mismatch) return ' ⚠key';
+    if (st.last_error_kind === 'auth_error') return ' ⚠key';
+    return ' ⛔';
+  }
+
   /* Main line: "NIM · nemotron-3-super" (+ "→ GPT" while failing over). */
   function chipLabel(status) {
     if (offline(status)) return 'no model';
     const b = role(status, 'builder');
     const active = effective(b);
-    const model = b.serving ? b.model : (b.model || '');
+    const model = (active === b.serving ? (b.serving_model || b.model)
+                                        : (b.active_model || b.model)) || '';
     let out = providerLabel(active);
     const short = shortModel(model);
     if (short) out += ' · ' + short;
     if (b.fallback && b.provider !== active) {
-      out = providerLabel(b.provider) + ' ⛔ → ' + providerLabel(active);
+      out = providerLabel(b.provider) + primaryMark(status, b.provider)
+        + ' → ' + providerLabel(active);
       if (short) out += ' · ' + short;
     }
     return out;
@@ -146,6 +160,9 @@
         + '/' + st.rpm + ' RPM');
     }
     if (st.cooldown_s) bits.push('cooldown ' + Math.ceil(st.cooldown_s) + 's');
+    if (st.auth_blocked_s) {
+      bits.push('key blocked ' + Math.ceil(st.auth_blocked_s) + 's');
+    }
     if (st.last_error_kind) bits.push('last: ' + st.last_error_kind);
     return bits.join(' · ');
   }
@@ -157,10 +174,24 @@
     const p = role(status, 'planner');
     const b = role(status, 'builder');
     const activeName = effective(b) || b.provider;
+    const builderModel = activeName === b.serving
+      ? (b.serving_model || b.model) : (b.active_model || b.model);
     lines.push('🧠 planner: ' + providerLabel(effective(p)) +
                (p.model ? ' · ' + shortModel(p.model, 40) : ''));
     lines.push('🔨 builder: ' + providerLabel(activeName) +
-               (b.model ? ' · ' + shortModel(b.model, 40) : ''));
+               (builderModel ? ' · ' + shortModel(builderModel, 40) : ''));
+    const primaryState = providerState(status, b.provider);
+    if (primaryState && primaryState.key_mismatch) {
+      lines.push('⚠ ' + providerLabel(b.provider) + ': the key belongs to '
+        + (primaryState.key_host || '?') + ', the endpoint is another host — '
+        + 'the key is NOT sent. Re-enter it to confirm the new endpoint.');
+    }
+    if (primaryState && primaryState.last_error_kind === 'auth_error') {
+      lines.push('⚠ ' + providerLabel(b.provider) + ': API key rejected'
+        + (primaryState.auth_blocked_s
+           ? ' (blocked ' + Math.ceil(primaryState.auth_blocked_s) + 's)' : '')
+        + ' — fix it in the settings');
+    }
     if (b.fallback && b.provider && b.provider !== activeName) {
       lines.push('⚠ ' + providerLabel(b.provider) +
                  ' is unavailable — ' + providerLabel(activeName) +
@@ -172,6 +203,21 @@
     if (active) lines.push(providerLabel(activeName) + ': ' + active);
     lines.push('builder acts through MCP tools only');
     return lines.join('\n');
+  }
+
+  /* A key problem (rejected or bound to another host) is a config fault, not
+   * a capacity problem — the chip marks it separately from a plain failover. */
+  function keyProblem(status) {
+    if (!status) return '';
+    const b = role(status, 'builder');
+    const names = [b.provider, effective(b)].filter(Boolean);
+    for (const n of names) {
+      const st = providerState(status, n);
+      if (!st) continue;
+      if (st.key_mismatch) return 'mismatch';
+      if (st.last_error_kind === 'auth_error') return 'rejected';
+    }
+    return '';
   }
 
   /* Which provider just took over — used for the short "switched" flash. */
@@ -190,6 +236,14 @@
     el.textContent = chipLabel(status);
     el.title = chipDetail(status);
     el.dataset.tone = tone(status);
+    const key = keyProblem(status);
+    if (key) {
+      el.dataset.warn = key;
+      el.title = '⚠ key ' + (key === 'rejected' ? 'rejected' : 'bound elsewhere')
+        + '\n' + el.title;
+    } else {
+      delete el.dataset.warn;
+    }
     const plan = el.parentNode &&
       el.parentNode.querySelector('[data-role="provider-planner"]');
     if (plan) {
@@ -210,6 +264,8 @@
     quotaLabel: quotaLabel,
     builderQuota: builderQuota,
     providerBits: providerBits,
+    primaryMark: primaryMark,
+    keyProblem: keyProblem,
     chipDetail: chipDetail,
     switchNote: switchNote,
     render: render,

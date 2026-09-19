@@ -231,9 +231,11 @@ def diagnose_many(items: List[Dict[str, Any]], registry, llm,
                   phase: str = "execute") -> Dict[str, Dict[str, Any]]:
     """Batched diagnosis: ONE builder call for N failures.
 
-    Falls back to the per-task `diagnose()` path whenever the batch answer is
-    unusable — batching may cost a retry, never a repair. Returns validated
-    decisions keyed by task id (empty dict for tasks with no usable decision).
+    A task whose decision is missing or unusable stays WITHOUT a decision:
+    the caller's deterministic paths (regex repair, alternative tool, honest
+    failure) handle it. Deliberately NO per-task fallback here — that would
+    turn one bad batch into N provider requests, which is exactly the
+    multiplication this batching exists to prevent.
     """
     items = [i for i in (items or []) if i.get("task") is not None]
     if not items or llm is None:
@@ -253,18 +255,12 @@ def diagnose_many(items: List[Dict[str, Any]], registry, llm,
         parsed = {}
     out: Dict[str, Dict[str, Any]] = {}
     for key in keys:
-        item = by_key[key]
         decision = parsed.get(key)
-        if decision is not None:
-            normalized = apply_decision(decision, item["task"], registry)
-            if normalized is not None:
-                out[key] = normalized
-                continue
-        # No usable batch answer for this task -> one focused call.
-        single = diagnose(item["task"], item.get("error") or "", registry, llm,
-                          phase=phase)
-        if single is not None:
-            out[key] = single
+        if decision is None:
+            continue
+        normalized = apply_decision(decision, by_key[key]["task"], registry)
+        if normalized is not None:
+            out[key] = normalized
     return out
 
 

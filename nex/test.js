@@ -900,6 +900,60 @@ assert(CHIP.switchNote(NIM_STATUS, FALLBACK_STATUS) === 'NIM → GPT',
 assert(CHIP.switchNote(NIM_STATUS, NIM_STATUS) === '',
        'no switch, no note');
 
+// ------- 6b. provider chip: failover, auth faults, key binding ----------
+
+const AUTH_STATUS = {
+  roles: {
+    planner: { provider: 'local', model: 'gpt-oss:20b', active: 'local',
+               active_model: 'gpt-oss:20b', serving: 'local', fallback: false },
+    builder: { provider: 'nim', model: 'nvidia/nemotron-3-super-120b-a12b',
+               active: 'gpt', active_model: 'gpt-5.1',
+               serving: 'gpt', serving_model: 'gpt-5.1', fallback: true },
+  },
+  providers: {
+    nim: { status: 'error', rpm: 40, last_error_kind: 'auth_error',
+           auth_blocked_s: 880 },
+    gpt: { status: 'available' },
+  },
+};
+assert(CHIP.keyProblem(AUTH_STATUS) === 'rejected',
+       'a rejected key is reported as such');
+assert(CHIP.chipLabel(AUTH_STATUS).indexOf('⚠key') > 0,
+       'the chip marks the key problem, not just the switch: '
+       + CHIP.chipLabel(AUTH_STATUS));
+assert(CHIP.chipLabel(AUTH_STATUS).indexOf('gpt-5.1') > 0,
+       'and it names the model that is REALLY answering (not NIM\'s)');
+const authDetail = CHIP.chipDetail(AUTH_STATUS);
+assert(authDetail.indexOf('API key rejected') > 0, 'the tooltip says the key was rejected');
+assert(authDetail.indexOf('blocked 880s') > 0, '…and how long it is parked');
+assert(authDetail.indexOf('fix it in the settings') > 0, '…and what to do about it');
+
+const MISMATCH_STATUS = JSON.parse(JSON.stringify(AUTH_STATUS));
+MISMATCH_STATUS.providers.nim = { status: 'no_key', key_mismatch: true,
+  key_host: 'integrate.api.nvidia.com' };
+assert(CHIP.keyProblem(MISMATCH_STATUS) === 'mismatch',
+       'a key bound to another host is its own condition');
+assert(CHIP.chipDetail(MISMATCH_STATUS).indexOf('NOT sent') > 0,
+       'the tooltip states the key was not sent (no silent exfiltration)');
+assert(CHIP.chipDetail(MISMATCH_STATUS).indexOf('integrate.api.nvidia.com') > 0,
+       '…and names the host the key belongs to');
+
+const NO_WARN = JSON.parse(JSON.stringify(NIM_STATUS));
+assert(CHIP.keyProblem(NO_WARN) === '', 'a healthy provider has no key problem');
+assert(CHIP.primaryMark(NO_WARN, 'nim') === ' ⛔',
+       'a capacity failover keeps the ⛔ mark');
+assert(CHIP.primaryMark(AUTH_STATUS, 'nim') === ' ⚠key',
+       'a config fault gets the key mark instead');
+
+const RATE_ONLY = JSON.parse(JSON.stringify(AUTH_STATUS));
+RATE_ONLY.providers.nim = { status: 'rate_limited', rpm: 40,
+  requests_in_window: 40, budget_left: 0, cooldown_s: 12.4,
+  last_error_kind: 'rate_limit' };
+assert(CHIP.keyProblem(RATE_ONLY) === '',
+       'a rate limit is NOT a key problem (no false alarm)');
+assert(CHIP.chipLabel(RATE_ONLY).indexOf('⛔') > 0,
+       '…it stays a normal failover');
+
 // ------- done ----------------------------------------------------------
 
 console.log(`\n${pass} passed, ${fail} failed.`);

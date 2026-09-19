@@ -1516,7 +1516,9 @@
           + (evt.task_count || 0) + ' steps for ' + (evt.system || '?');
         p.appendChild(row);
       } else if (evt.type === 'provider.fallback') {
-        // The builder changed hands — the PLAN did not. Say so plainly.
+        // The builder changed hands — the PLAN did not. Say so plainly, and
+        // say WHY: a rate limit is capacity, a rejected key is a config
+        // fault the operator has to fix.
         renderProvider(evt);
         const chip = window.NexProviderChip;
         if (chip) {
@@ -1524,9 +1526,21 @@
             && evt.roles.builder && evt.roles.builder.provider));
           const to = chip.providerLabel(evt.to || (evt.roles
             && evt.roles.builder && evt.roles.builder.active));
-          showToast(from + ' unavailable — ' + to
-            + ' builds instead (same plan)', 'info');
+          if (evt.error_kind === 'auth_error') {
+            showToast(from + ' rejected the API key — ' + to
+              + ' builds instead. Fix the key in settings.', 'err');
+          } else {
+            showToast(from + ' unavailable — ' + to
+              + ' builds instead (same plan)', 'info');
+          }
         }
+      } else if (evt.type === 'provider.auth_error') {
+        renderProvider(evt);
+        const chip = window.NexProviderChip;
+        const who = chip ? chip.providerLabel(evt.provider) : evt.provider;
+        showToast(who + ': API key rejected — open Settings → Models & '
+          + 'providers and check the key (Nex continues on the fallback).',
+          'err');
       } else if (evt.type === 'provider.call'
                  || evt.type === 'provider.status') {
         renderProvider(evt);

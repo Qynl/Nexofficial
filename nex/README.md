@@ -414,6 +414,9 @@ USER -> PLANNER (reasoning, architecture, decomposition)
 | **Planner** | local model (`OLLAMA_MODEL`), or **GPT** when a key is set | called a handful of times per run: design document, systems, tests |
 | **Builder** | **NVIDIA NIM** (`nvidia/nemotron-3-super-120b-a12b`) | called during the build loop; NIM is fast and free, but rate-limited |
 
+The local default is `gpt-oss:20b` — the small model the whole architecture
+is built around (the model is the reasoner, never the source of quality).
+
 Both are configurable per role (settings page → *Models & providers*), down
 to the model id, the endpoint and the RPM budget. A provider list is fetched
 **live** (`/v1/models` / `/api/tags`) so the model ids you see are the ones
@@ -427,6 +430,13 @@ NIM: 429 / timeout / 5xx / RPM exhausted
         +--> GPT builds instead (same plan, same tasks)
         |
         +--> after the cooldown NIM is the builder again
+
+NIM: 401 / 403  (key rejected — a CONFIG fault, not capacity)
+        |
+        +--> the same failover happens (a build is not lost to a typo)
+        +--> but it is announced: provider.auth_error, a red chip mark and a
+             toast, and the provider is parked for NEX_AUTH_BLOCK_S (900s)
+        +--> unblocked instantly by fixing the key (or the endpoint)
 ```
 
 NVIDIA publishes no usage endpoint and no per-model quota (credits were
@@ -442,17 +452,42 @@ baseline), so Nex counts the requests itself:
   `no_key`, exposed to the UI (`/api/providers`, `provider.*` SSE events);
 * **fallback order** — builder: `NIM -> GPT -> local`; planner:
   `GPT -> NIM -> local`. The local model is always last and always works.
+  The chain is **explicit**: only providers named in the role's `fallbacks`
+  list are ever tried, so a new provider (or a new catalog entry) can never
+  silently become the fallback. A configured-but-unnamed provider can still
+  be *chosen* as the primary; it just never enters a chain on its own.
+  Set it in the settings page or with `NEX_BUILDER_FALLBACKS` /
+  `NEX_PLANNER_FALLBACKS` (comma-separated).
 
 Failover replaces the *hands*, never the plan: the same messages are sent to
 the fallback provider and the loop continues exactly where it was.
+
+Two more honesty rules in this layer:
+
+* **chain-of-thought is never the answer.** A reasoning model whose content
+  got cut off returns its scratchpad; that is speculation and it is thrown
+  away (`bad_response`) instead of being handed back to the agent as "the
+  model's decision".
+* **the rate budget belongs to the process, not to the settings.** Editing a
+  provider (endpoint, model, RPM) keeps the sliding window and the cooldowns —
+  a settings change is not a quota reset.
 
 ### Batches, not tiny calls
 
 A rate-limited builder must not spend one request per broken step. Failures
 of the same wave are collected and diagnosed in **one** call
 (`agent.repair_batched`); only a single pending failure gets its own focused
-call. If a batched answer is unusable, the router splits it back into per-job
-calls — batching may cost a retry, never a repair.
+call. If a batched answer is unusable, the chunk is **halved** — never split
+into one call per job:
+
+```
+8 failures -> 1 batched call -> unusable? -> 2 half calls -> hard cap
+             3 provider requests TOTAL (NEX_BATCH_MAX_CALLS, default 3)
+```
+
+Anything that still has no answer stays without one: the deterministic
+repairs take over and the step fails honestly. Batching can cost a retry,
+never a repair — and it can never multiply requests.
 
 ### Keys
 
@@ -464,8 +499,27 @@ Highest precedence first:
 3. settings page → `~/.nex/providers.json` (0600)
 
 Keys are **never** sent back to the browser: the API returns them masked
-(`nvapi-…9f2`). And whatever the provider answers, it is text: the builder's
-only action surface is the MCP registry — it cannot reach the machine.
+(`nvapi-…9f2`). A key is also **bound to the host it was entered for**: if
+the endpoint is later pointed somewhere else, the key stops being sent
+(`key_mismatch`, visibly red in the UI) until it is typed again for the new
+host. That closes the obvious way to steal a key: change the base URL to your
+own server and wait for the Authorization header.
+
+Provider URLs are not free-form either — they are outbound requests with a
+credential attached, so:
+
+* `http`/`https` only, no credentials inside the URL;
+* cloud metadata and link-local targets are refused
+  (`169.254.169.254`, `metadata.google.internal`, `fd00:ec2::254`,
+  `100.100.100.200`, `fe80::/10`) — that is the classic SSRF escalation;
+* a base URL pointing at Nex itself is refused (loop);
+* **redirects are only followed within the same host** — otherwise a 302
+  would hand the Authorization header to a third party;
+* `NEX_PROVIDER_HOSTS=host1,host2` turns the whole thing into a strict
+  allowlist (loopback is always allowed, so local Ollama keeps working).
+
+And whatever the provider answers, it is text: the builder's only action
+surface is the MCP registry — it cannot reach the machine.
 
 Environment knobs:
 
@@ -477,16 +531,23 @@ NEX_PLANNER_PROVIDER=local|gpt|nim  # default: gpt if a key exists, else local
 NEX_BUILDER_PROVIDER=nim|gpt|local  # default: nim if a key exists, else local
 NEX_PLANNER_MODEL / NEX_BUILDER_MODEL
 NEX_NIM_RPM=40                      # client-side budget for the NIM free tier
+NEX_BATCH_MAX_CALLS=3               # hard cap for one batched diagnosis
+NEX_AUTH_BLOCK_S=900                # park a provider whose key was rejected
+NEX_PROVIDER_HOSTS=                  # optional strict allowlist for endpoints
+NEX_BUILDER_FALLBACKS=gpt,local      # explicit chain (nothing implicit)
 NEX_PROVIDERS_FILE=~/.nex/providers.json   # where the settings page stores
 ```
 
 ### The chip
 
-Top right of the UI: which provider is **building right now**, plus its model;
-the dimmer second line names the planner. Amber + pulse means a failover is
-running, grey is the local model, red means no provider at all. The tooltip
-carries the quota (`28/40 RPM`), the cooldown and the reason the previous
-provider stepped aside.
+Top right of the UI: which provider is **building right now**, plus the model
+that is *really* answering (after a failover that is the fallback's model, not
+the configured one), with the planner on a dim second line. Amber + pulse
+means a failover is running, grey is the local model, red means no provider at
+all. A **rejected key and a key bound to another host get their own red mark**
+(`⚠key`) so a config fault cannot be mistaken for a capacity problem. The
+tooltip carries the quota (`28/40 RPM`), the cooldown, the auth block and the
+reason the previous provider stepped aside.
 
 ## Ollama
 
@@ -494,7 +555,7 @@ Optional. Configure via env:
 
 ```
 OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=llama3.2
+OLLAMA_MODEL=gpt-oss:20b
 ```
 
 The face animates entirely offline. Without Ollama, a chat turn surfaces a

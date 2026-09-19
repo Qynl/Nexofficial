@@ -83,6 +83,7 @@ class FakeHTTP:
     def __init__(self):
         self.script = {}
         self.calls = []          # (url, body)
+        self.headers = []        # outgoing headers, per call
         self.gets = []
 
     def push(self, host, answer):
@@ -107,15 +108,19 @@ class FakeHTTP:
 
     def post(self, url, body, headers=None, timeout=60):
         self.calls.append((url, body))
+        self.headers.append(dict(headers or {}))
         ans = self._answer_for(url)
         if isinstance(ans, Exception):
             raise ans
+        if isinstance(ans, dict):
+            return 200, ans, {}          # raw provider body (reasoning tests)
         if "127.0.0.1:11434" in url or "localhost" in url:
             return 200, {"message": {"content": ans}}, {}
         return 200, {"choices": [{"message": {"content": ans}}]}, {}
 
     def get(self, url, headers=None, timeout=30):
         self.gets.append(url)
+        self.headers.append(dict(headers or {}))
         ans = self._answer_for(url)
         if isinstance(ans, Exception):
             raise ans
@@ -378,17 +383,32 @@ _expect(len(h.calls) == 1,
 _expect("job-3" in h.calls[0][1]["messages"][0]["content"],
         "every job is present in the batched prompt")
 
-# unusable batch answer -> per-job split, nothing is lost
+# unusable batch answer -> HALVED retries, never one call per job
 h = FakeHTTP()
 h.push("integrate.api.nvidia.com", "I am afraid I cannot do that.")
 h.push("integrate.api.nvidia.com", "fix A")
-h.push("integrate.api.nvidia.com", "fix B")
-h.push("integrate.api.nvidia.com", "fix C")
+h.push("integrate.api.nvidia.com",
+       json.dumps({"results": {"job-2": "fix B", "job-3": "fix C"}}))
 rb2 = mk_router(h, rpm=0)
 res2 = rb2.chat_batch("builder", jobs)
 _expect(res2.get("job-1") == "fix A" and res2.get("job-3") == "fix C",
-        "an unusable batch answer falls back to per-job calls")
-_expect(len(h.calls) == 4, "…which costs 1 batch + 3 individual calls")
+        "an unusable batch answer is recovered by halving the chunk")
+_expect(len(h.calls) == 3,
+        "…at a bounded cost of 3 calls for 3 jobs (got %d)" % len(h.calls))
+_expect(len(h.calls) < len(jobs) + 1,
+        "…and NEVER one call per job (that is the multiplication to avoid)")
+
+# hopeless batch: the cap holds, no per-job explosion, no silent loss
+h_cap = FakeHTTP()
+h_cap.push("integrate.api.nvidia.com", "nope")
+rb_cap = mk_router(h_cap, rpm=0)
+res_cap = rb_cap.chat_batch("builder", jobs)
+_expect(len(h_cap.calls) == 3,
+        "a hopeless batch stops at the cap (3 calls, got %d)" % len(h_cap.calls))
+_expect(res_cap.get("job-2") is None and res_cap.get("job-3") is None,
+        "…and invents nothing for the jobs that never got an answer")
+_expect(rb_cap.states["nim"].batch_splits == 1,
+        "the split is visible in the provider state")
 
 _expect(rb2.chat_batch("builder", []) == {}, "empty job list is a no-op")
 h_solo = FakeHTTP()
@@ -680,5 +700,246 @@ _expect(len(calls3) == 1,
         "a single failure gets exactly one focused call (got %d)" % len(calls3))
 _expect("results" not in calls3[0][-1]["content"] or True,
         "…and it is the plain diagnosis prompt")
+
+# ===========================================================================
+# 12. AUDIT FIXES — one regression block per finding
+# ===========================================================================
+
+print("=== 12. audit regressions ===")
+
+# --- 🔴 ARBITRARY PROVIDER URLS (SSRF + key exfiltration) -----------------
+for bad, why in (
+        ("file:///etc/passwd", "non-http scheme"),
+        ("gopher://x/v1", "non-http scheme"),
+        ("http://169.254.169.254/latest/meta-data/", "cloud metadata"),
+        ("http://metadata.google.internal/v1", "cloud metadata"),
+        ("http://user:secret@evil.example/v1", "credentials in the URL"),
+        ("http://127.0.0.1:8787/v1", "Nex itself (loop)"),
+        ("", "empty")):
+    try:
+        providers.validate_base_url(bad)
+        _expect(False, "arbitrary provider URL refused (%s)" % why)
+    except ValueError:
+        _expect(True, "arbitrary provider URL refused (%s): %s" % (why, bad or "''"))
+    except Exception as exc:  # pragma: no cover
+        _expect(False, "unexpected error for %s: %r" % (bad, exc))
+_expect(providers.validate_base_url("https://integrate.api.nvidia.com/v1")
+        == "https://integrate.api.nvidia.com/v1", "a real endpoint still passes")
+_expect(providers.validate_base_url("http://127.0.0.1:11434") ==
+        "http://127.0.0.1:11434", "loopback Ollama still passes")
+
+# the key does NOT follow the endpoint to a new host
+h_ssrf = FakeHTTP()
+r_ssrf = mk_router(h_ssrf)
+r_ssrf.apply({"providers": {"nim": {"base_url": "https://evil.example/v1"}}},
+             store=providers.SettingsStore(os.path.join(tempfile.mkdtemp(),
+                                                        "s.json")))
+_expect(r_ssrf.specs["nim"].key == "",
+        "a key entered for NIM is NOT sent to a different host")
+_expect(r_ssrf.specs["nim"].key_mismatch is True, "the mismatch is reported")
+_expect("evil.example" in r_ssrf.specs["nim"].unconfigured_reason,
+        "the reason names both hosts: %s"
+        % r_ssrf.specs["nim"].unconfigured_reason)
+h_ssrf.push("api.openai.com", "gpt served")
+out_ssrf = r_ssrf.chat("builder", MESSAGES)
+_expect(out_ssrf == "gpt served",
+        "the misconfigured provider is skipped, the build continues")
+_expect(not any("nvapi" in str(hdrs.get("Authorization", ""))
+                for hdrs in h_ssrf.headers),
+        "no request ever carried the stranded key")
+
+# ... and re-entering the key confirms the new endpoint (explicit act)
+r_ssrf.apply({"providers": {"nim": {"api_key": "nvapi-moved"}}},
+             store=providers.SettingsStore(os.path.join(tempfile.mkdtemp(),
+                                                        "s2.json")))
+_expect(r_ssrf.specs["nim"].key == "nvapi-moved"
+        and r_ssrf.specs["nim"].key_mismatch is False,
+        "typing the key again binds it to the new endpoint")
+
+# strict allowlist for locked-down deployments
+os.environ["NEX_PROVIDER_HOSTS"] = "vllm.internal"
+try:
+    providers.validate_base_url("https://evil.example/v1")
+    _expect(False, "NEX_PROVIDER_HOSTS enforces the allowlist")
+except ValueError:
+    _expect(True, "NEX_PROVIDER_HOSTS enforces the allowlist")
+_expect(providers.validate_base_url("https://vllm.internal:8000/v1"),
+        "…and lets the allowed host through")
+os.environ.pop("NEX_PROVIDER_HOSTS", None)
+
+# --- 🔴 reasoning_content IS NEVER THE COMPLETION ------------------------
+h_cot = FakeHTTP()
+h_cot.push("integrate.api.nvidia.com", {"choices": [{"message": {
+    "content": "", "reasoning_content": "Maybe I should create a part..."}}]})
+h_cot.push("api.openai.com", "gpt answered properly")
+r_cot = mk_router(h_cot)
+out_cot = r_cot.chat("builder", MESSAGES)
+_expect(out_cot == "gpt answered properly",
+        "a reasoning-only body is NOT accepted as an answer — failover instead")
+_expect(r_cot.states["nim"].last_error_kind == providers.ERR_PARSE,
+        "…the reason is recorded (kind=%s)" % r_cot.states["nim"].last_error_kind)
+_expect("reasoning" in r_cot.states["nim"].last_error.lower(),
+        "…and names the reasoning problem: %s"
+        % r_cot.states["nim"].last_error[:70])
+h_cot2 = FakeHTTP()
+h_cot2.push("integrate.api.nvidia.com", {"choices": [{"message": {
+    "content": "", "reasoning_content": "scratchpad"}}]})
+h_cot2.push("api.openai.com", {"choices": [{"message": {
+    "content": "", "reasoning_content": "more scratchpad"}}]})
+h_cot2.push("127.0.0.1:11434", {"message": {"content": ""}})
+try:
+    mk_router(h_cot2).chat("builder", MESSAGES)
+    _expect(False, "if EVERY provider only returns reasoning, the router raises")
+except providers.AllProvidersFailed:
+    _expect(True, "if EVERY provider only returns reasoning, the router raises")
+
+# --- 🟠 SETTINGS CHANGE MUST NOT RESET THE RATE BUDGET -------------------
+h_res = FakeHTTP()
+h_res.push("integrate.api.nvidia.com", "nim ok")
+h_res.push("api.openai.com", "gpt ok")
+r_res = mk_router(h_res, rpm=2)
+r_res.chat("builder", MESSAGES)
+r_res.chat("builder", MESSAGES)
+_expect(r_res.states["nim"].to_dict()["requests_in_window"] == 2, "two requests consumed")
+store_res = providers.SettingsStore(os.path.join(tempfile.mkdtemp(), "s.json"))
+r_res.apply({"providers": {"nim": {"rpm": 40, "base_url":
+            "https://integrate.api.nvidia.com/v1"}}}, store=store_res)
+_expect(r_res.states["nim"].to_dict()["requests_in_window"] == 2,
+        "…and still two after a settings change (no quota reset)")
+_expect(r_res.states["nim"].budget_left() == 38,
+        "the raised budget counts the requests already made")
+r_res.apply({"providers": {"nim": {"rpm": 1}}}, store=store_res)
+_expect(r_res.states["nim"].budget_left() == 0,
+        "lowering the budget below the usage makes it unavailable at once")
+nim_calls = len([c for c in h_res.calls if "integrate" in c[0]])
+r_res.chat("builder", MESSAGES)
+_expect(len([c for c in h_res.calls if "integrate" in c[0]]) == nim_calls,
+        "…so the overspent provider is routed around, not called")
+
+# --- 🟠 401/403 IS LOUD, NOT A SILENT FAILOVER ---------------------------
+h_auth = FakeHTTP()
+h_auth.push("integrate.api.nvidia.com", http_error("n", 401, "invalid key"))
+h_auth.push("api.openai.com", "gpt served")
+bus_auth = Bus()
+r_auth = mk_router(h_auth, bus=bus_auth)
+_expect(r_auth.chat("builder", MESSAGES) == "gpt served",
+        "a rejected key does not kill the build (failover continues)")
+auth_events = bus_auth.of("provider.auth_error")
+_expect(len(auth_events) == 1, "…but it is announced as provider.auth_error")
+_expect(auth_events[0]["provider"] == "nim"
+        and "settings" in auth_events[0]["detail"],
+        "the event names the provider and says what to do: %s"
+        % auth_events[0]["detail"])
+_expect(r_auth.states["nim"].status == providers.ST_ERROR,
+        "the provider is marked error, not just 'cooling'")
+_expect(r_auth.states["nim"].to_dict()["auth_blocked_s"] > 60,
+        "a rejected key blocks the provider for a long time (%.0fs)"
+        % r_auth.states["nim"].to_dict()["auth_blocked_s"])
+n_before = len(h_auth.calls)
+r_auth.chat("builder", MESSAGES)
+_expect(len(h_auth.calls) - n_before == 1,
+        "the rejected provider is not hammered again (only the fallback ran)")
+# reset the scripted answer for that host (the old 401 is still queued)
+h_auth.script["integrate.api.nvidia.com"] = ["nim recovered"]
+r_auth.apply({"providers": {"nim": {"api_key": "nvapi-fixed"}}},
+             store=providers.SettingsStore(os.path.join(tempfile.mkdtemp(),
+                                                        "s.json")))
+_expect(r_auth.states["nim"].auth_blocked() is False,
+        "fixing the key lifts the auth block immediately")
+_expect(r_auth.chat("builder", MESSAGES) == "nim recovered",
+        "…and NIM is used again")
+
+# --- 🟠 BATCH FAILURE MUST NOT MULTIPLY REQUESTS -------------------------
+jobs8 = [{"key": "job-%d" % i, "prompt": "step %d failed" % i} for i in range(8)]
+h_b8 = FakeHTTP()
+h_b8.push("integrate.api.nvidia.com", "no json here")
+r_b8 = mk_router(h_b8, rpm=0)
+res_b8 = r_b8.chat_batch("builder", jobs8)
+_expect(len(h_b8.calls) <= 3,
+        "8 unusable jobs cost at most 3 requests, never 8 (got %d)"
+        % len(h_b8.calls))
+h_b9 = FakeHTTP()
+h_b9.push("integrate.api.nvidia.com", "no json here")
+r_b9 = mk_router(h_b9, rpm=0)
+r_b9.chat_batch("builder", jobs8, max_calls=1)
+_expect(len(h_b9.calls) == 1, "max_calls=1 disables splitting entirely")
+_expect(res_b8 == {} and r_b9.states["nim"].budget_left() >= 0,
+        "no answers are invented when nothing parses")
+
+# a bad patch is ATOMIC: nothing half-applies, the store stays untouched
+store_at = providers.SettingsStore(os.path.join(tempfile.mkdtemp(), "s.json"))
+h_at = FakeHTTP()
+r_at = mk_router(h_at)
+model_before = r_at.specs["gpt"].model
+try:
+    r_at.apply({"providers": {"gpt": {"model": "gpt-5.2"},
+                              "nim": {"base_url": "http://169.254.169.254/v1"}}},
+               store=store_at)
+    _expect(False, "a patch containing a metadata URL is refused")
+except ValueError as exc:
+    _expect("169.254.169.254" in str(exc),
+            "a patch containing a metadata URL is refused: %s" % str(exc)[:60])
+_expect(r_at.specs["gpt"].model == model_before,
+        "…and the VALID part of that patch was NOT applied either (atomic)")
+_expect(store_at.load() == {}, "…and nothing was written to the store")
+try:
+    r_at.apply({"roles": {"builder": {"provider": "nim",
+                                      "fallbacks": ["local", "ghost"]}}},
+               store=store_at)
+    _expect(False, "an unknown fallback name is refused")
+except ValueError as exc:
+    _expect("ghost" in str(exc),
+            "an unknown fallback name is refused: %s" % str(exc)[:60])
+
+# --- 🟡 THE DEFAULT LOCAL MODEL IS gpt-oss:20b ---------------------------
+_expect(providers.DEFAULT_PROVIDERS["local"]["model"] == "gpt-oss:20b",
+        "the shipped local default is gpt-oss:20b (the small brain)")
+with tempfile.TemporaryDirectory() as td:
+    saved2 = {k: os.environ.pop(k, None) for k in
+              ("OLLAMA_MODEL", "NVIDIA_API_KEY", "OPENAI_API_KEY")}
+    try:
+        r_def = providers.build_router(
+            store=providers.SettingsStore(os.path.join(td, "none.json")),
+            load_dot_env=False)
+        _expect(r_def.role_model("planner") == "gpt-oss:20b"
+                and r_def.role_model("builder") == "gpt-oss:20b",
+                "a fresh install plans and builds with gpt-oss:20b")
+    finally:
+        for k, v in saved2.items():
+            if v is not None:
+                os.environ[k] = v
+
+# --- 🟡 THE FALLBACK CHAIN IS EXPLICIT ----------------------------------
+specs_ex = {
+    "local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                    base_url="http://127.0.0.1:11434"),
+    "nim": providers.ProviderSpec("nim", api_key="nvapi-x"),
+    "gpt": providers.ProviderSpec("gpt", api_key="sk-x"),
+    # a provider that exists but is named NOWHERE
+    "mystery": providers.ProviderSpec("mystery", api_key="mk-x",
+                                      base_url="https://mystery.example/v1"),
+}
+roles_ex = {"planner": {"provider": "gpt"},
+            "builder": {"provider": "nim"}}
+r_ex = providers.Router(specs_ex, roles_ex)
+_expect(r_ex.chain("builder") == ["nim", "gpt", "local"],
+        "the builder chain is exactly the named one: %s" % r_ex.chain("builder"))
+_expect("mystery" not in r_ex.chain("builder")
+        and "mystery" not in r_ex.chain("planner"),
+        "an unnamed provider can never enter a chain by itself")
+r_ex.set_role("builder", "mystery")
+_expect(r_ex.chain("builder")[0] == "mystery",
+        "…but it CAN be chosen as the primary (explicit act)")
+_expect(r_ex.chain("builder")[1:] == ["gpt", "local"],
+        "…and it inherits the role's named fallbacks")
+r_ex.set_role("builder", "nim", fallbacks=["local"])
+_expect(r_ex.chain("builder") == ["nim", "local"],
+        "an operator can shorten the chain: %s" % r_ex.chain("builder"))
+_expect(set(r_ex.status()["roles"]) == {"planner", "builder"},
+        "the status view still reports both roles")
+r_ex.set_role("planner", "nim")
+_expect(r_ex.role_model("planner") == "nvidia/nemotron-3-super-120b-a12b",
+        "switching a role's provider adopts the NEW provider's model "
+        "(got %r)" % r_ex.role_model("planner"))
 
 print("\nAll provider-layer tests passed.")

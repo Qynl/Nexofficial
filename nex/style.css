@@ -1210,6 +1210,15 @@ body.face-trouble #nex {
 
 #provider-planner { font-size: 10px; color: var(--dimmer); }
 
+/* A rejected key / a key bound to another host is a config fault — red, not
+   amber, and it pulses so it is impossible to miss. */
+#provider-chip[data-warn="rejected"],
+#provider-chip[data-warn="mismatch"] {
+  color: var(--bad);
+  border-color: rgba(255, 138, 138, 0.42);
+}
+#provider-chip[data-warn]::before { background: var(--bad); animation: chip-pulse 1.2s infinite; }
+
 @keyframes chip-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }

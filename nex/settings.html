@@ -252,6 +252,27 @@
           </div>
         </div>
       </div>
+      <div class="roles">
+        <div>
+          <div class="row">
+            <label class="meta" style="min-width:70px;" for="role-planner-fallbacks">Fallbacks</label>
+            <input id="role-planner-fallbacks" type="text"
+                   placeholder="comma-separated providers, e.g. nim,local" />
+          </div>
+        </div>
+        <div>
+          <div class="row">
+            <label class="meta" style="min-width:70px;" for="role-builder-fallbacks">Fallbacks</label>
+            <input id="role-builder-fallbacks" type="text"
+                   placeholder="comma-separated providers, e.g. gpt,local" />
+          </div>
+        </div>
+      </div>
+      <div class="meta" style="margin-top:6px;">
+        Only the providers named here are ever tried. A configured provider
+        that is not named can still be <em>chosen</em> as the primary — it just
+        never enters a chain by itself.
+      </div>
       <div class="meta" id="role-hint" style="margin-top:6px;"></div>
     </div>
 
@@ -728,6 +749,15 @@
       wrap.appendChild(r);
     }
 
+    if (spec.key_mismatch || spec.unconfigured_reason) {
+      const warn = document.createElement('div');
+      warn.className = 'meta';
+      warn.style.color = spec.key_mismatch ? '#c45a5a' : '#888';
+      warn.textContent = (spec.key_mismatch ? '⚠ ' : '') +
+        (spec.unconfigured_reason || '');
+      wrap.appendChild(warn);
+    }
+
     const key = document.createElement('input');
     key.type = 'password';
     key.id = 'p-' + name + '-key';
@@ -800,6 +830,8 @@
       const cur = roles[role] || {};
       sel[role].value = cur.provider || names[0] || '';
       modelInput[role].value = (view.role_models || {})[role] || '';
+      const fb = document.getElementById('role-' + role + '-fallbacks');
+      if (fb) fb.value = (cur.fallbacks || []).join(', ');
     }
     const groups = document.getElementById('provider-groups');
     groups.innerHTML = '';
@@ -847,6 +879,7 @@
         const bits = [st.status || '?'];
         if (st.rpm) bits.push((st.requests_in_window || 0) + '/' + st.rpm + ' RPM');
         if (st.cooldown_s) bits.push('cooldown ' + Math.ceil(st.cooldown_s) + 's');
+        if (st.auth_blocked_s) bits.push('key blocked ' + Math.ceil(st.auth_blocked_s) + 's');
         if (st.last_error) bits.push(String(st.last_error).slice(0, 60));
         stat.textContent = bits.join(' · ');
       }
@@ -862,10 +895,13 @@
   document.getElementById('providers-save').addEventListener('click', () => {
     const payload = { providers: {}, roles: {} };
     for (const role of ['planner', 'builder']) {
+      const fbEl = document.getElementById('role-' + role + '-fallbacks');
       payload.roles[role] = {
         provider: document.getElementById('role-' + role).value,
         model: document.getElementById(role === 'planner'
           ? 'role-planner-model' : 'role-builder-model').value,
+        fallbacks: fbEl ? fbEl.value.split(',')
+          .map((x) => x.trim()).filter(Boolean) : [],
       };
     }
     (pState.view ? Object.keys(pState.view.providers) : []).forEach((n) => {
@@ -899,6 +935,21 @@
 
   document.getElementById('providers-reload').addEventListener('click',
     () => loadProviders().then(() => pset('ok', 'reloaded')));
+
+  // Switching a role's provider adopts that provider's model in the field —
+  // a stale model name from the old provider would look configured but would
+  // fail on the first call.
+  ['planner', 'builder'].forEach((role) => {
+    document.getElementById('role-' + role).addEventListener('change', (e) => {
+      const view = pState.view;
+      if (!view || !view.providers) return;
+      const spec = view.providers[e.target.value];
+      if (spec) {
+        document.getElementById(role === 'planner'
+          ? 'role-planner-model' : 'role-builder-model').value = spec.model || '';
+      }
+    });
+  });
 
   document.getElementById('providers-card').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-action="test-provider"]');

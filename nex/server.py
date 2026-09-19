@@ -26,7 +26,8 @@ Environment variables:
                                   NEX_AUTH_TOKEN if you want LAN access)
     OLLAMA_HOST                 base URL of the model server
                                  (default http://127.0.0.1:11434)
-    OLLAMA_MODEL                model name (default llama3.2)
+    OLLAMA_MODEL                model name (default gpt-oss:20b — the small
+                                 local brain the architecture is built for)
     NEX_API_STYLE               'ollama' (default) or 'openai'
     NEX_API_KEY                 optional bearer token
     NEX_TIMEOUT                 per-request seconds (default 60)
@@ -127,7 +128,7 @@ def _load_or_create_auth_token() -> str:
 AUTH_TOKEN = _load_or_create_auth_token()
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b")
 API_STYLE = os.environ.get("NEX_API_STYLE", "ollama").lower()  # 'ollama' | 'openai'
 API_KEY = os.environ.get("NEX_API_KEY", "")
 API_TIMEOUT = float(os.environ.get("NEX_TIMEOUT", "60"))
@@ -1416,6 +1417,12 @@ class NexHandler(BaseHTTPRequestHandler):
             body = self._read_json_body() or {}
             try:
                 view = ROUTER.apply(body)
+            except ValueError as exc:
+                # Invalid configuration (bad URL, metadata target, unknown
+                # provider/fallback). Nothing was changed — say exactly why.
+                self._send_json(400, {"ok": False, "kind": "invalid_configuration",
+                                      "error": str(exc)})
+                return
             except Exception as exc:  # noqa: BLE001
                 self._send_json(400, {"ok": False, "error": repr(exc)})
                 return
