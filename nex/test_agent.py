@@ -341,4 +341,78 @@ _expect(all(len(v) <= 6 for v in _state_big.quality.values()),
 _expect(recipes_q.quality_for("made_up") == recipes_q.GENERIC_QUALITY_BARS,
         "the library answers with generic bars for an unknown system")
 
+# ---------------------------------------------------------------------------
+# Laundering check: "write the payload to a file, then run the file"
+# Regression for the scan_file_payload NameError (missing `import os` in
+# mcp/policy.py) that silently disabled this whole check, and for the
+# fail-closed behaviour when the scan itself raises.
+# ---------------------------------------------------------------------------
+import tempfile as _tempfile  # noqa: E402
+import mcp.policy as _policy  # noqa: E402
+from mcp.policy import Policy as _Policy  # noqa: E402
+
+_launder_tools = [
+    {"name": "run_python", "description": "run a python file",
+     "inputSchema": {"type": "object",
+                     "properties": {"file": {"type": "string"}}}},
+]
+_launder_mock = mock_mcp.MockMCPServer("exec_mcp", _launder_tools)
+_launder_reg = agent_loop.CapabilityRegistry([
+    mock_mcp.server_view("exec_mcp", _launder_mock),
+])
+_dirty = _tempfile.mkdtemp(prefix="nex-launder-")
+_dirty_file = os.path.join(_dirty, "payload.py")
+_launder_policy = _Policy(strict_servers=False,
+                          allow_code_execution={"exec_mcp"})
+_launder_agent = agent_loop.AutonomousAgent(_launder_reg,
+                                            policy=_launder_policy,
+                                            persist=False,
+                                            workspace_root=_dirty)
+with open(_dirty_file, "w", encoding="utf-8") as _f:
+    _f.write("import os\nos.system('id')\n")
+
+# 1) The scan itself works (it used to raise NameError: name 'os' is not
+#    defined — the missing import made every laundering check a no-op).
+_leak = _policy.scan_file_payload(_dirty_file, _dirty)
+_expect(_leak is not None and "os.system" in _leak,
+        "scan_file_payload detects shell execution in a file: %s"
+        % (_leak or "None (NameError regression!)")[:70])
+_expect(_policy.scan_file_payload("does_not_exist.py", _dirty) is None,
+        "scan_file_payload: missing file is not a refusal")
+
+# 2) A code-execution task that names a dirty file is BLOCKED.
+_tg_l = task_graph.TaskGraph()
+_task_l = task_graph.Task(id="l1", name="run payload", stage="build",
+                          server="exec_mcp", tool="run_python",
+                          args={"file": _dirty_file})
+_tg_l.add(_task_l)
+_launder_agent._execute_task(_task_l, project_state.ProjectState(),
+                             _tg_l)
+_expect(_task_l.status == task_graph.FAILED
+        and _task_l.error is not None
+        and "os.system" in str(_task_l.error),
+        "laundered payload (write file, run file) is BLOCKED: %s"
+        % str(_task_l.error)[:70])
+
+# 3) If the scan itself blows up, the call is denied fail-closed (an old
+#    version swallowed the exception and let the call through).
+_real_scan = _policy.scan_file_payload
+def _broken_scan(*_a, **_kw):
+    raise NameError("name 'os' is not defined")
+_policy.scan_file_payload = _broken_scan
+try:
+    _task_b = task_graph.Task(id="l2", name="run payload 2", stage="build",
+                              server="exec_mcp", tool="run_python",
+                              args={"file": _dirty_file})
+    _tg_b = task_graph.TaskGraph()
+    _tg_b.add(_task_b)
+    _launder_agent._execute_task(_task_b, project_state.ProjectState(),
+                                 _tg_b)
+finally:
+    _policy.scan_file_payload = _real_scan
+_expect(_task_b.status == task_graph.FAILED
+        and "fail-closed" in str(_task_b.error),
+        "broken payload scan denies the call fail-closed: %s"
+        % str(_task_b.error)[:80])
+
 print("\nAll agent tests passed.")

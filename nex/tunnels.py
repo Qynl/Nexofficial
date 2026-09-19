@@ -436,11 +436,13 @@ def reload_tunnels(extra: Optional[List[Dict[str, Any]]] = None,
                     continue
         kept.append(c)
     cfg = kept
+    from upstream import _apply_call_timeout
     upstreams = []
     for c in cfg:
         url = c.get("url") or _stdio_url_for(c)
         u = Upstream(c["name"], url,
                      c.get("label") or c["name"])
+        _apply_call_timeout(u, c)
         if _is_stdio_entry(c):
             u._stdio_command = (
                 c["command"], list(c.get("args") or []),

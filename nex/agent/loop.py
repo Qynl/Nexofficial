@@ -1348,8 +1348,21 @@ class AutonomousAgent:
                     if leak:
                         decision = Decision(False, False, leak,
                                             decision.category)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # FAIL CLOSED: a code-execution call that names a file must
+                # be deniable. If the payload scan itself blew up, the safe
+                # outcome is NOT to let the call through — an old version
+                # swallowed the exception here, which is how a broken scan
+                # (a NameError in scan_file_payload) silently disabled the
+                # laundering check for every run.
+                import sys as _sys
+                _sys.stderr.write(
+                    "[nex] file payload scan failed for %s: %r — denying "
+                    "(fail closed)\n" % (task.tool, exc))
+                decision = Decision(False, False,
+                                    "file payload scan failed (%r) — "
+                                    "denied fail-closed" % (exc,),
+                                    decision.category)
         if not decision.allowed:
             self.audit.record(task_id=task.id, server=task.server,
                              tool=task.tool, args=task.args,

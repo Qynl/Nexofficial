@@ -239,7 +239,7 @@ class Upstream:
         HTTP variant so the rest of the dispatcher stays identical.
         """
         from stdio_server import encode_frame, _StdioDecoder
-        import select
+        import os
         import time
         self._ensure_stdio_proc()
         proc = self._stdio_proc
@@ -259,73 +259,107 @@ class Upstream:
                 self._stdio_proc = None
                 raise UpstreamError("stdio write failed: " + repr(exc))
             decoder = _StdioDecoder()
+            # Cross-platform deadline-bounded reads. (select.select on a
+            # pipe is POSIX-only — on Windows it raises, and the old
+            # fallback treated the pipe as always-ready, so read() could
+            # block forever and the timeout never fired. set_blocking is
+            # the portable primitive.)
+            fd = proc.stdout.fileno()
+            os.set_blocking(fd, False)
             try:
-                while True:
-                    now = time.monotonic()
-                    if now >= deadline:
-                        raise UpstreamError(
-                            "stdio read timeout after " + str(to) + "s")
-                    # Non-blocking read with timeout.
+                try:
+                    while True:
+                        now = time.monotonic()
+                        if now >= deadline:
+                            raise UpstreamError(
+                                "stdio read timeout after " + str(to) + "s")
+                        try:
+                            chunk = proc.stdout.read(4096)
+                        except (BlockingIOError, InterruptedError):
+                            time.sleep(min(0.02, max(0.0, deadline - now)))
+                            continue
+                        except (OSError, ValueError):
+                            chunk = b""
+                        if chunk is None:
+                            # glibc: a non-blocking pipe read with no data
+                            # yet returns None (not EAGAIN). None is NOT
+                            # EOF — waiting and retrying is. (Treating it
+                            # as EOF killed healthy children at startup.)
+                            time.sleep(min(0.02, max(0.0, deadline - now)))
+                            continue
+                        if not chunk:
+                            # b"" is the only real EOF on this pipe.
+                            raise UpstreamError(
+                                "stdio child closed before reply "
+                                "(is it actually an MCP stdio server?)")
+                        # feed() RETURNS the complete bodies it has parsed
+                        # (and empties its buffer). The old code ignored
+                        # that return value and instead re-read the now
+                        # empty decoder buffer via _drain_one_body — so
+                        # every stdio reply was silently dropped and every
+                        # stdio call timed out. Consume the return value.
+                        for body_bytes in decoder.feed(chunk):
+                            try:
+                                msg = json.loads(body_bytes)
+                            except ValueError:
+                                continue
+                            # The reply is the envelope that carries OUR
+                            # request id; server-to-client notifications
+                            # (no matching id) are skipped, not answered.
+                            if isinstance(msg, dict) and \
+                                    msg.get("id") == payload.get("id"):
+                                return (200, {},
+                                        body_bytes.decode("utf-8", "replace"))
+                except UpstreamError:
+                    # The child still holds the unanswered request; a late
+                    # reply would poison the NEXT call, so recycle it.
                     try:
-                        r, _, _ = select.select(
-                            [proc.stdout], [], [],
-                            min(0.5, max(0.0, deadline - now)))
-                    except (OSError, ValueError):
-                        r = [proc.stdout]
-                    if not r:
-                        continue
-                    try:
-                        chunk = proc.stdout.read(4096)
-                    except (OSError, ValueError):
-                        chunk = b""
-                    if not chunk:
-                        raise UpstreamError(
-                            "stdio child closed before reply "
-                            "(is it actually an MCP stdio server?)")
-                    decoder.feed(chunk)
-                    body_bytes = self._drain_one_body(decoder)
-                    if body_bytes is not None:
-                        return (200, {}, body_bytes.decode("utf-8", "replace"))
-            except UpstreamError:
-                raise
-
-    def _drain_one_body(self, decoder):
-        """Walk `decoder` to extract exactly one complete body, if any."""
-        buf = decoder._buf
-        if not buf:
-            return None
-        # LSP style: \r\n\r\n header, then body.
-        idx = buf.find(b"\r\n\r\n")
-        delim = b"\r\n\r\n"
-        if idx < 0:
-            idx = buf.find(b"\n\n")
-            delim = b"\n\n"
-        if idx >= 0:
-            hdr = buf[:idx].decode("ascii", "replace")
-            body_off = idx + len(delim)
-            clen = None
-            for line in hdr.splitlines():
-                if line.lower().startswith("content-length:"):
-                    try:
-                        clen = int(line.split(":", 1)[1].strip())
-                    except ValueError:
+                        proc.kill()
+                    except OSError:
                         pass
-                    break
-            if clen is not None and len(buf) >= body_off + clen:
-                body = bytes(buf[body_off:body_off + clen])
-                decoder._buf = bytes(buf[body_off + clen:])
-                return body
-            if clen is None:
-                msg = buf[:idx]
-                decoder._buf = bytes(buf[body_off:])
-                return msg
-        # NDJSON fallback — one message per line.
-        nl = buf.find(b"\n")
-        if nl >= 0:
-            line = buf[:nl].rstrip(b"\r")
-            decoder._buf = bytes(buf[nl + 1:])
-            return line
-        return None
+                    self._stdio_proc = None
+                    raise
+            finally:
+                try:
+                    os.set_blocking(fd, True)
+                except (OSError, ValueError):
+                    pass
+
+    def _notify(self, method: str,
+                params: Optional[Dict[str, Any]] = None,
+                timeout: Optional[float] = None) -> None:
+        """Send a JSON-RPC NOTIFICATION (no id) and do NOT wait for a
+        reply. Per the JSON-RPC/MCP spec a server must not answer
+        notifications, so blocking on one is pure stall — and on stdio
+        it consumed a full call_timeout on every connect()."""
+        payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        if isinstance(self.url, str) and self.url.startswith("stdio://"):
+            from stdio_server import encode_frame
+            self._ensure_stdio_proc()
+            proc = self._stdio_proc
+            frame = encode_frame(json.dumps(payload).encode("utf-8"))
+            with self._stdio_lock:
+                try:
+                    proc.stdin.write(frame)
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError) as exc:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    self._stdio_proc = None
+                    raise UpstreamError("stdio write failed: " + repr(exc))
+            # A successful write to the child's stdin is all a
+            # notification is — there is nothing to read back.
+            return
+        # HTTP: POST it; most servers answer 202/empty. Ignore the
+        # reply — waiting for a JSON-RPC envelope here would be wrong.
+        try:
+            self._post(payload, None, timeout)
+        except UpstreamError:
+            pass
 
     def _rpc(self, method: str, params: Optional[Dict[str, Any]] = None,
              id: Optional[int] = None) -> Dict[str, Any]:
@@ -476,9 +510,13 @@ class Upstream:
         self._server_info = result.get("serverInfo", {})
         self._protocol_version = result.get("protocolVersion")
         # Send notifications/initialized — required for the session to
-        # begin accepting tools/call per the MCP spec.
+        # begin accepting tools/call per the MCP spec. It is a true
+        # NOTIFICATION (no id, no reply expected); the old code sent it
+        # through _rpc with an auto-generated id and then waited a full
+        # call_timeout for a reply the spec says never comes — a 60s
+        # stall on every stdio handshake.
         try:
-            self._rpc("notifications/initialized", id=None)
+            self._notify("notifications/initialized")
         except UpstreamError:
             # Not fatal — some upstreams don't care about the notif.
             pass
@@ -627,6 +665,26 @@ DEFAULT_TUNNELS: List[Dict[str, Any]] = [
     # companion proxy that some workflows use.
     {"name": "vscode-copilot", "label": "VS Code Copilot gateway",
      "url": "http://127.0.0.1:9000/mcp"},
+    # NexMinecraftMCP — Nex's OWN Minecraft mod sandbox, built in.
+    # Unlike the editor tunnels above, this one is part of Nex: a
+    # stdio MCP child that lets the AI create, build and test Fabric
+    # mods with NO shell, NO arbitrary paths and NO command parameter —
+    # only Minecraft-specific operations, all confined to
+    # NEX_MINECRAFT_ROOT (default ~/NexMinecraft), Java locked to 21.
+    # See minecraft_mcp.py for the four-wall security model and the
+    # explicit list of what the server does NOT provide.
+    {"name": "minecraft",
+     "label": "Minecraft Mod Sandbox (NexMinecraftMCP, built-in)",
+     "transport": "stdio",
+     "command": os.path.join(
+         os.path.dirname(os.path.abspath(__file__)), "nex-minecraft-mcp"),
+     "args": [],
+     # Gradle builds take minutes; give this tunnel its own call
+     # deadline (per-tunnel timeout_s, operator config, see
+     # _apply_call_timeout).
+     "timeout_s": 900,
+     "mcp_note": "built-in: available wherever Nex runs; sandbox root is "
+                 "NEX_MINECRAFT_ROOT (default ~/NexMinecraft)"},
 ]
 
 
@@ -674,10 +732,31 @@ def default_registry() -> List[Upstream]:
     for c in cfg:
         url = c.get("url") or _stdio_url(c)
         u = Upstream(c["name"], url, c.get("label") or c["name"])
+        _apply_call_timeout(u, c)
         if _is_stdio(c):
             u._stdio_command = (c["command"], list(c.get("args") or []))
         out.append(u)
     return out
+
+
+def _apply_call_timeout(u: "Upstream", c: Dict[str, Any]) -> None:
+    """Per-tunnel call timeout (`timeout_s` in the tunnel config).
+
+    Long operations (a Minecraft Gradle build, a full test run) need
+    more than the default 60 s read deadline. The value comes from
+    OPERATOR configuration (built-in catalog / tunnels.json / env) —
+    it is not model input. Out-of-range values are ignored, so a
+    poisoned config cannot turn a tunnel into a 10-minute stall or
+    a zero-deadline."""
+    raw = c.get("timeout_s")
+    if raw is None:
+        return
+    try:
+        to = float(raw)
+    except (TypeError, ValueError):
+        return
+    if 1.0 <= to <= 3600.0:
+        u.call_timeout = to
 
 
 def _is_stdio(c: Dict[str, Any]) -> bool:

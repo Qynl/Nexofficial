@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Standalone launcher: `nex-minecraft-mcp`.
+
+This is the entry point that goes in NEX's built-in tunnel catalog
+(upstream.DEFAULT_TUNNELS, name "minecraft") — it spawns the
+NexMinecraftMCP sandbox as a stdio MCP child, exactly like Roblox
+Studio's own `mcp.bat` is spawned.
+
+The launcher takes NO arguments: the sandbox root and every limit come
+from the operator's environment (NEX_MINECRAFT_ROOT, NEX_MC_*). This
+matters for the tunnel allowlist, which matches on the command string
+— extra argv could never widen the sandbox surface.
+
+Environment (operator, set on the NEX server — inherited by this child):
+  NEX_MINECRAFT_ROOT          sandbox root (default ~/NexMinecraft)
+  NEX_MC_MAX_BUILD_ATTEMPTS   failed-build budget before STOP (default 5)
+  NEX_MC_MAX_REPAIR_ROUNDS    repair-round budget before STOP (default 5)
+  NEX_MC_MAX_TEST_RUNTIME_S   test client auto-stop (default 120)
+  NEX_MC_MAX_CHANGED_FILES_PER_STEP  step budget (default 20)
+  NEX_MC_BUILD_TIMEOUT_S      gradle task deadline (default 600)
+  NEX_MC_TEST_CLIENT          optional REAL client binary (path only,
+                              fixed argv) — otherwise the clearly-
+                              labelled simulated dev client runs.
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+
+def main(argv=None):
+    """Forward into the minecraft_mcp module. `argv` is deliberately
+    not forwarded: the client's command line is not a configuration
+    channel for the sandbox."""
+    from minecraft_mcp import main as _mc_main
+    return _mc_main(None)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -57,7 +57,6 @@ from typing import Any, Dict, List, Optional, Tuple
 # proper state machine: every plan is JSON-validated, classified by
 # destruction level, and confirmed before destructive steps run.
 import mc as _mc  # noqa: E402
-import mc_tools as _mc_tools  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +395,78 @@ def _NEX_META_TOOL_HANDLERS() -> Dict[str, Any]:
         "tunnel_status": tunnel_status,
         "tunnel_probe": tunnel_probe,
     }
+
+
+def gateway_gate(name: str,
+                 arguments: Dict[str, Any],
+                 tools: Optional[List[Dict[str, Any]]] = None
+                 ) -> Optional[Dict[str, Any]]:
+    """THE GATE every entry point that routes a tools/call must run.
+
+    Returns a refusal envelope when the call must be refused, or None
+    when it may proceed. This is the single code path for the policy
+    boundary, shared by:
+
+      * the HTTP MCP endpoint  (NexHandler._mcp_tools_call)
+      * REST plan execution    (POST /api/plan/<id>/execute)
+      * the stdio MCP server   (get_stdio_registry, default + platform
+        modes — an external MCP client's model is the same untrusted
+        caller as the HTTP client's)
+
+    Enforcing one copy in three places is what keeps the three entry
+    points honest with each other: a bypass that slipped into any ONE
+    of them used to be a full escape from the content scan, the
+    confirmation gate and the trusted-server registry at once.
+
+    `tools` is the live aggregated tool list (for the capability
+    lookup); None means "fetch it" (the HTTP path already has it).
+    """
+    from mcp.policy import authorize, current_policy
+    from mcp.capability import ToolCapability
+    args = arguments if isinstance(arguments, dict) else {}
+    if "." in name:
+        server, tool_name = name.split(".", 1)
+    else:
+        server, tool_name = None, name
+    cap = None
+    if tools is None:
+        from tunnels import get_tunnels
+        try:
+            tools = get_tunnels().aggregated_tools() or []
+        except Exception:  # noqa: BLE001
+            tools = []
+    for t in tools or []:
+        if t.get("name") == name:
+            cd = t.get("_capability") or {}
+            cap = ToolCapability(
+                category=cd.get("category", "unknown"),
+                read_only=cd.get("read_only", False),
+                reversible=cd.get("reversible", False),
+                destructive=cd.get("destructive", False),
+                network=cd.get("network", False),
+                requires_confirmation=cd.get("requires_confirmation", True),
+                source=cd.get("source", "conservative"),
+            )
+            break
+    decision = authorize(server, tool_name, cap, current_policy(), args=args)
+    if not decision.allowed:
+        return {
+            "content": [{"type": "text",
+                         "text": "blocked by the capability boundary: "
+                                 + decision.reason}],
+            "isError": True,
+        }
+    # CONFIRMATION IS ENFORCED HERE TOO. A direct MCP/REST/stdio call has
+    # no way to ask a human, so a call that requires confirmation is
+    # refused with the exact operator action that would allow it.
+    if decision.requires_confirmation:
+        return {
+            "content": [{"type": "text",
+                         "text": "confirmation required: "
+                                 + decision.reason}],
+            "isError": True,
+        }
+    return None
 
 
 def _boundary_router(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1105,9 +1176,21 @@ class NexHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    # One JSON body must never be able to allocate the process away.
+    # MCP tool arguments (source files, logs) comfortably fit in 16 MiB;
+    # a bigger claim is a bug or an attack — refuse BEFORE reading.
+    MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
+
     def _read_json_body(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
+            return {}
+        if length > self.MAX_JSON_BODY_BYTES:
+            self.send_response(413)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "26")
+            self.end_headers()
+            self.wfile.write(b'{"ok": false, "error": "too large"}')
             return {}
         raw = self.rfile.read(length).decode("utf-8")
         try:
@@ -1982,7 +2065,18 @@ class NexHandler(BaseHTTPRequestHandler):
             body = self._read_json_body() or {}
             reg = get_tunnels()
             # Build a tool_router that understands bare + namespaced names.
+            # EVERY step goes through the same gateway gate as a direct
+            # tools/call (policy + content scan + confirmation). The plan's
+            # own destructive classification only governs the user-confirm
+            # handshake at submission — it is NOT a substitute for the
+            # per-call boundary (an old version routed steps straight to
+            # reg.route(), letting an escape payload or an untrusted
+            # server's tool through any plan step classified 'safe').
             def _router(name, args):
+                blocked = gateway_gate(name, args or {},
+                                       tools=reg.aggregated_tools())
+                if blocked is not None:
+                    return blocked
                 return reg.route(name, args or {})
             if "step" in body:
                 try:
@@ -2344,50 +2438,16 @@ class NexHandler(BaseHTTPRequestHandler):
         # ALWAYS enforced — there is no environment switch that turns the
         # boundary off. Any action that is not a connected MCP tool is
         # rejected here; this is a real gate, not a prompt instruction.
-        from mcp.policy import authorize, current_policy
-        from mcp.capability import ToolCapability
-        # Split into (server, BARE tool name) — the policy matches bare
-        # names. Passing the full "server.tool" name would let a
-        # connected server expose a tool literally named `run_command`
-        # (called as `evilserver.run_command`) that slips past
-        # ALWAYS_DENIED, the PROCESS-execution names, and
-        # tool-allow-list entries alike.
-        if "." in name:
-            server, tool_name = name.split(".", 1)
-        else:
-            server, tool_name = None, name
-        cap = None
-        for t in self._mcp_tools_list().get("tools", []):
-            if t.get("name") == name:
-                cd = t.get("_capability") or {}
-                cap = ToolCapability(
-                    category=cd.get("category", "unknown"),
-                    read_only=cd.get("read_only", False),
-                    reversible=cd.get("reversible", False),
-                    destructive=cd.get("destructive", False),
-                    network=cd.get("network", False),
-                    requires_confirmation=cd.get("requires_confirmation", True),
-                    source=cd.get("source", "conservative"),
-                )
-                break
-        decision = authorize(server, tool_name, cap, current_policy(),
-                             args=arguments if isinstance(arguments, dict)
-                             else None)
-        if not decision.allowed:
-            return {"content": [{"type": "text",
-                                 "text": "blocked by the capability boundary: "
-                                 + decision.reason}],
-                    "isError": True}
-        # CONFIRMATION IS ENFORCED HERE TOO. A direct MCP/REST call has no
-        # way to ask a human, so a call that requires confirmation is
-        # refused with the exact operator action that would allow it.
-        # (Previously this decision was computed and then ignored — a
-        # destructive or code-executing tool ran on nothing but trust.)
-        if decision.requires_confirmation:
-            return {"content": [{"type": "text",
-                                 "text": "confirmation required: "
-                                 + decision.reason}],
-                    "isError": True}
+        #
+        # The gate lives in gateway_gate() — the SAME function the REST
+        # plan-execution path and the stdio server run, so every entry
+        # point enforces the identical policy (one bypass there was a
+        # full escape from the content scan + confirmation + trust
+        # registry at once).
+        blocked = gateway_gate(name, arguments,
+                               tools=self._mcp_tools_list().get("tools"))
+        if blocked is not None:
+            return blocked
         # Local-prefix tools below are handled without the registry.
         if name in ("who_am_i", "list_platforms",
                     "tunnel_status", "tunnel_probe"):
@@ -3107,6 +3167,58 @@ class NexHandler(BaseHTTPRequestHandler):
 # Main
 # ---------------------------------------------------------------------------
 
+def bootstrap_policy() -> bool:
+    """TRUST BOOTSTRAP (operator environment, before anything else).
+
+    CONNECTED != TRUSTED. The deployed server runs in STRICT SERVER
+    MODE: an external tool call passes only if its server is in the
+    trusted registry = built-in catalog servers + NEX_TRUSTED_SERVERS
+    (operator environment — the model can never extend it).
+    NEX_STRICT_SERVERS=0 restores the legacy permissive mode.
+
+    Called by BOTH entry points (HTTP main() and the stdio session) so
+    the gateway gate — wherever it runs — sees the same policy. Returns
+    True when a policy was set.
+    """
+    try:
+        from mcp.policy import Policy, set_policy
+        from tunnels import DEFAULT_TUNNELS as _CAT
+        _trusted = {t["name"] for t in _CAT if t.get("name")}
+        for _a in os.environ.get("NEX_TRUSTED_SERVERS", "").split(","):
+            _a = _a.strip()
+            if _a:
+                _trusted.add(_a)
+        _strict = os.environ.get("NEX_STRICT_SERVERS", "1").strip().lower()
+        _strict_on = _strict not in ("0", "false", "no", "off")
+        # CODE EXECUTION standing approval: deliberately a separate
+        # operator statement. Trusting a server does not mean "and run
+        # whatever code it accepts"; this env is how the operator says
+        # that second thing explicitly.
+        _allow_exec = set()
+        for _a in os.environ.get("NEX_ALLOW_CODE_EXECUTION", "").split(","):
+            _a = _a.strip()
+            if _a:
+                _allow_exec.add(_a)
+        _allow_conf = set()
+        for _a in os.environ.get("NEX_ALLOW_CONFIRMATIONS", "").split(","):
+            _a = _a.strip()
+            if _a:
+                _allow_conf.add(_a)
+        set_policy(Policy(strict_servers=_strict_on,
+                          trusted_servers=_trusted,
+                          allow_code_execution=_allow_exec,
+                          allow_confirmations=_allow_conf))
+        print("Policy: strict_servers=%s trusted=%s code_execution=%s "
+              "standing_confirmations=%s"
+              % (_strict_on, sorted(_trusted),
+                 sorted(_allow_exec) or "none",
+                 sorted(_allow_conf) or "none"))
+        return True
+    except Exception as exc:
+        print("Policy: NOT configured (%s) — using core defaults" % exc)
+        return False
+
+
 def configure_for_stdio() -> None:
     """Wire tools.py + observer.py + tunnels for a stdio subprocess.
 
@@ -3115,6 +3227,9 @@ def configure_for_stdio() -> None:
     child has the same tool surface the HTTP server would expose.
     Idempotent — repeatedly safe to call.
     """
+    # The stdio gateway gate (see get_stdio_registry) needs the same
+    # trust registry the HTTP process gets — bootstrap it here too.
+    bootstrap_policy()
     from tools import (configure as _tools_configure,  # type: ignore
                        TOOLS as _TOOL_LIST)
     _tools_configure(
@@ -3198,6 +3313,16 @@ def get_stdio_registry(args) -> Dict[str, Any]:
                 return {"isError": True,
                         "content": [{"type": "text",
                                      "text": "no upstream for " + plat}]}
+            # THE GATE, stdio edition: the client on the other end of this
+            # pipe runs its own model, and that model is the same
+            # untrusted caller as the HTTP client's. The platform bridge
+            # therefore enforces the same policy + content scan +
+            # confirmation rules as the HTTP gateway (under the tool's
+            # aggregated name, which is how the capability lookup keys).
+            blocked = gateway_gate(target.name + "." + inner,
+                                   arguments or {})
+            if blocked is not None:
+                return blocked
             try:
                 return target.call(inner, arguments or {})
             except Exception as exc:  # noqa: BLE001
@@ -3223,10 +3348,20 @@ def get_stdio_registry(args) -> Dict[str, Any]:
 
         return {"tools_provider": provider, "router": router}
 
-    # Default: aggregate gateway.
+    # Default: aggregate gateway. THE GATE applies here too — the stdio
+    # client's model is the same untrusted caller as the HTTP client's
+    # (an old version routed straight to reg.route(), which skipped the
+    # policy, the content scan and the confirmation gate entirely).
+    def _default_router(n, a):
+        blocked = gateway_gate(n, a or {},
+                               tools=reg.aggregated_tools())
+        if blocked is not None:
+            return blocked
+        return reg.route(n, a or {})
+
     return {
         "tools_provider": lambda: reg.aggregated_tools(),
-        "router": lambda n, a: reg.route(n, a or {}),
+        "router": _default_router,
     }
 
 
@@ -3246,46 +3381,8 @@ def _stdio_sentinel(name: str) -> str:
 
 def main() -> None:
     # --- TRUST BOOTSTRAP (operator environment, before anything else) ---
-    # CONNECTED != TRUSTED. The deployed server runs in STRICT SERVER
-    # MODE: an external tool call passes only if its server is in the
-    # trusted registry = built-in catalog servers + NEX_TRUSTED_SERVERS
-    # (operator environment — the model can never extend it).
-    # NEX_STRICT_SERVERS=0 restores the legacy permissive mode.
-    try:
-        from mcp.policy import Policy, set_policy
-        from tunnels import DEFAULT_TUNNELS as _CAT
-        _trusted = {t["name"] for t in _CAT if t.get("name")}
-        for _a in os.environ.get("NEX_TRUSTED_SERVERS", "").split(","):
-            _a = _a.strip()
-            if _a:
-                _trusted.add(_a)
-        _strict = os.environ.get("NEX_STRICT_SERVERS", "1").strip().lower()
-        _strict_on = _strict not in ("0", "false", "no", "off")
-        # CODE EXECUTION standing approval: deliberately a separate
-        # operator statement. Trusting a server does not mean "and run
-        # whatever code it accepts"; this env is how the operator says
-        # that second thing explicitly.
-        _allow_exec = set()
-        for _a in os.environ.get("NEX_ALLOW_CODE_EXECUTION", "").split(","):
-            _a = _a.strip()
-            if _a:
-                _allow_exec.add(_a)
-        _allow_conf = set()
-        for _a in os.environ.get("NEX_ALLOW_CONFIRMATIONS", "").split(","):
-            _a = _a.strip()
-            if _a:
-                _allow_conf.add(_a)
-        set_policy(Policy(strict_servers=_strict_on,
-                          trusted_servers=_trusted,
-                          allow_code_execution=_allow_exec,
-                          allow_confirmations=_allow_conf))
-        print("Policy: strict_servers=%s trusted=%s code_execution=%s "
-              "standing_confirmations=%s"
-              % (_strict_on, sorted(_trusted),
-                 sorted(_allow_exec) or "none",
-                 sorted(_allow_conf) or "none"))
-    except Exception as exc:  # noqa: BLE001
-        print("Policy: NOT configured (%s) — using core defaults" % exc)
+    # (see bootstrap_policy — shared with the stdio entry point)
+    bootstrap_policy()
 
     # Wire tools.py + observer.py to this server's EventBus, parser,
     # and emotion set. Doing it BEFORE we open the HTTP server means

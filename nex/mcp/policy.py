@@ -27,6 +27,7 @@ Trust model
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
@@ -132,6 +133,7 @@ _SENSITIVE_PATHS = (
     (".bashrc", "shell profile"),
     (".zshrc", "shell profile"),
     (".nex/", "NEX's own configuration and token"),
+    (".nex\\", "NEX's own configuration and token (Windows path form)"),
     ("server_token", "NEX's own authentication token"),
     ("nex_token", "NEX's own authentication token"),
     ("/windows/system32", "operating system"),
