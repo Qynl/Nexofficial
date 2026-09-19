@@ -1150,3 +1150,72 @@ body.face-trouble #nex {
   color: var(--dim);
   opacity: 0.75;
 }
+
+/* ---------------------------------------------------------------------------
+   Provider chip — "who is building right now?"
+   Minimal on purpose: a dot, one line, and a dimmer planner line. The tone
+   colour is the whole status signal (green = NIM, blue = GPT, grey = local,
+   amber = running on a fallback, red = no provider at all).
+   --------------------------------------------------------------------------- */
+#provider-chip-wrap {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  pointer-events: none;
+  font: 500 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+  opacity: 0.55;
+  transition: opacity 0.25s var(--ease-out);
+}
+#provider-chip-wrap:hover { opacity: 1; }
+
+#provider-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-strong);
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: default;
+}
+#provider-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dimmer);
+  box-shadow: 0 0 6px currentColor;
+  transition: background 0.3s var(--ease-out);
+}
+#provider-chip[data-tone="nim"] { color: var(--good); border-color: rgba(123, 224, 160, 0.28); }
+#provider-chip[data-tone="nim"]::before { background: var(--good); }
+#provider-chip[data-tone="gpt"] { color: #8fb8ff; border-color: rgba(143, 184, 255, 0.28); }
+#provider-chip[data-tone="gpt"]::before { background: #8fb8ff; }
+#provider-chip[data-tone="local"] { color: rgba(255, 255, 255, 0.55); }
+#provider-chip[data-tone="local"]::before { background: rgba(255, 255, 255, 0.45); }
+#provider-chip[data-tone="fallback"] { color: var(--warn); border-color: rgba(255, 196, 107, 0.32); }
+#provider-chip[data-tone="fallback"]::before { background: var(--warn); animation: chip-pulse 1.6s infinite; }
+#provider-chip[data-tone="offline"] { color: var(--bad); border-color: rgba(255, 138, 138, 0.28); }
+#provider-chip[data-tone="offline"]::before { background: var(--bad); }
+
+#provider-planner { font-size: 10px; color: var(--dimmer); }
+
+@keyframes chip-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (max-width: 720px) {
+  #provider-chip-wrap { top: 8px; right: 8px; font-size: 10px; }
+  #provider-planner { display: none; }
+}

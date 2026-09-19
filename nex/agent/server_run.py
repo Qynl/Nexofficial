@@ -208,6 +208,7 @@ def run_agent_goal(goal: str,
                    policy=None,
                    llm_call: Optional[Callable] = None,
                    llm_reachable: bool = False,
+                   llm_builder: Optional[Callable] = None,
                    mode: str = "build",
                    judge_iterations: int = 1,
                    graph: Optional[Any] = None,
@@ -226,7 +227,9 @@ def run_agent_goal(goal: str,
 
     `llm_call` is an injected ``llm(messages) -> str`` (the server passes its
     own model_chat so this module stays model-server agnostic). `llm_reachable`
-    gates whether we bother asking the model at all.
+    gates whether we bother asking the model at all. `llm_builder` is the
+    separate BUILDER role (NVIDIA NIM by default, GPT/local as failover) used
+    for repairs inside the build loop — planning stays on `llm_call`.
 
     Emits semantic agent events on `bus` (the server EventBus) so the frontend
     can react (face state, plan panel, judge readout).
@@ -300,7 +303,7 @@ def run_agent_goal(goal: str,
     # The improve round deserves a verification pass; the loop stays
     # bounded inside the agent.
     agent = AutonomousAgent(reg, bus=bus, policy=pol, llm=llm_call,
-                            max_critique_cycles=2)
+                            builder=llm_builder, max_critique_cycles=2)
     report = agent.run(goal, graph=graph, state=state, scope=scope,
                        game_plan=game_plan)
 

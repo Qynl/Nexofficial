@@ -823,6 +823,83 @@ const blink = renderFrame({ left: [0,0,1,0.05], right: [0,0,1,0.05] });
 assert(blink.leftWhite < 200, 'blink closes eye (leftWhite=' + blink.leftWhite + ')');
 assert(blink.rightWhite < 200, 'blink closes eye (rightWhite=' + blink.rightWhite + ')');
 
+// ------- 6. provider chip (planner / builder / NIM failover) -------------
+
+const CHIP = require(path.join(HERE, 'provider_chip.js'));
+
+const NIM_STATUS = {
+  roles: {
+    planner: { provider: 'local', model: 'gpt-oss:20b', active: 'local',
+               serving: 'local', fallback: false },
+    builder: { provider: 'nim', model: 'nvidia/nemotron-3-super-120b-a12b',
+               active: 'nim', serving: 'nim', fallback: false },
+  },
+  providers: {
+    nim: { status: 'available', rpm: 40, requests_in_window: 7, budget_left: 33 },
+    local: { status: 'available', rpm: 0 },
+  },
+};
+
+assert(CHIP.shortModel('nvidia/nemotron-3-super-120b-a12b') === 'nemotron-3-super-120b',
+       'model ids are shortened to something a human reads');
+assert(CHIP.shortModel('gpt-oss:20b') === 'gpt-oss:20b',
+       'short model names survive untouched');
+assert(CHIP.shortModel('') === '', 'empty model stays empty');
+assert(CHIP.shortModel('verylongmodel-' + 'x'.repeat(40)).length <= 27,
+       'over-long ids are truncated');
+
+assert(CHIP.providerLabel('nim') === 'NIM', 'nim renders as NIM');
+assert(CHIP.providerLabel('gpt') === 'GPT', 'gpt renders as GPT');
+assert(CHIP.providerLabel('local') === 'local', 'local stays lowercase');
+
+assert(CHIP.tone(NIM_STATUS) === 'nim', 'NIM builder -> green/NIM tone');
+assert(CHIP.chipLabel(NIM_STATUS) === 'NIM · nemotron-3-super-120b',
+       'chip names the builder and its model: ' + CHIP.chipLabel(NIM_STATUS));
+assert(CHIP.plannerLine(NIM_STATUS) === 'planner local · gpt-oss:20b',
+       'the planner gets its own line: ' + CHIP.plannerLine(NIM_STATUS));
+assert(CHIP.builderQuota(NIM_STATUS) === '7/40 RPM',
+       'the quota readout is exact: ' + CHIP.builderQuota(NIM_STATUS));
+
+const FALLBACK_STATUS = JSON.parse(JSON.stringify(NIM_STATUS));
+FALLBACK_STATUS.roles.builder.serving = 'gpt';
+FALLBACK_STATUS.roles.builder.fallback = true;
+FALLBACK_STATUS.providers.nim = { status: 'rate_limited', rpm: 40,
+  requests_in_window: 40, budget_left: 0, cooldown_s: 12.4,
+  last_error_kind: 'rate_limit' };
+assert(CHIP.tone(FALLBACK_STATUS) === 'fallback',
+       'a running failover is its own tone (amber, not green)');
+assert(CHIP.chipLabel(FALLBACK_STATUS).indexOf('→ GPT') > 0,
+       'the chip shows the hand-off: ' + CHIP.chipLabel(FALLBACK_STATUS));
+assert(CHIP.chipDetail(FALLBACK_STATUS).indexOf('same plan') > 0,
+       'the tooltip states the plan is unchanged');
+assert(CHIP.chipDetail(FALLBACK_STATUS).indexOf('rate_limit') > 0,
+       'the tooltip names why NIM stepped aside');
+assert(CHIP.chipDetail(FALLBACK_STATUS).indexOf('cooldown 13s') > 0,
+       'the tooltip shows the cooldown');
+assert(CHIP.chipDetail(NIM_STATUS).indexOf('MCP tools only') > 0,
+       'the tooltip repeats the MCP-only boundary');
+
+const GPT_STATUS = JSON.parse(JSON.stringify(NIM_STATUS));
+GPT_STATUS.roles.builder = { provider: 'gpt', model: 'gpt-5.1',
+  active: 'gpt', serving: 'gpt', fallback: false };
+assert(CHIP.tone(GPT_STATUS) === 'gpt', 'a GPT builder is its own tone');
+assert(CHIP.chipLabel(GPT_STATUS) === 'GPT · gpt-5.1', 'GPT builds: name + model');
+assert(CHIP.builderQuota(GPT_STATUS) === '', 'no RPM configured -> no quota text');
+
+const LOCAL_STATUS = JSON.parse(JSON.stringify(NIM_STATUS));
+LOCAL_STATUS.roles.builder = { provider: 'local', model: 'gpt-oss:20b',
+  active: 'local', serving: 'local', fallback: false };
+assert(CHIP.tone(LOCAL_STATUS) === 'local', 'local is the quiet tone');
+
+const DEAD = { roles: { planner: {}, builder: {} }, providers: {} };
+assert(CHIP.tone(DEAD) === 'offline', 'nothing configured -> offline tone');
+assert(CHIP.chipLabel(DEAD) === 'no model', 'offline says so literally');
+assert(CHIP.chipLabel(null) === 'no model', 'a missing snapshot cannot crash the UI');
+assert(CHIP.switchNote(NIM_STATUS, FALLBACK_STATUS) === 'NIM → GPT',
+       'the switch note names both sides');
+assert(CHIP.switchNote(NIM_STATUS, NIM_STATUS) === '',
+       'no switch, no note');
+
 // ------- done ----------------------------------------------------------
 
 console.log(`\n${pass} passed, ${fail} failed.`);

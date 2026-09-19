@@ -156,6 +156,45 @@
     #add-server-card select { flex: 0 0 auto; }
     #add-feedback.error { color: #c45a5a; }
     #add-feedback.ok { color: #4ec9b0; }
+
+    /* ---- model providers card -------------------------------------- */
+    #providers-card { max-width: 920px; margin-top: 24px; }
+    #providers-card input, #providers-card select {
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 4px;
+      padding: 6px 8px;
+      font: inherit;
+      flex: 1;
+      min-width: 0;
+    }
+    #providers-card input:focus, #providers-card select:focus {
+      outline: none; border-color: #4ec9b0;
+    }
+    #providers-card .pgroup {
+      border-top: 1px solid rgba(255,255,255,0.08);
+      margin-top: 14px; padding-top: 12px;
+    }
+    #providers-card .pgroup h3 {
+      font-size: 13px; font-weight: 600; margin: 0 0 8px 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    #providers-card .pdot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #666; display: inline-block;
+    }
+    #providers-card .pdot.available { background: #4ec9b0; }
+    #providers-card .pdot.rate_limited,
+    #providers-card .pdot.cooling { background: #ffc46b; }
+    #providers-card .pdot.no_key,
+    #providers-card .pdot.error,
+    #providers-card .pdot.disabled { background: #c45a5a; }
+    #providers-card .pstat { font-size: 11px; color: #888; }
+    #providers-card .roles { display: flex; gap: 18px; flex-wrap: wrap; }
+    #providers-card .roles > div { flex: 1 1 320px; }
+    .role-active { color: #4ec9b0; }
+    .role-fallback { color: #ffc46b; }
   </style>
 </head>
 <body>
@@ -170,6 +209,67 @@
 
   <div class="grid" id="grid">
     <div class="meta" id="loading">Loading tunnel catalog…</div>
+  </div>
+
+  <!-- Model providers: WHO PLANS (reasoning/architecture) and WHO BUILDS
+       (does the work, through MCP tools only).
+         * planner  — the local model, or GPT when a key is set.
+         * builder  — NVIDIA NIM by default (~40 RPM), with GPT and then the
+                      local model as automatic failover. The plan is never
+                      restarted when a provider changes hands.
+       Keys can be typed here (stored 0600 in ~/.nex/providers.json) or put
+       into nex/.env — the environment always wins. Keys are never sent back
+       to the browser, only masked. -->
+  <div class="card" id="providers-card">
+    <div class="row">
+      <h2>Models &amp; providers</h2>
+      <span class="pstat" id="providers-active"></span>
+    </div>
+    <p class="meta" style="margin:0 0 4px 0;">
+      Nex separates the <strong>planner</strong> (reasoning, architecture)
+      from the <strong>builder</strong> (the hands that execute the plan
+      through MCP tools). The builder is the only role that runs often, so
+      a rate-limited builder fails over automatically — same plan, different
+      model. Nothing but MCP tools can change the game, whichever provider
+      is active.
+    </p>
+
+    <div class="pgroup">
+      <h3>Roles</h3>
+      <div class="roles">
+        <div>
+          <div class="row">
+            <label class="meta" style="min-width:70px;" for="role-planner">Planner</label>
+            <select id="role-planner"></select>
+            <input id="role-planner-model" type="text" placeholder="model" style="flex:1.4;" />
+          </div>
+        </div>
+        <div>
+          <div class="row">
+            <label class="meta" style="min-width:70px;" for="role-builder">Builder</label>
+            <select id="role-builder"></select>
+            <input id="role-builder-model" type="text" placeholder="model" style="flex:1.4;" />
+          </div>
+        </div>
+      </div>
+      <div class="meta" id="role-hint" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="pgroup" id="provider-groups"></div>
+
+    <div class="actions">
+      <button id="providers-save" class="primary" data-action="save-providers">Save providers</button>
+      <button id="providers-reload" data-action="reload-providers">Reload</button>
+      <span class="meta" id="providers-feedback"></span>
+    </div>
+    <p class="meta" style="margin-top:10px;">
+      Rate budget: the NVIDIA NIM free tier allows roughly 40 requests per
+      minute, with per-model limits NVIDIA does not publish and no usage
+      API — so Nex counts the requests itself and routes around a
+      rate-limited provider instead of burning 429s. <em>Test</em> fetches
+      the live model list of a provider, which is always more accurate than
+      any list shipped in the code.
+    </p>
   </div>
 
   <!-- Generic MCP connection manager: add ANY MCP server, HTTP or stdio.
@@ -584,6 +684,262 @@
   });
 
   refresh();
+
+  // ------- model providers ----------------------------------------------
+  //
+  // Mirrors /api/settings/providers: roles (planner/builder) + one block per
+  // provider (key, endpoint, model, RPM). Keys travel ONE way — the server
+  // answers with mask_key() only, so an untouched field means "keep".
+  const pState = { view: null };
+  const pFeedback = document.getElementById('providers-feedback');
+  const pActive = document.getElementById('providers-active');
+
+  function pset(kind, text) {
+    pFeedback.textContent = text || '';
+    pFeedback.classList.remove('error', 'ok');
+    if (kind) pFeedback.classList.add(kind);
+  }
+
+  function providerRow(name, spec) {
+    const wrap = document.createElement('div');
+    wrap.className = 'pgroup';
+    wrap.dataset.provider = name;
+
+    const h = document.createElement('h3');
+    const dot = document.createElement('span');
+    dot.className = 'pdot ' + (spec._status || (spec.api_key_set || name === 'local'
+      ? 'available' : 'no_key'));
+    h.appendChild(dot);
+    h.appendChild(document.createTextNode(spec.label || name));
+    const stat = document.createElement('span');
+    stat.className = 'pstat';
+    stat.dataset.pstat = name;
+    h.appendChild(stat);
+    wrap.appendChild(h);
+
+    function row(labelText, inputEl) {
+      const r = document.createElement('div');
+      r.className = 'row';
+      const l = document.createElement('label');
+      l.className = 'meta';
+      l.style.minWidth = '90px';
+      l.textContent = labelText;
+      r.appendChild(l); r.appendChild(inputEl);
+      wrap.appendChild(r);
+    }
+
+    const key = document.createElement('input');
+    key.type = 'password';
+    key.id = 'p-' + name + '-key';
+    key.placeholder = spec.api_key_set
+      ? ('stored: ' + spec.api_key + ' — type to replace, "-" to clear')
+      : (spec.api_key_env ? 'paste key (or set ' + spec.api_key_env + ')'
+                          : 'no key needed for a local endpoint');
+    key.autocomplete = 'off';
+    if (name !== 'local') row('API key', key);
+
+    const base = document.createElement('input');
+    base.type = 'text'; base.id = 'p-' + name + '-base';
+    base.value = spec.base_url || '';
+    row('Endpoint', base);
+
+    const model = document.createElement('input');
+    model.type = 'text'; model.id = 'p-' + name + '-model';
+    model.value = spec.model || '';
+    model.setAttribute('list', 'p-' + name + '-models');
+    row('Model', model);
+
+    const dl = document.createElement('datalist');
+    dl.id = 'p-' + name + '-models';
+    (spec._models || []).forEach((m) => {
+      const o = document.createElement('option');
+      o.value = typeof m === 'string' ? m : m.id;
+      if (m && m.note) o.label = m.note;
+      dl.appendChild(o);
+    });
+    wrap.appendChild(dl);
+
+    const rpm = document.createElement('input');
+    rpm.type = 'number'; rpm.id = 'p-' + name + '-rpm';
+    rpm.value = spec.rpm == null ? '' : String(spec.rpm);
+    rpm.placeholder = '0 = no limit';
+    if (name !== 'local') row('RPM budget', rpm);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const test = document.createElement('button');
+    test.textContent = 'Test & list models';
+    test.dataset.action = 'test-provider';
+    test.dataset.provider = name;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.dataset.ptest = name;
+    actions.appendChild(test); actions.appendChild(meta);
+    wrap.appendChild(actions);
+    return wrap;
+  }
+
+  function renderProviders(view) {
+    pState.view = view;
+    const roles = view.roles || {};
+    const sel = { planner: document.getElementById('role-planner'),
+                  builder: document.getElementById('role-builder') };
+    const modelInput = {
+      planner: document.getElementById('role-planner-model'),
+      builder: document.getElementById('role-builder-model') };
+    const names = Object.keys(view.providers || {});
+    for (const role of ['planner', 'builder']) {
+      sel[role].innerHTML = '';
+      names.forEach((n) => {
+        const o = document.createElement('option');
+        o.value = n;
+        o.textContent = (view.providers[n].label || n)
+          + (view.providers[n].configured ? '' : ' (no key)');
+        sel[role].appendChild(o);
+      });
+      const cur = roles[role] || {};
+      sel[role].value = cur.provider || names[0] || '';
+      modelInput[role].value = (view.role_models || {})[role] || '';
+    }
+    const groups = document.getElementById('provider-groups');
+    groups.innerHTML = '';
+    const catalogByProvider = {};
+    (view.catalog || []).forEach((c) => {
+      (catalogByProvider[c.provider] = catalogByProvider[c.provider] || []).push(c);
+    });
+    names.forEach((n) => {
+      const spec = Object.assign({}, view.providers[n]);
+      spec._models = catalogByProvider[n] || [];
+      const st = (view.status && view.status.providers && view.status.providers[n]) || {};
+      spec._status = st.status;
+      const keySet = !!view.providers[n].api_key_set;
+      if (n === 'nim' && !keySet) spec._status = 'no_key';
+      groups.appendChild(providerRow(n, spec));
+    });
+    applyProviderStatus(view.status);
+    const hint = document.getElementById('role-hint');
+    hint.textContent = 'Chain — planner: '
+      + ((view.status && view.status.chains && view.status.chains.planner) || []).join(' → ')
+      + '   ·   builder: '
+      + ((view.status && view.status.chains && view.status.chains.builder) || []).join(' → ');
+  }
+
+  function applyProviderStatus(status) {
+    if (!status) return;
+    const roles = status.roles || {};
+    const b = roles.builder || {};
+    const p = roles.planner || {};
+    const bActive = b.active || b.provider || '—';
+    const pActive = p.active || p.provider || '—';
+    pActive.textContent = 'builder: ' + bActive
+      + (b.fallback ? ' (fallback: ' + (b.provider || '?') + ' unavailable)' : '')
+      + ' · planner: ' + pActive;
+    pActive.className = 'pstat' + (b.fallback ? ' role-fallback' : '');
+    Object.keys(status.providers || {}).forEach((n) => {
+      const st = status.providers[n] || {};
+      const group = document.querySelector('[data-provider="' + n + '"]');
+      if (group) {
+        const dot = group.querySelector('.pdot');
+        if (dot) dot.className = 'pdot ' + (st.status || '');
+      }
+      const stat = document.querySelector('[data-pstat="' + n + '"]');
+      if (stat) {
+        const bits = [st.status || '?'];
+        if (st.rpm) bits.push((st.requests_in_window || 0) + '/' + st.rpm + ' RPM');
+        if (st.cooldown_s) bits.push('cooldown ' + Math.ceil(st.cooldown_s) + 's');
+        if (st.last_error) bits.push(String(st.last_error).slice(0, 60));
+        stat.textContent = bits.join(' · ');
+      }
+    });
+  }
+
+  function loadProviders() {
+    return fetch('/api/settings/providers').then((r) => r.json())
+      .then((view) => { if (view && view.providers) renderProviders(view); return view; })
+      .catch(() => null);
+  }
+
+  document.getElementById('providers-save').addEventListener('click', () => {
+    const payload = { providers: {}, roles: {} };
+    for (const role of ['planner', 'builder']) {
+      payload.roles[role] = {
+        provider: document.getElementById('role-' + role).value,
+        model: document.getElementById(role === 'planner'
+          ? 'role-planner-model' : 'role-builder-model').value,
+      };
+    }
+    (pState.view ? Object.keys(pState.view.providers) : []).forEach((n) => {
+      const key = document.getElementById('p-' + n + '-key');
+      const base = document.getElementById('p-' + n + '-base');
+      const model = document.getElementById('p-' + n + '-model');
+      const rpm = document.getElementById('p-' + n + '-rpm');
+      const entry = {};
+      if (key && key.value) entry.api_key = key.value.trim();
+      if (base) entry.base_url = base.value.trim();
+      if (model) entry.model = model.value.trim();
+      if (rpm && rpm.value !== '') entry.rpm = parseInt(rpm.value, 10);
+      if (Object.keys(entry).length) payload.providers[n] = entry;
+    });
+    pset(null, 'saving…');
+    fetch('/api/settings/providers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then((r) => r.json()).then((view) => {
+      if (view && view.ok && view.providers) {
+        renderProviders(view);
+        pset('ok', 'saved — builder is now '
+          + ((view.status.roles.builder || {}).active || '?'));
+        showToast('Providers updated', false);
+      } else {
+        pset('error', 'failed: ' + ((view && view.error) || 'unknown'));
+      }
+    }).catch((e) => pset('error', 'failed: ' + e.message));
+  });
+
+  document.getElementById('providers-reload').addEventListener('click',
+    () => loadProviders().then(() => pset('ok', 'reloaded')));
+
+  document.getElementById('providers-card').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action="test-provider"]');
+    if (!btn) return;
+    const name = btn.dataset.provider;
+    const out = document.querySelector('[data-ptest="' + name + '"]');
+    btn.disabled = true;
+    if (out) out.textContent = 'testing…';
+    fetch('/api/settings/providers/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: name }),
+    }).then((r) => r.json()).then((res) => {
+      btn.disabled = false;
+      if (res.ok) {
+        if (out) {
+          out.textContent = 'reachable · ' + res.latency_ms + 'ms · '
+            + res.models_count + ' models'
+            + (res.model_available ? ' · configured model present'
+                                   : ' · CONFIGURED MODEL NOT IN LIST');
+        }
+        const dl = document.getElementById('p-' + name + '-models');
+        if (dl && res.models) {
+          dl.innerHTML = '';
+          res.models.forEach((m) => {
+            const o = document.createElement('option');
+            o.value = m; dl.appendChild(o);
+          });
+        }
+      } else if (out) {
+        out.textContent = 'failed: ' + (res.kind || '') + ' ' + (res.error || '');
+      }
+    }).catch((err) => {
+      btn.disabled = false;
+      if (out) out.textContent = 'failed: ' + err.message;
+    });
+  });
+
+  loadProviders();
+  setInterval(loadProviders, 15000);
+
   // Auto-refresh every 10s so newly-connected tunnels show up.
   setInterval(() => {
     fetch('/api/settings/tunnels').then(r => r.json()).then(res => {

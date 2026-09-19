@@ -124,6 +124,7 @@
   let gl, anim, es;
 
   function boot() {
+    bindProviderChip();
     try {
       gl = new NexGL(canvas);
     } catch (err) {
@@ -1265,6 +1266,44 @@
     window.__nexMouseTarget = () => targetX;
   }
 
+  // ------- provider chip: who is building right now --------------------
+  //
+  // Minimal on purpose: one line naming the provider that is DOING THE WORK
+  // (NIM / GPT / local) plus its model, and a second, dimmer line for the
+  // planner. Everything else (quota, failover reason, cooldowns) is in the
+  // tooltip. The server sends a snapshot on /api/health and pushes
+  // provider.* events; we render both through the pure module
+  // window.NexProviderChip so the node tests can check the labels.
+  let providerStatus = null;
+
+  function providerChipEl() {
+    return document.getElementById('provider-chip');
+  }
+
+  function renderProvider(status) {
+    const chip = window.NexProviderChip;
+    const el = providerChipEl();
+    if (!el) return;
+    if (!chip) { el.textContent = ''; return; }
+    providerStatus = status || providerStatus;
+    chip.render(el, providerStatus);
+  }
+
+  async function loadProviderStatus() {
+    try {
+      const r = await fetch('/api/health');
+      if (!r.ok) return;
+      const data = await r.json();
+      renderProvider(data.providers || null);
+    } catch (e) { /* offline — the chip keeps its last state */ }
+  }
+
+  function bindProviderChip() {
+    loadProviderStatus();
+    // Cheap refresh: the chip must survive a missed SSE frame.
+    setInterval(loadProviderStatus, 20000);
+  }
+
   function bindNetwork() {
     if (!('EventSource' in window)) return;
     // Same-origin EventSource sends the HttpOnly `nex_auth` cookie
@@ -1476,6 +1515,21 @@
         row.textContent = 'planned from the recipe library (no model): '
           + (evt.task_count || 0) + ' steps for ' + (evt.system || '?');
         p.appendChild(row);
+      } else if (evt.type === 'provider.fallback') {
+        // The builder changed hands — the PLAN did not. Say so plainly.
+        renderProvider(evt);
+        const chip = window.NexProviderChip;
+        if (chip) {
+          const from = chip.providerLabel(evt.from || (evt.roles
+            && evt.roles.builder && evt.roles.builder.provider));
+          const to = chip.providerLabel(evt.to || (evt.roles
+            && evt.roles.builder && evt.roles.builder.active));
+          showToast(from + ' unavailable — ' + to
+            + ' builds instead (same plan)', 'info');
+        }
+      } else if (evt.type === 'provider.call'
+                 || evt.type === 'provider.status') {
+        renderProvider(evt);
       } else if (evt.type === 'agent.confirmation_required') {
         // A tool that needs a human decision, in a run nobody is watching.
         // It did NOT run — say so, and say how to approve it.

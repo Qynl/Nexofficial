@@ -61,6 +61,14 @@
     </div>
   </div>
 
+  <!-- Provider chip: WHO is building right now (NIM / GPT / local) and on
+       which model. Fed by /api/health and the provider.* SSE events; the
+       tooltip carries the full planner/builder + quota detail. -->
+  <div id="provider-chip-wrap" aria-live="polite">
+    <div id="provider-chip" data-tone="unknown">…</div>
+    <div id="provider-planner" data-role="provider-planner" hidden></div>
+  </div>
+
   <!-- Speech bubble used in SPEAKING state. Pure white on black, minimal. -->
   <div id="bubble" hidden></div>
 
@@ -78,6 +86,7 @@
 
   <script src="/webgl.js"></script>
   <script src="/animations.js"></script>
+  <script src="/provider_chip.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

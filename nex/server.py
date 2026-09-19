@@ -483,6 +483,39 @@ class EventBus:
 
 BUS = EventBus()
 
+# ---------------------------------------------------------------------------
+# PROVIDER LAYER (agent.providers) — who PLANS and who BUILDS.
+#
+#   planner: reasoning/architecture (local model, or GPT when a key is set)
+#   builder: does the work during the build loop (NVIDIA NIM by default)
+#
+# The builder is rate-limited (~40 RPM on the NIM free tier, limits are
+# per-model and unpublished, and there is no usage API), so the router keeps
+# the budget client-side and fails over to the planner provider — the plan is
+# never restarted, only the hands change. Keys come from nex/.env, the
+# process environment or ~/.nex/providers.json (0600), never from the page.
+# ---------------------------------------------------------------------------
+import agent.providers as _providers  # noqa: E402
+
+ROUTER = _providers.build_router(bus=BUS)
+
+
+def _model_status() -> Dict[str, Any]:
+    try:
+        return ROUTER.status()
+    except Exception:  # noqa: BLE001
+        return {"roles": {}, "providers": {}, "chains": {}}
+
+
+def builder_chat(messages: List[Dict[str, str]]) -> str:
+    """The BUILDER role (NIM first, GPT/local on failover)."""
+    return ROUTER.chat(_providers.ROLE_BUILDER, messages)
+
+
+def builder_reachable() -> bool:
+    return ROUTER.available(_providers.ROLE_BUILDER)
+
+
 # Track whether the streaming chat has begun producing text so we
 # only transition to SPEAKING once per turn (avoids redundant events
 # on every token boundary).
@@ -602,38 +635,32 @@ def _request_json(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, A
 
 
 def model_chat(messages: List[Dict[str, str]]) -> str:
-    """Send messages to the configured model. Returns assistant text.
+    """PLANNER role call, through the provider router.
 
-    Supports both Ollama (/api/chat) and OpenAI-compatible (/v1/chat/completions).
-    Retries on transient errors with a short backoff."""
-    if API_STYLE == "openai":
-        url = OLLAMA_HOST.rstrip("/") + "/v1/chat/completions"
-        body = {"model": OLLAMA_MODEL, "messages": messages,
-                "temperature": 0.7, "stream": False}
-    else:
-        url = OLLAMA_HOST.rstrip("/") + "/api/chat"
-        body = {"model": OLLAMA_MODEL, "messages": messages,
-                "stream": False, "options": {"temperature": 0.7}}
-
-    last_exc: Optional[Exception] = None
-    for attempt in range(3):
-        try:
-            obj = _request_json(url, body, API_TIMEOUT)
-            if API_STYLE == "openai":
-                choices = obj.get("choices") or []
-                if not choices:
-                    raise RuntimeError("no choices in response")
-                return (choices[0].get("message") or {}).get("content", "").strip()
-            return (obj.get("message") or {}).get("content", "").strip()
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-            last_exc = exc
-            # Backoff: 0.4s, 1.2s
-            time.sleep(0.4 * (3 ** attempt))
-            continue
-    raise RuntimeError("model unreachable: " + repr(last_exc))
+    The router handles the endpoint shape (Ollama vs OpenAI-compatible),
+    the failover chain and the rate budget; this keeps the old function
+    name so every existing call site (and test) still works.
+    """
+    return ROUTER.chat(_providers.ROLE_PLANNER, messages)
 
 
 def model_reachable() -> bool:
+    """True when ANY provider in the role chains can serve a call.
+
+    A run must not give up on the model layer just because the local Ollama
+    is down while a NIM/GPT key is configured (or the other way around).
+    """
+    try:
+        if ROUTER.available(_providers.ROLE_PLANNER):
+            return True
+        if ROUTER.available(_providers.ROLE_BUILDER):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return _probe_legacy_model()
+
+
+def _probe_legacy_model() -> bool:
     """Check whether the configured model server is reachable + has the model."""
     try:
         if API_STYLE == "openai":
@@ -1085,7 +1112,8 @@ class NexHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path in ("/", "/index.html", "/style.css", "/app.js", "/webgl.js", "/animations.js",
+        if path in ("/", "/index.html", "/style.css", "/app.js", "/webgl.js",
+                    "/animations.js", "/provider_chip.js", "/providers.js",
                     "/api/health", "/api/state", "/api/events"):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -1261,6 +1289,8 @@ class NexHandler(BaseHTTPRequestHandler):
             self._send_file(os.path.join(FRONTEND_DIR, "webgl.js"), "application/javascript; charset=utf-8")
         elif path == "/animations.js":
             self._send_file(os.path.join(FRONTEND_DIR, "animations.js"), "application/javascript; charset=utf-8")
+        elif path == "/provider_chip.js":
+            self._send_file(os.path.join(FRONTEND_DIR, "provider_chip.js"), "application/javascript; charset=utf-8")
         elif path == "/api/health":
             try:
                 from tunnels import get_tunnels
@@ -1273,6 +1303,7 @@ class NexHandler(BaseHTTPRequestHandler):
                 "ollama_host": OLLAMA_HOST,
                 "ollama_model": OLLAMA_MODEL,
                 "ollama_reachable": model_reachable(),
+                "providers": _model_status(),
                 "supported_states": list(EMOTION_STATES),
                 "fallback_enabled": True,
                 "mcp_enabled": True,
@@ -1338,6 +1369,10 @@ class NexHandler(BaseHTTPRequestHandler):
             self._handle_stdio_config(query)
         elif path == "/api/settings/tunnels":
             self._handle_settings_tunnels()
+        elif path == "/api/providers":
+            self._send_json(200, {"ok": True, **_model_status()})
+        elif path == "/api/settings/providers":
+            self._send_json(200, ROUTER.settings_view())
         elif path.startswith("/api/plan"):
             self._handle_plan(path, query)
         elif path == "/settings.html" or path == "/settings":
@@ -1375,6 +1410,44 @@ class NexHandler(BaseHTTPRequestHandler):
         if path == "/api/chat":
             self._handle_chat()
             return
+        if path == "/api/settings/providers":
+            # Live provider configuration: keys, models, roles, rate budget.
+            # Keys go IN (0600 file / .env), never back out (masked only).
+            body = self._read_json_body() or {}
+            try:
+                view = ROUTER.apply(body)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(400, {"ok": False, "error": repr(exc)})
+                return
+            self._send_json(200, view)
+            return
+        if path == "/api/settings/providers/test":
+            body = self._read_json_body() or {}
+            name = str(body.get("provider") or "").strip()
+            if not name:
+                self._send_json(400, {"ok": False,
+                                      "error": "missing 'provider'"})
+                return
+            result = ROUTER.probe(name)
+            self._send_json(200 if result.get("ok") else 200, result)
+            return
+        if path == "/api/settings/providers/models":
+            body = self._read_json_body() or {}
+            name = str(body.get("provider") or "").strip()
+            if not name:
+                self._send_json(400, {"ok": False,
+                                      "error": "missing 'provider'"})
+                return
+            result = ROUTER.probe(name)
+            self._send_json(200, {
+                "ok": bool(result.get("ok")),
+                "provider": name,
+                "models": result.get("models") or [],
+                "catalog": [c for c in _providers.CATALOG
+                             if c.get("provider") == name],
+                "error": result.get("error", ""),
+            })
+            return
         if path == "/api/project":
             # NEX 2.0: understand BEFORE building. Produces the Design
             # Document + draft plan (Plan Page) without executing anything.
@@ -1389,6 +1462,7 @@ class NexHandler(BaseHTTPRequestHandler):
                     from agent.server_run import run_agent_goal
                     run_agent_goal(goal, bus=BUS, llm_call=model_chat,
                                    llm_reachable=model_reachable(),
+                                   llm_builder=builder_chat,
                                    mode="design")
                 except Exception as exc:  # noqa: BLE001
                     BUS.publish({"type": "agent.error", "error": repr(exc),
@@ -1419,6 +1493,7 @@ class NexHandler(BaseHTTPRequestHandler):
                     result = run_agent_goal(st.goal or pid, bus=BUS,
                                             llm_call=model_chat,
                                             llm_reachable=model_reachable(),
+                                            llm_builder=builder_chat,
                                             mode="build", state=st,
                                             graph=approved_graph)
                     BUS.publish({"type": "agent.report", "result": result,
@@ -1841,6 +1916,7 @@ class NexHandler(BaseHTTPRequestHandler):
                         bus=BUS,
                         llm_call=model_chat,
                         llm_reachable=model_reachable(),
+                        llm_builder=builder_chat,
                         mode="build",
                         graph=graph,
                     )
@@ -2655,7 +2731,8 @@ class NexHandler(BaseHTTPRequestHandler):
         q = BUS.subscribe()
         self._sse_write({"type": "hello", "ts": time.time(),
                          "api_style": API_STYLE,
-                         "model": OLLAMA_MODEL})
+                         "model": ROUTER.role_model("planner") or OLLAMA_MODEL,
+                         "providers": _model_status().get("roles", {})})
 
         try:
             while True:
@@ -2714,6 +2791,7 @@ class NexHandler(BaseHTTPRequestHandler):
                 summary = run_campaign(
                     goal, bus=BUS, llm_call=model_chat,
                     llm_reachable=model_reachable(),
+                    llm_builder=builder_chat,
                     max_milestones=max_milestones, resume=resume)
                 BUS.publish({"type": "agent.report", "result": {
                     "mode": "campaign", "campaign": summary,
@@ -2758,6 +2836,7 @@ class NexHandler(BaseHTTPRequestHandler):
                     goal, bus=BUS,
                     llm_call=model_chat,
                     llm_reachable=model_reachable(),
+                    llm_builder=builder_chat,
                     mode=mode,
                 )
                 BUS.publish({"type": "agent.report", "result": result,

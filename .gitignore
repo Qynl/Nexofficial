@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Provider keys live OUTSIDE the repo: copy nex/.env.example to nex/.env and
+# fill it in. Never commit a key.
+.env
+nex/.env

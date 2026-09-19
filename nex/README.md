@@ -369,6 +369,14 @@ no flag, env var, or runtime call that turns this off
 - `agent/blueprint.py` — the deterministic build blueprint (systems,
   required capabilities, checklists, test plan) for runs without an
   engine.
+- `agent/providers.py` — the provider layer: planner/builder roles, the
+  failover chains, client-side rate budgets, `.env` + `~/.nex/providers.json`
+  config, and the live status the UI reads. HTTP only — no OS surface.
+- `provider_chip.js` — the "who is building right now" chip (pure label
+  logic, covered by the node test harness).
+- `test_providers.py` — provider-layer tests: keys, roles, failover,
+  budget, batching, honesty when everything is down, MCP-only boundary.
+- `.env.example` — provider keys template (copy to `nex/.env`).
 - `test_director.py` — Director-layer tests: recipes, decomposition,
   scope cage, bounded memory, roles, mandatory verification.
 - `mcp_engines.py` — **MCP-only** curated guide adapter for the Roblox
@@ -386,6 +394,99 @@ no flag, env var, or runtime call that turns this off
 - `app.js` — application glue: SSE, microphone (`getUserMedia`),
   `AudioContext` + `AnalyserNode`, procedural music loop, debug panel,
   keyboard shortcuts, mouse attention.
+
+## Providers — the planner and the builder are different roles
+
+The model layer is split in two, and the split is the point:
+
+```
+USER -> PLANNER (reasoning, architecture, decomposition)
+          |
+        exact build plan
+          |
+        BUILDER (does the work, often, in batches)
+          |
+        MCP only -> Roblox MCP / Unreal MCP
+```
+
+| Role | Default | Why |
+| --- | --- | --- |
+| **Planner** | local model (`OLLAMA_MODEL`), or **GPT** when a key is set | called a handful of times per run: design document, systems, tests |
+| **Builder** | **NVIDIA NIM** (`nvidia/nemotron-3-super-120b-a12b`) | called during the build loop; NIM is fast and free, but rate-limited |
+
+Both are configurable per role (settings page → *Models & providers*), down
+to the model id, the endpoint and the RPM budget. A provider list is fetched
+**live** (`/v1/models` / `/api/tags`) so the model ids you see are the ones
+the endpoint actually serves.
+
+### Failover — the plan never restarts
+
+```
+NIM: 429 / timeout / 5xx / RPM exhausted
+        |
+        +--> GPT builds instead (same plan, same tasks)
+        |
+        +--> after the cooldown NIM is the builder again
+```
+
+NVIDIA publishes no usage endpoint and no per-model quota (credits were
+removed in favour of unpublished rate limits, ~40 RPM is the community
+baseline), so Nex counts the requests itself:
+
+* **sliding-window budget per provider** (`NEX_NIM_RPM`, default 40) — when
+  the budget is spent the router routes around the provider *before* the
+  upstream 429 happens;
+* **cooldown with automatic recovery** — `Retry-After` is honoured, other
+  errors get 5–120s depending on the kind (timeout/server/auth);
+* **live state** — `available` / `rate_limited` / `cooling` / `error` /
+  `no_key`, exposed to the UI (`/api/providers`, `provider.*` SSE events);
+* **fallback order** — builder: `NIM -> GPT -> local`; planner:
+  `GPT -> NIM -> local`. The local model is always last and always works.
+
+Failover replaces the *hands*, never the plan: the same messages are sent to
+the fallback provider and the loop continues exactly where it was.
+
+### Batches, not tiny calls
+
+A rate-limited builder must not spend one request per broken step. Failures
+of the same wave are collected and diagnosed in **one** call
+(`agent.repair_batched`); only a single pending failure gets its own focused
+call. If a batched answer is unusable, the router splits it back into per-job
+calls — batching may cost a retry, never a repair.
+
+### Keys
+
+Highest precedence first:
+
+1. process environment (`NVIDIA_API_KEY`, `OPENAI_API_KEY`, …)
+2. `.env` — `nex/.env`, repo-root `.env`, `~/.nex/.env`
+   (template: `nex/.env.example`)
+3. settings page → `~/.nex/providers.json` (0600)
+
+Keys are **never** sent back to the browser: the API returns them masked
+(`nvapi-…9f2`). And whatever the provider answers, it is text: the builder's
+only action surface is the MCP registry — it cannot reach the machine.
+
+Environment knobs:
+
+```
+NVIDIA_API_KEY=nvapi-...            # builder (build.nvidia.com)
+OPENAI_API_KEY=sk-...               # planner
+OLLAMA_HOST / OLLAMA_MODEL          # local fallback
+NEX_PLANNER_PROVIDER=local|gpt|nim  # default: gpt if a key exists, else local
+NEX_BUILDER_PROVIDER=nim|gpt|local  # default: nim if a key exists, else local
+NEX_PLANNER_MODEL / NEX_BUILDER_MODEL
+NEX_NIM_RPM=40                      # client-side budget for the NIM free tier
+NEX_PROVIDERS_FILE=~/.nex/providers.json   # where the settings page stores
+```
+
+### The chip
+
+Top right of the UI: which provider is **building right now**, plus its model;
+the dimmer second line names the planner. Amber + pulse means a failover is
+running, grey is the local model, red means no provider at all. The tooltip
+carries the quota (`28/40 RPM`), the cooldown and the reason the previous
+provider stepped aside.
 
 ## Ollama
 

@@ -167,6 +167,7 @@ class AutonomousAgent:
                  max_backoff: float = 2.0,
                  recovery_passes: int = 1,
                  llm: Optional[Callable] = None,
+                 builder: Optional[Callable] = None,
                  max_critique_cycles: int = 1,
                  design_enabled: bool = True,
                  persist: bool = True,
@@ -222,6 +223,11 @@ class AutonomousAgent:
         # Canonical model hook: when set, goals are planned by the LLM
         # (goal-specific TaskGraph), with the skeleton as fallback.
         self.llm = llm
+        # The BUILDER is a separate role on purpose: planning/reasoning runs
+        # on the planner (local model or GPT), while the work inside the
+        # build loop runs on the builder (NVIDIA NIM by default, ~40 RPM).
+        # Defaults to `llm` so every existing caller/test keeps its behavior.
+        self.builder = builder or llm
         self.last_plan = None
         # NEX 2.0: design-first planning + the build->critique->improve
         # loop. `max_critique_cycles` bounds self-criticism so Nex never
@@ -599,9 +605,11 @@ class AutonomousAgent:
             if graph.is_terminal():
                 # Only failed/skipped remain. Try to revive them for another
                 # pass before declaring the run blocked.
+                self._llm_diagnose_batch(graph, state)
                 if not self._revive(graph):
                     break
                 continue
+            self._llm_diagnose_batch(graph, state)
             if not self._revive(graph):
                 break
 
@@ -1168,27 +1176,83 @@ class AutonomousAgent:
         report.systems = list(self._run_systems)
         return report
 
-    def _llm_diagnose(self, task: Any, err: str, phase: str = "execute"):
-        """Genuine LLM failure diagnosis (agent.diagnose): the model gets the
-        failure context + the LIVE tool catalog and returns a structured
-        recovery decision — corrected args, a different (validated, live)
-        tool, or an honest give-up. Registry-validated before use, and
-        bounded to one attempt per task (llm_diagnosed) so a broken model
-        can't loop the pipeline. The deterministic repairs stay first.
+    def _queue_diagnosis(self, task: Any, err: str,
+                         phase: str = "execute") -> None:
+        """Record a failure for the WAVE diagnosis instead of calling now.
 
-        Returns the normalized decision dict or None.
+        A builder on a rate-limited provider (~40 RPM on NIM) must not spend
+        one request per broken task. Every failure that the deterministic
+        repairs cannot fix is queued here; `_llm_diagnose_batch` then spends
+        exactly ONE provider request for the whole wave (or one focused call
+        when only a single task is pending).
+
+        Bounded like before: a task is queued at most once (llm_diagnosed),
+        so a broken model can never loop the pipeline.
         """
-        if self.llm is None or getattr(task, "llm_diagnosed", False):
-            return None
-        task.llm_diagnosed = True
-        from agent.diagnose import diagnose as _diagnose_llm
-        decision = _diagnose_llm(task, err, self.registry, self.llm,
-                                 phase=phase)
-        if decision is not None:
+        if self.builder is None or getattr(task, "llm_diagnosed", False):
+            return
+        task.llm_diagnose_pending = True
+        task.llm_diagnose_error = str(err or "")[:500]
+        task.llm_diagnose_phase = phase
+
+    def _llm_diagnose_batch(self, graph: TaskGraph, state: Any) -> int:
+        """ONE builder call for ALL failed tasks of this pass.
+
+        A rate-limited builder (~40 RPM on NIM) must not spend a request per
+        broken task. Tasks that were already diagnosed inline are skipped, a
+        single failure keeps the normal focused path, and any decision that
+        cannot be parsed for a task falls back to that task's own call.
+
+        Returns the number of tasks that received a usable decision.
+        """
+        if self.builder is None:
+            return 0
+        pending = [t for t in graph.failed()
+                   if not getattr(t, "llm_diagnosed", False)]
+        if not pending:
+            return 0
+        from agent.diagnose import diagnose_many
+        items = [{"key": t.id, "task": t,
+                  "error": (getattr(t, "llm_diagnose_error", "")
+                            or getattr(t, "error", "") or "")}
+                 for t in pending]
+        try:
+            decisions = diagnose_many(items, self.registry, self.builder,
+                                      phase=getattr(pending[0],
+                                                    "llm_diagnose_phase",
+                                                    "execute"))
+        except Exception:  # noqa: BLE001 — repair must never break the run
+            return 0
+        applied = 0
+        for task in pending:
+            task.llm_diagnosed = True          # bounded: once, batch or not
+            decision = decisions.get(task.id)
+            if decision is None:
+                continue
+            kind = decision.get("kind")
             self._emit("REPAIRING", "agent.repair_started", task=task.id,
-                       note=decision.get("reason", ""),
-                       action=decision.get("kind"))
-        return decision
+                       note=decision.get("reason", ""), action=kind)
+            if kind == "correct_args":
+                task.args = dict(decision.get("args") or {})
+                applied += 1
+            elif kind == "switch_tool":
+                task.tool = decision.get("tool")
+                task.server = decision.get("server", task.server)
+                task.attempts = 0
+                applied += 1
+            elif kind == "give_up":
+                # Honest stop: keep the failure, and remember the model's
+                # reason so the report can name it.
+                task.llm_gave_up = True
+                if decision.get("reason"):
+                    task.error = decision["reason"]
+                applied += 1
+        if applied:
+            self._emit("REPAIRING", "agent.repair_batched",
+                       tasks=[t.id for t in pending], applied=applied,
+                       note="one builder call diagnosed %d failed steps"
+                            % len(pending))
+        return applied
 
     def _revive(self, graph: TaskGraph) -> bool:
         """Prepare the graph for another recovery pass.
@@ -1209,6 +1273,10 @@ class AutonomousAgent:
                 t.notes = ""
                 changed = True
             elif t.status == FAILED:
+                # A task the builder diagnosed as unrecoverable stays failed —
+                # reviving it would burn another pass to reach the same place.
+                if getattr(t, "llm_gave_up", False):
+                    continue
                 # If it was denied by policy, leave it failed.
                 if t.error and "never authorized" in (t.error or ""):
                     continue
@@ -1332,33 +1400,14 @@ class AutonomousAgent:
                     else None)
                 corrected, note = _diagnose(err, task,
                                             schema_props=schema_props)
-                decision = None
                 if corrected is None:
-                    # B2) genuine LLM diagnosis (bounded once per task);
-                    # the regex repair above stays as the fast path.
-                    decision = self._llm_diagnose(task, err)
-                    if decision is not None:
-                        if decision["kind"] == "correct_args":
-                            corrected, note = (decision["args"],
-                                               decision.get("reason", ""))
-                        elif decision["kind"] == "switch_tool":
-                            # Registry-validated escape hatch: same task,
-                            # different live tool.
-                            task.tool = decision["tool"]
-                            task.server = decision.get("server", task.server)
-                            task.attempts = 0
-                            self._emit("REPAIRING",
-                                       "agent.repair_succeeded",
-                                       task=task.id,
-                                       note=decision.get("reason", ""))
-                            continue
-                        else:  # give_up — honest failure with a reason
-                            task.error = decision.get(
-                                "reason", "model judged unrecoverable")
-                            graph.mark_failed(task.id, task.error,
-                                              _error_signature(task.error))
-                            state.record_failure(task.name, task.error)
-                            return
+                    # B2) genuine LLM diagnosis — QUEUED, never called here.
+                    # One failure is repaired in the recovery pass by a
+                    # single focused call; several failures of the same wave
+                    # share ONE batched builder call. The deterministic
+                    # alternatives (C/D) below still run first, and the regex
+                    # repair above stays the fast path.
+                    self._queue_diagnosis(task, err, "execute")
                 if corrected is not None:
                     task.args = corrected
                     args = _resolve_args(task, graph)
@@ -1417,12 +1466,10 @@ class AutonomousAgent:
                     return
                 # Verification failure is ALSO a diagnosis trigger: let the
                 # model propose corrected args (bounded once per task).
-                vfix = self._llm_diagnose(task, vres.note, phase="verify")
-                if vfix is not None and vfix["kind"] == "correct_args":
-                    task.args = vfix["args"]
-                    args = _resolve_args(task, graph)
-                    time.sleep(min(self.backoff_base, self.max_backoff))
-                    continue
+                # A verifier rejection gets the same treatment as a tool
+                # failure: queued for the wave diagnosis (one call), then
+                # retried with corrected args in the recovery pass.
+                self._queue_diagnosis(task, vres.note, "verify")
                 time.sleep(min(self.backoff_base, self.max_backoff))
                 continue
 
