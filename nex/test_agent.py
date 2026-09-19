@@ -137,9 +137,15 @@ _expect(not report.failed, "no failed tasks in repaired run: %s" % report.failed
 # ---------------------------------------------------------------------------
 # 4. Autonomous simulation: persistent failure -> dependency-aware skip
 # ---------------------------------------------------------------------------
+# This section is about the DETERMINISTIC SKELETON's dependency handling
+# (a failing leaf skips its dependents), so the graph is built explicitly:
+# without a graph the run plans from the recipe library, which targets the
+# system's own steps and would never call `create_animation` at all.
 registry2, _ = _build_registry(
     animation_fail={"count": 99, "error": "missing required argument: 'rig'"})
-report2 = agent_loop.AutonomousAgent(registry2).run("Make a game.")
+_skeleton_agent = agent_loop.AutonomousAgent(registry2)
+_skeleton_graph = _skeleton_agent.planner("Make a game.", registry2)
+report2 = _skeleton_agent.run("Make a game.", graph=_skeleton_graph)
 _expect("animation" in report2.failed, "persistent failure recorded")
 _expect(len(report2.skipped) > 0, "dependents skipped on hard failure")
 _expect(report2.status in (agent_loop.STATUS_PARTIAL,

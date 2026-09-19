@@ -280,6 +280,7 @@ class AutonomousAgent:
             resume_checkpoint: Optional[str] = None,
             scope: Optional[Dict[str, Any]] = None,
             game_plan=None) -> CompletionReport:
+        original_graph_provided = graph is not None
         self._emit("OBSERVING", "agent.observe",
                    servers=[s.name for s in self.registry.servers])
         if state is None:
@@ -323,8 +324,11 @@ class AutonomousAgent:
         # picks the ONE system this round is scoped to. The planner then
         # gets a narrow objective instead of the whole project.
         # Direct when we are planning from scratch. A caller that already
-        # directed this run (server path) passes game_plan; a pre-built
-        # graph is somebody else's plan and must not be re-scoped here.
+        # directed this run (the server path) passes its GamePlan in — and
+        # an empty pre-built graph must not silently discard it, because
+        # the blueprint, the campaign and the gate all need the systems.
+        if game_plan is not None and self.game_plan is None:
+            self.game_plan = game_plan
         if graph is None and self.game_plan is None:
             self._direct(goal, state, game_plan=game_plan)
         if scope is not None:
@@ -394,7 +398,9 @@ class AutonomousAgent:
                 reasons=[reason],
                 missing=[{"task": "capability", "stage": "connect",
                           "server": None, "tool": None, "reason": reason}],
-                systems=list(self._run_systems),
+                systems=(list(self._run_systems)
+                         or ([state.current_system]
+                             if getattr(state, "current_system", "") else [])),
                 blueprint=blueprint)
             if self.persist:
                 try:
@@ -407,6 +413,9 @@ class AutonomousAgent:
         # --- CAMPAIGN: work the game plan, not just one system ------------
         # "Make me a game" is 4-8 systems. Bounded by BOTH a system count
         # and a wall clock; whatever stops the campaign is reported.
+        # An approved plan is binding: the campaign must NOT continue into
+        # the next system, because that work was never signed off on.
+        approved_plan = original_graph_provided
         state.phase = "BUILDING"
         if state.current_system and state.current_system not in self._run_systems:
             self._run_systems.append(state.current_system)
@@ -415,7 +424,7 @@ class AutonomousAgent:
         report, work_ok = self._execute_round(goal, state, graph)
         rounds.append(report)
 
-        while (work_ok and self.game_plan is not None
+        while (work_ok and not approved_plan and self.game_plan is not None
                and len(rounds) < self.max_systems_per_run
                and time.time() < deadline):
             nxt = self._next_system(state)
@@ -438,7 +447,10 @@ class AutonomousAgent:
             report, work_ok = self._execute_round(goal, state, graph)
             rounds.append(report)
         else:
-            if (work_ok and self.game_plan is not None and time.time()
+            if approved_plan:
+                # not a campaign: exactly the approved plan was executed
+                pass
+            elif (work_ok and self.game_plan is not None and time.time()
                     >= deadline):
                 self._emit("PLANNING", "agent.campaign_stopped",
                            reason="run budget exhausted (NEX_RUN_BUDGET_S)")
@@ -952,41 +964,23 @@ class AutonomousAgent:
         steps = scope.get("steps") or []
         if not steps:
             return None
-        from agent.blueprint import capability_for_intent
+        from agent.blueprint import _match_tool, capability_for_intent
         from agent.task_graph import TaskGraph, Task
-        tools = self.registry.all_tools()
-        by_cap: Dict[str, List[Any]] = {}
-        by_cap["observe"] = [t for t in tools if any(
-            k in t.name.lower() for k in ("screenshot", "capture", "log",
-                                          "console", "inspect", "metric",
-                                          "profile"))]
-        by_cap["verify"] = [t for t in tools if any(
-            k in t.name.lower() for k in ("verify", "validate", "test",
-                                          "check"))]
-        by_cap["run"] = [t for t in tools if any(
-            k in t.name.lower() for k in ("launch", "run_game", "play",
-                                          "simulate", "start"))]
-        by_cap["build"] = [t for t in tools if any(
-            k in t.name.lower() for k in ("build", "compile", "package",
-                                          "bake", "cook"))]
+        names = [getattr(t, "name", "") or ""
+                 for t in self.registry.all_tools()]
+        by_name = {getattr(t, "name", ""): t
+                   for t in self.registry.all_tools()}
         graph = TaskGraph()
         prev: Optional[str] = None
         for i, st in enumerate(steps):
             intent = st.get("intent", "") if isinstance(st, dict) else str(st)
             cap = capability_for_intent(intent)
-            cands = by_cap.get(cap, [])
-            if cap in ("observe", "verify", "run", "build"):
-                # these are the verifying steps: prefer them when present
-                pass
-            else:
-                # a creative step: any tool whose name echoes the intent
-                words = [w for w in re.split(r"[^a-z0-9]+", intent.lower())
-                         if len(w) > 3]
-                cands = [t for t in tools
-                         if any(w in t.name.lower() for w in words)]
-            if not cands:
+            tool = by_name.get(_match_tool(cap, intent, names))
+            if tool is None:
+                # No connected tool serves this step. Dropped and reported
+                # (the blueprint names the missing capability), never
+                # invented.
                 continue
-            tool = cands[0]
             tid = "step_%d_%s" % (i + 1, re.sub(r"[^a-z0-9]+", "_",
                                                 cap))[:40]
             t = Task(id=tid, name=intent[:80], stage=cap,

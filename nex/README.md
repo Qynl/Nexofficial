@@ -135,10 +135,14 @@ GAME REQUEST -> DIRECTOR (systems + build order + checklists)
   HUD, audio, ...) with per-step *intents* and explicit **completion
   checklists**. They carry no tool names: which MCP tool implements a
   step is decided at plan time against the live registry.
+- **Every recipe ends with the playtest**: `Run the game → Observe →
+  Verify` are appended to each recipe centrally, and
+  `NEX_MAX_STEPS_PER_SYSTEM` deliberately bounds only the BUILD steps —
+  verification is not a budget item, so it can never fall off the end.
 - **Scope envelope (`scope_envelope`/`scope_block`)** is the anti-"I
   improved the entire project" cage: ONE objective, the success criteria,
-  a hard step budget (`NEX_MAX_STEPS_PER_SYSTEM`), and an explicit DO-NOT
-  list naming the other systems. Work that leaves the cage is named by
+  a step budget for the work (`NEX_MAX_STEPS_PER_SYSTEM`), and an explicit
+  DO-NOT list naming the other systems. Work that leaves the cage is named by
   the critic (`scope_creep`), never silently accepted.
 - **Roles (`agent/roles.py`)** are the same model called with different,
   tightly scoped jobs: DIRECTOR, PLANNER, BUILDER, REVIEWER, TESTER,
@@ -184,7 +188,13 @@ campaign scopes the next system and keeps going, announcing every step
 * **The model is optional.** With no model (or a failed model call) the
   plan comes from the RECIPE library matched against the live catalog by
   deterministic rules (`agent.recipe_planned`) instead of a generic
-  skeleton.
+  skeleton: a create step finds a create tool, a configure step finds a
+  configure tool (never a create one), the playtest step finds the launch
+  tool and the observation step finds the capture tool. Steps whose
+  capability is missing are dropped and named, never invented.
+* **An approved plan is binding.** When the user approves a plan (START
+  BUILD), that graph is executed as approved: no campaign, no extra
+  system — the run does not extend work nobody signed off on.
 
 ### Without an engine: the BLUEPRINT
 

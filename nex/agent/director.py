@@ -352,6 +352,30 @@ def direct(goal: str, llm: Optional[Callable] = None,
 # The SCOPE ENVELOPE (the anti-"I improved the entire project" guard)
 # ---------------------------------------------------------------------------
 
+def _is_playtest(step: Dict[str, Any]) -> bool:
+    """The steps that RUN and OBSERVE the game (recipe tail)."""
+    text = ((step or {}).get("intent") or "").lower()
+    return ("run the game" in text or "observe" in text
+            or "verify the success criteria" in text)
+
+
+def _budget_steps(steps: List[Dict[str, Any]],
+                  max_steps: int) -> List[Dict[str, Any]]:
+    """Apply the step budget to the BUILD steps, never to verification.
+
+    `NEX_MAX_STEPS_PER_SYSTEM` bounds how much building one system may do.
+    It must not silently delete the playtest/verify stages: a system whose
+    "run it and look" steps fell off the end of the budget would be built
+    blind — the exact failure this architecture exists to prevent.
+    """
+    steps = [dict(st) for st in steps or []]
+    if max_steps <= 0:
+        return steps
+    build = [st for st in steps if not _is_playtest(st)]
+    play = [st for st in steps if _is_playtest(st)]
+    return build[:max_steps] + play
+
+
 def scope_envelope(system: Optional[SystemPlan],
                    remaining: Optional[List[SystemPlan]] = None,
                    max_steps: int = 4) -> Dict[str, Any]:
@@ -372,7 +396,8 @@ def scope_envelope(system: Optional[SystemPlan],
                      % (system.title, system.provides or ""),
         "system": system.id,
         "success": list(system.checklist),
-        "steps": [dict(st) for st in system.steps[:max_steps]],
+        "steps": [dict(st) for st in _budget_steps(system.steps,
+                                                   max_steps)],
         "do_not": [("do not restructure the project or refactor unrelated "
                     "systems"),
                    ("do not modify a system that is already complete"),

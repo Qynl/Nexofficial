@@ -651,6 +651,69 @@ try:
     _expect(not report_b.completed,
             "a blueprint is a PLAN: nothing is reported as built")
 
+    # --- the step budget must never cut off VERIFICATION ---------------
+    gp_b = director_mod.direct("make a platformer")
+    sys_b = gp_b.systems[0]
+    env_b = director_mod.scope_envelope(sys_b, gp_b.remaining(), max_steps=1)
+    intents = [st["intent"].lower() for st in env_b["steps"]]
+    _expect(any("run the game" in i for i in intents)
+            and any("observe" in i for i in intents)
+            and any("verify the success criteria" in i for i in intents),
+            "NEX_MAX_STEPS_PER_SYSTEM bounds the BUILD steps; the playtest/"
+            "verify steps always survive it: %s" % [i[:26] for i in intents])
+    _expect(sum(1 for i in intents if "run the game" in i) == 1,
+            "the playtest stages are not duplicated by the budget rule")
+
+    # --- capability matching must not turn "configure" into "create" ----
+    names_b = ["create_character", "set_property", "launch", "screenshot"]
+    _expect(blueprint_mod._match_tool(
+        "configure", "Wire movement input (walk/run/strafe) to the "
+        "character", names_b) == "set_property",
+        "a configure step is answered with a configure tool, never with "
+        "create_character (which would build a second character)")
+    _expect(blueprint_mod._match_tool(
+        "create", "Create the playable character and place it at a valid "
+        "start position", names_b) == "create_character",
+        "a create step may fall back to the intent word (the object IS the "
+        "tool name)")
+
+    # --- the recipe plan without a model: run -> launch, observe -> shot --
+    gp_r = director_mod.direct("make a platformer")
+    st_r = ProjectState(goal="make a platformer")
+    reg_r = agent_loop.CapabilityRegistry([mock_mcp.server_view(
+        "engine", mock_mcp.MockMCPServer("engine", _ENGINE_TOOLS))])
+    ag_r = agent_loop.AutonomousAgent(reg_r, llm=None, persist=False)
+    ag_r.game_plan = gp_r
+    ag_r._scope = director_mod.scope_envelope(gp_r.systems[0],
+                                              gp_r.remaining(), max_steps=6)
+    g_r = ag_r._recipe_plan(st_r)
+    tools_r = {t.stage: t.tool for t in (g_r.all() if g_r else [])}
+    _expect(tools_r.get("run") == "launch",
+            "the playtest step is planned against the launch tool: %s"
+            % tools_r)
+    _expect(tools_r.get("observe") == "screenshot",
+            "the observation step is planned against a capture tool: %s"
+            % tools_r)
+    _expect(tools_r.get("verify") is None,
+            "a missing capability is DROPPED, not invented: %s" % tools_r)
+
+    # --- an approved plan is binding: no campaign, no extra work --------
+    approved_events = []
+    st_ap = ProjectState(goal="make a platformer")
+    ag_ap = agent_loop.AutonomousAgent(
+        reg_r, llm=None, persist=False,
+        bus=lambda e: approved_events.append(e))
+    from agent.task_graph import Task as _T2, TaskGraph as _TG2
+    g_ap = _TG2()
+    g_ap.add(_T2(id="only", name="build one thing", stage="build",
+                 server="engine", tool="build", args={}))
+    approved_events.clear()
+    ag_ap.run("make a platformer", graph=g_ap, state=st_ap)
+    _expect(not [e for e in approved_events
+                 if e.get("type") == "agent.system_started"],
+            "an APPROVED graph is executed as approved — the campaign does "
+            "not extend it into a system nobody signed off on")
+
     # --- confirmation gate: a tool nobody approved does not run ----------
     class _DestructiveEngine(mock_mcp.MockMCPServer):
         def call(self, tool, args):

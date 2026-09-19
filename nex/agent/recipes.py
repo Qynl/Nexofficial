@@ -42,6 +42,17 @@ class RecipeStep:
     evidence: str = ""           # what observation proves this step worked
 
 
+def staged_evidence(steps: List["RecipeStep"]) -> str:
+    """The observation the playtest step should produce: the FIRST concrete
+    evidence the recipe names (screenshot / logs / runtime state). Chosen
+    deterministically so every recipe's playtest step is checkable."""
+    for st in steps or []:
+        ev = (getattr(st, "evidence", "") or "").strip()
+        if ev:
+            return ev
+    return "screenshot/log from the running game"
+
+
 @dataclass
 class Recipe:
     id: str
@@ -66,12 +77,37 @@ class Recipe:
         }
 
 
+# Every recipe ends with the SAME two stages, for a reason: a system is
+# not built when the last create/set tool returned, it is built when the
+# game RUNS and someone can SEE it working (or not). Adding them centrally
+# keeps one statement of the rule instead of 15 hand-copied ones — and it
+# makes the no-model path plan the playtest, not just the construction.
+_PLAYTEST_STEPS = (
+    RecipeStep(intent="Run the game so {system} can be observed",
+               evidence="the game is actually running (process/session id)"),
+    RecipeStep(intent="Observe {system} end to end in the running game",
+               evidence="{evidence}"),
+    RecipeStep(intent="Verify the success criteria of {system} against the "
+                      "running game's output",
+               evidence="screenshot/log/metrics that prove it"),
+)
+
+
 def _r(rid, title, system, provides, requires=(), steps=(), checklist=(),
        risks=(), tags=()):
+    built = [RecipeStep(*s) if isinstance(s, tuple) else s for s in steps]
+    if not any("run the game" in (st.intent or "").lower()
+               or "observe" in (st.intent or "").lower()
+               for st in built):
+        primary = staged_evidence(built)
+        for proto in _PLAYTEST_STEPS:
+            built.append(RecipeStep(
+                intent=proto.intent.format(system=title, evidence=primary),
+                evidence=proto.evidence.format(evidence=primary,
+                                               system=title)))
     return Recipe(
         id=rid, title=title, system=system, provides=provides,
-        requires=list(requires),
-        steps=[RecipeStep(*s) if isinstance(s, tuple) else s for s in steps],
+        requires=list(requires), steps=built,
         checklist=list(checklist), risks=list(risks), tags=list(tags))
 
 

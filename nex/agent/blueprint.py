@@ -106,9 +106,13 @@ def _match_tool(cap: str, intent: str, tool_names: List[str]) -> str:
                 break
     if best:
         return best
-    # Fall back to an intent-word match: "create a controllable character"
-    # can be served by `create_character` even when the catalog has no
-    # generic `create` tool.
+    # Intent-word fallback ONLY where the object is the tool name: a
+    # create step ("create the controllable character") is often served by
+    # `create_character` even when the catalog has no generic create tool.
+    # A CONFIGURE step must never be answered with a create tool — that
+    # would build a second character instead of wiring the first one.
+    if cap not in ("create", "write_code"):
+        return ""
     for w in _words(intent):
         if len(w) < 4:
             continue
