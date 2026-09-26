@@ -5,11 +5,11 @@ instruction — the planner/agent calls ``authorize()`` BEFORE every
 external action, and a denial is a hard stop, not a suggestion.
 
 Trust model
-  * SERVER trust is the operator's explicit act of CONNECTING a tunnel
-    (token-protected settings page / built-in catalog / env). There is no
-    other way for a server to enter the capability surface, so an
-    allow-list of servers would only re-state that act; the narrowing
-    happens at the TOOL level instead.
+  * SERVER trust is the operator's explicit act of ADDING a server
+    (token-protected UI / servers.json / env). There is no other way
+    for a server to enter the capability surface, so an allow-list of
+    servers would only re-state that act; the narrowing happens at the
+    TOOL level instead.
   * TOOL trust is the policy's job. A connected server may expose many
     tools; Nex must not trust what it cannot classify:
       - tools whose name heuristics cannot place (UNKNOWN) require
@@ -19,13 +19,15 @@ Trust model
         (PROCESS_EXECUTION) ALWAYS requires confirmation, and
       - destructive / network categories require confirmation.
     Explicit server/tool allow-lists (Policy fields) tighten further.
-  * ``run_command`` is Nex's OWN shell and is NEVER authorized, on any
-    server, under any configuration.
+  * ``run_command`` and friends are shell primitives and are NEVER
+    authorized, on any server, under any configuration.
   * MCP annotations (readOnlyHint & co) are untrusted hints supplied by
     the server itself — see capability.py; they can only raise caution.
 """
 
 from __future__ import annotations
+
+import re
 
 import os
 from dataclasses import dataclass, field
@@ -38,15 +40,11 @@ from mcp.capability import (
 
 
 # THE CAPABILITY BOUNDARY. Nex's AI can act ONLY through explicitly
-# connected MCP servers (authorized via `server`). These internal names
-# are MCP-protocol introspection (part of the MCP layer itself).
-# EVERYTHING else internal — filesystem, shell, host scanning,
-# compile/validate helpers — is NOT an AI capability, even though the
-# code exists as Nex infrastructure. Not policy-gated: structurally
-# absent from the boundary.
-INTERNAL_ALLOWED = frozenset({
-    "who_am_i", "list_platforms", "tunnel_status", "tunnel_probe",
-})
+# connected MCP servers (authorized via `server`). Nex has NO internal
+# AI capabilities at all: no filesystem, no shell, no host access —
+# not policy-gated, structurally absent from the boundary. A call with
+# server=None (an attempt to reach "Nex's own tools") is denied here.
+INTERNAL_ALLOWED: frozenset = frozenset()
 
 # Tools that are ALWAYS treated as external/unsafe (never auto-allowed).
 # NOTE: matched against the BARE tool name — a connected MCP server that
@@ -114,6 +112,20 @@ _ESCAPE_MARKERS = (
     ("base64 -d", "obfuscated payload decode"),
     ("chmod +x", "making a payload executable"),
     ("sudo ", "privilege escalation"),
+)
+
+# Credential SHAPES (value patterns, not the bare word "password"):
+# an agent handing a secret to an external tool is leaking it, whether
+# the tool runs code or "just" sends a message.
+_CREDENTIAL_SHAPES = (
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "API key"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "AWS access key id"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."), "JWT"),
+    (re.compile(r"(?i)(?<![a-z0-9])(api[_-]?key|secret(?:[_-]?access"
+                r"[_-]?key)?|password|passwd|access[_-]?token)"
+                r"[_-]*\s*[=:]\s*\S{12,}"), "credential assignment"),
+    (re.compile(r"(?i)\bbearer\s+\S{15,}"), "bearer credential"),
 )
 
 _SENSITIVE_PATHS = (
@@ -236,13 +248,18 @@ def scan_arguments(tool: str, args: Any,
                 if marker in low:
                     return ("escape payload: argument '%s' contains %r "
                             "(%s) — code that reaches the operating system "
-                            "is never part of building a game"
+                            "is never part of the task"
                             % (key or "?", marker, why))
         for marker, why in _SENSITIVE_PATHS:
             if marker in low:
                 return ("escape payload: argument '%s' touches %r (%s) — "
                         "outside the project, not an AI capability"
                         % (key or "?", marker, why))
+        for pattern, what in _CREDENTIAL_SHAPES:
+            if pattern.search(text):
+                return ("escape payload: argument '%s' carries a %s — "
+                        "secrets are never the agent's to pass along"
+                        % (key or "?", what))
         if key.split(".")[-1].lower() in _PATH_KEYS and ("../" in text
                                                          or "..\\" in text):
             return ("escape payload: argument '%s' leaves the project "

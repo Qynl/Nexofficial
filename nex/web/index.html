@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Nex</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body data-view="chat">
+
+  <!-- ══════════════════ Sidebar ══════════════════ -->
+  <nav id="sidebar" aria-label="Nex navigation">
+    <div class="sb-head">
+      <div class="sb-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+          <rect x="3" y="6" width="7.5" height="12" rx="2.5"/>
+          <rect x="13.5" y="6" width="7.5" height="12" rx="2.5"/>
+        </svg>
+      </div>
+      <span class="sb-brand">Nex</span>
+      <button class="icon-btn sb-collapse" id="btn-collapse" title="Collapse sidebar"
+              aria-label="Collapse sidebar">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+    </div>
+
+    <div class="sb-new">
+      <button id="btn-new-chat" class="btn-primary">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+      </button>
+    </div>
+
+    <div class="sb-search">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="search-input" type="search" placeholder="Search chats"
+             aria-label="Search conversations" autocomplete="off">
+    </div>
+
+    <div class="sb-scroll" id="convo-list" role="list" aria-label="Conversations">
+      <!-- conversation rows rendered by sidebar.js -->
+    </div>
+
+    <div class="sb-foot">
+      <button class="sb-foot-item" id="btn-servers" aria-label="Capabilities">
+        <span class="sb-cap-dot" id="cap-dot" data-state="none"></span>
+        <span class="sb-foot-label">Capabilities</span>
+        <span class="sb-cap-count" id="cap-count"></span>
+      </button>
+      <button class="sb-foot-item" id="btn-settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h.09a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        <span class="sb-foot-label">Settings</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- thin strip to reopen a collapsed sidebar -->
+  <button id="sidebar-peek" title="Open sidebar" aria-label="Open sidebar">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+  </button>
+
+  <!-- ══════════════════ Main column ══════════════════ -->
+  <main id="main">
+
+    <header id="topbar">
+      <button class="icon-btn only-mobile" id="btn-menu" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+
+      <!-- The living face. Same canvas everywhere: large in the empty
+           state, compact in the top bar. All CSS transforms. -->
+      <div id="face-rig" aria-hidden="true">
+        <canvas id="face-canvas"></canvas>
+      </div>
+
+      <div id="topbar-title">
+        <h1 id="convo-title" title="">Nex</h1>
+      </div>
+
+      <div class="topbar-spacer"></div>
+
+      <!-- Agent status pill (visible while a run is active) -->
+      <div id="agent-pill" hidden>
+        <span class="pill-dot"></span>
+        <span id="agent-pill-text">Working…</span>
+      </div>
+
+      <!-- Provider chip: who is answering right now -->
+      <button id="provider-chip" data-tone="unknown" title="Model"
+              aria-label="Model status">
+        <span class="pc-dot"></span><span id="pc-label">…</span>
+      </button>
+    </header>
+
+    <!-- ═══════════ Chat view ═══════════ -->
+    <section id="view-chat" class="view" aria-label="Conversation">
+      <div id="scroller">
+        <div id="chat" role="log" aria-live="polite"></div>
+
+        <!-- Empty state hero -->
+        <div id="hero" hidden>
+          <div class="hero-glow" aria-hidden="true"></div>
+          <h2 class="hero-title">What can I do for you?</h2>
+          <p class="hero-sub" id="hero-sub">Connect a capability server to give me tools.</p>
+          <div class="hero-suggestions" id="hero-suggestions"></div>
+        </div>
+      </div>
+
+      <div id="scroll-pill" hidden>
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+        Latest
+      </div>
+
+      <footer id="composer-wrap">
+        <div id="composer" class="composer">
+          <button class="composer-btn" id="btn-mic" title="Dictate"
+                  aria-label="Dictate" hidden>
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          </button>
+          <textarea id="composer-input" rows="1"
+                    placeholder="Message Nex…"
+                    aria-label="Message Nex"></textarea>
+          <button class="composer-btn" id="btn-speak" title="Read replies aloud"
+                  aria-label="Toggle read aloud" hidden>
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+          </button>
+          <button class="composer-send" id="btn-send" title="Send"
+                  aria-label="Send message" disabled>
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+          <button class="composer-send composer-stop" id="btn-stop" title="Stop"
+                  aria-label="Stop generating" hidden>
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+          </button>
+        </div>
+        <div class="composer-meta">
+          <span id="composer-hint">Enter to send · Shift+Enter for a new line</span>
+          <span id="dictate-status" hidden></span>
+        </div>
+      </footer>
+    </section>
+
+    <!-- ═══════════ Capabilities view ═══════════ -->
+    <section id="view-servers" class="view" aria-label="Capabilities" hidden>
+      <div class="view-inner">
+        <div class="view-head">
+          <button class="btn-ghost btn-back" id="btn-servers-back">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg>
+            Chat
+          </button>
+          <h2>Capabilities</h2>
+          <p class="view-sub">MCP servers give Nex its tools. Nex itself has
+            none — everything it can do comes from what you connect here.</p>
+        </div>
+        <div class="servers-actions">
+          <button class="btn-primary" id="btn-add-server">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Add server
+          </button>
+        </div>
+        <div id="server-list" class="server-list"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ══════════════════ Overlays ══════════════════ -->
+
+  <!-- Settings -->
+  <div id="settings-overlay" class="overlay" hidden>
+    <div class="modal modal-lg" role="dialog" aria-modal="true" aria-label="Settings">
+      <header class="modal-head">
+        <h2>Settings</h2>
+        <button class="icon-btn modal-close" aria-label="Close settings">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <nav class="settings-tabs" role="tablist">
+        <button class="settings-tab active" data-tab="model" role="tab">Model</button>
+        <button class="settings-tab" data-tab="voice" role="tab">Voice</button>
+        <button class="settings-tab" data-tab="data" role="tab">Data</button>
+        <button class="settings-tab" data-tab="about" role="tab">About</button>
+      </nav>
+      <div class="modal-body">
+        <section class="settings-panel active" data-panel="model"></section>
+        <section class="settings-panel" data-panel="voice"></section>
+        <section class="settings-panel" data-panel="data"></section>
+        <section class="settings-panel" data-panel="about"></section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add-server dialog -->
+  <div id="add-server-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Add MCP server">
+      <header class="modal-head">
+        <h2>Connect a capability server</h2>
+        <button class="icon-btn modal-close" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="modal-body" id="add-server-body"></div>
+    </div>
+  </div>
+
+  <!-- Generic confirm -->
+  <div id="confirm-overlay" class="overlay" hidden>
+    <div class="modal modal-sm" role="alertdialog" aria-modal="true">
+      <div class="modal-body" id="confirm-body"></div>
+    </div>
+  </div>
+
+  <!-- Toasts -->
+  <div id="toasts" aria-live="assertive"></div>
+
+  <!-- Login card (shown when the auth cookie is missing) -->
+  <div id="login-overlay" class="overlay" hidden>
+    <div class="modal modal-sm" role="dialog" aria-modal="true" aria-label="Authentication">
+      <div class="modal-body login-body">
+        <div class="login-face" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none">
+            <rect x="4" y="6" width="6.5" height="12" rx="2.5"/>
+            <rect x="13.5" y="6" width="6.5" height="12" rx="2.5"/>
+          </svg>
+        </div>
+        <h2 style="margin:0 0 6px">Nex</h2>
+        <p class="login-hint">Paste the server token (printed at boot, or in
+          <code>~/.nex/server_token</code>). It is exchanged for an
+          HttpOnly cookie and never stored in this page.</p>
+        <input id="login-token" type="password" placeholder="server token"
+               autocomplete="off" aria-label="Server token">
+        <button class="btn-primary btn-block" id="login-btn">Connect</button>
+        <div class="form-err" id="login-err" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/webgl.js"></script>
+  <script src="/js/animations.js"></script>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

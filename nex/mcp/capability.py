@@ -37,8 +37,8 @@ MODIFY = "modify"
 BUILD = "build"
 TEST = "test"
 # CODE_EXECUTION = the tool RUNS CODE (a script, a shell, a Lua/Python
-# payload) on the engine's behalf. Not "just another test tool": whatever
-# the payload contains executes with the engine's privileges. Ranked just
+# payload) on the server's behalf. Not "just another test tool": whatever
+# the payload contains executes with the server's privileges. Ranked just
 # below DESTRUCTIVE (a delete is final) and above NETWORK; UNKNOWN stays
 # the most cautious rank of all.
 CODE_EXECUTION = "code_execution"
@@ -91,8 +91,8 @@ _CAT_HINTS: Dict[str, tuple] = {
             "compile_blueprint", "build_project", "package_project",
             "cook_content", "bake_lighting"),
     # Engine vocabulary. These are WHOLE tool names (the matcher is a
-    # substring test on the lowercased name), chosen so real Roblox Studio /
-    # Unreal MCP tools land in the right bucket instead of UNKNOWN — an
+    # substring test on the lowercased name), chosen so real MCP server
+    # tools land in the right bucket instead of UNKNOWN — an
     # UNKNOWN tool stalls an autonomous run on a confirmation prompt, and a
     # false TEST costs nothing (TEST is not confirmation-gated).
     TEST: ("run", "launch", "play", "test", "simulate", "verify",
@@ -117,15 +117,15 @@ _CAT_HINTS: Dict[str, tuple] = {
 #
 # The rules are exactly as narrow as the risk demands: a false positive
 # here cannot be undone (the operator registry may only RAISE severity),
-# so engine nouns like `script`, `console`, `command` or `process` are
+# so app nouns like `script`, `console`, `command` or `process` are
 # NOT hard tokens — they appear in legitimate editor tools
 # (`create_script`, `get_console_output`, `list_commands`). They become
 # code execution only next to an execution VERB.
 _TOK_SPLIT = re.compile(r"[^a-z0-9]+")
 
 # Tokens that ALONE mean "runs code / a shell / a language runtime".
-# `terminal` is deliberately included: an engine server exposing a
-# terminal IS a shell, and no game tool is named "terminal".
+# `terminal` is deliberately included: a server exposing a terminal
+# IS a shell, and no safe tool is named "terminal".
 _CODE_TOKENS = frozenset({
     "eval", "exec", "shell", "bash", "sh", "zsh",
     "powershell", "pwsh", "subprocess", "popen", "pty",
@@ -144,8 +144,8 @@ _CODE_VERBS = frozenset({
     "run", "execute", "exec", "eval", "evaluate", "invoke", "spawn",
     "launch", "start", "load", "interpret", "shell",
 })
-# NOUNS that are legitimate engine nouns and must NOT be dragged into code
-# execution by a verb: `run_game`, `run_tests`, `playtest`, `spawn_enemy`,
+# NOUNS that are legitimate application nouns and must NOT be dragged into
+# code execution by a verb: `run_game`, `run_tests`, `playtest`, `spawn_enemy`,
 # `start_timer`, `load_asset`, `launch_editor`, `apply_physics_material`.
 _CODE_SAFE_NOUNS = frozenset({
     "game", "games", "editor", "player", "players", "level", "levels",
@@ -174,7 +174,7 @@ def _is_code_execution(name_l: str) -> bool:
     Deterministic token rules:
       * a token that IS a code/process primitive (`eval`, `shell`,
         `exec`, `subprocess`, `loadstring`, `luau`, `python`, ...), or
-      * an execution verb next to a noun that is not a known-safe engine
+      * an execution verb next to a noun that is not a known-safe app
         noun (`run_script`, `execute_python`, `spawn_process`,
         `run_console_command`) — while `run_game`, `run_tests`,
         `create_script`, `spawn_enemy` stay in their own buckets.
@@ -373,7 +373,7 @@ def category_hints() -> Dict[str, tuple]:
 #
 #     $NEX_CAPABILITY_FILE  (default: ~/.nex/capabilities.json)
 #     {
-#       "roblox-studio": {
+#       "blender": {
 #         "apply_decision": {"category": "destructive"},
 #         "inspect_project": {"category": "read"}
 #       }

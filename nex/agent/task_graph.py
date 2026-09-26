@@ -1,8 +1,9 @@
-"""Dependency-aware task graph (STAGE 6 / STAGE 9).
+"""Dependency-aware task graph.
 
-A goal decomposes into tasks. Tasks have dependencies; a task is only
+A goal decomposes into steps. Steps have dependencies; a step is only
 READY once all its dependencies SUCCEEDED. Failure propagates to
-dependents so we never restart the whole project after one failure.
+dependents (they are skipped, not re-executed), so one failure does not
+restart the whole run.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
-# Task statuses.
+# Step statuses.
 PENDING = "pending"
 READY = "ready"
 RUNNING = "running"
@@ -24,14 +25,12 @@ WAITING = "waiting"          # needs user confirmation
 @dataclass
 class Task:
     id: str
-    name: str
-    stage: str                       # coarse stage label (asset, build, ...)
-    server: Optional[str] = None     # MCP server name, or None for internal
-    tool: Optional[str] = None       # tool name (bare; server carries namespace)
+    name: str                       # short human title ("Place the chest")
+    slug: str = ""                  # plan machine name ("place-chest")
+    server: Optional[str] = None    # MCP server name
+    tool: Optional[str] = None      # tool name (bare; server carries namespace)
     args: Dict[str, Any] = field(default_factory=dict)
     deps: List[str] = field(default_factory=list)
-    verify_tool: Optional[str] = None
-    verify_args: Dict[str, Any] = field(default_factory=dict)
     status: str = PENDING
     attempts: int = 0
     max_attempts: int = 3
@@ -40,23 +39,28 @@ class Task:
     error_signature: Optional[str] = None
     tried_alts: List[str] = field(default_factory=list)
     llm_diagnosed: bool = False   # bounded: LLM repair runs at most once/task
-    expect: Optional[Any] = None  # acceptance criteria (from plan step.expect)
-    # Director layer: the system this task builds (scope attribution) and
-    # the checklist criteria it is meant to prove (mandatory verification).
-    system: str = ""
-    criteria: List[str] = field(default_factory=list)
-    # The standard this system is held to (recipe quality bars). Feeds the
-    # tester/reviewer prompts — not the completion gate.
-    quality: List[str] = field(default_factory=list)
+    expect: Optional[Any] = None  # what success should look like (from plan)
+    why: str = ""                 # why this step exists (from the plan)
     notes: str = ""
+
+    def to_public(self) -> Dict[str, Any]:
+        """The step as the UI sees it (no internal repair bookkeeping)."""
+        return {
+            "id": self.id, "name": self.name, "status": self.status,
+            "server": self.server, "tool": self.tool,
+            "why": self.why, "expect": self.expect,
+            "error": self.error, "notes": self.notes,
+        }
 
 
 class TaskGraph:
     def __init__(self) -> None:
         self._tasks: Dict[str, Task] = {}
         self._dependents: Dict[str, List[str]] = {}
+        # Provenance / reporting metadata set by planners.
+        self.plan_meta: Dict[str, Any] = {}
 
-    # ----- mutation -------------------------------------------------------
+    # ----- mutation ---------------------------------------------------------
     def add(self, task: Task) -> Task:
         if task.id in self._tasks:
             raise ValueError("duplicate task id: " + task.id)
@@ -71,7 +75,15 @@ class TaskGraph:
     def all(self) -> List[Task]:
         return list(self._tasks.values())
 
-    # ----- queries --------------------------------------------------------
+    def merge(self, other: "TaskGraph") -> None:
+        """Adopt every task from `other` (used when re-planning: the new
+        plan replaces the pending remainder, completed history is kept
+        by the caller)."""
+        for t in other.all():
+            if t.id not in self._tasks:
+                self.add(t)
+
+    # ----- queries ------------------------------------------------------------
     def ready(self) -> List[Task]:
         out = []
         for t in self._tasks.values():
@@ -84,10 +96,10 @@ class TaskGraph:
     def deps_met(self, task: Task) -> bool:
         """Are all of `task`'s dependencies currently SUCCESS?
 
-        A dep id that no longer exists (hand-edited/corrupt
-        checkpoint) counts as UNMET instead of raising KeyError —
-        the task stays pending and the run reports it as blocked
-        rather than crashing the loop."""
+        A dep id that no longer exists (a re-planned graph) counts as
+        UNMET instead of raising — the task stays pending and the run
+        reports it as blocked rather than crashing.
+        """
         return all(
             (self._tasks.get(d) is not None
              and self._tasks[d].status == SUCCESS)
@@ -97,7 +109,8 @@ class TaskGraph:
         return list(self._dependents.get(tid, []))
 
     def is_terminal(self) -> bool:
-        return all(t.status in (SUCCESS, FAILED, SKIPPED) for t in self._tasks.values())
+        return all(t.status in (SUCCESS, FAILED, SKIPPED)
+                   for t in self._tasks.values())
 
     def completed(self) -> List[Task]:
         return [t for t in self._tasks.values() if t.status == SUCCESS]
@@ -108,7 +121,11 @@ class TaskGraph:
     def skipped(self) -> List[Task]:
         return [t for t in self._tasks.values() if t.status == SKIPPED]
 
-    # ----- transitions ----------------------------------------------------
+    def pending(self) -> List[Task]:
+        return [t for t in self._tasks.values()
+                if t.status in (PENDING, READY, RUNNING, WAITING)]
+
+    # ----- transitions ---------------------------------------------------------
     def mark_success(self, tid: str, result: Any) -> None:
         t = self._tasks[tid]
         t.status = SUCCESS
@@ -118,14 +135,20 @@ class TaskGraph:
     def mark_running(self, tid: str) -> None:
         self._tasks[tid].status = RUNNING
 
+    def mark_waiting(self, tid: str) -> None:
+        self._tasks[tid].status = WAITING
+
+    def mark_pending(self, tid: str) -> None:
+        self._tasks[tid].status = PENDING
+
     def mark_failed(self, tid: str, error: str,
                     signature: Optional[str] = None) -> None:
         t = self._tasks[tid]
         t.status = FAILED
         t.error = error
         t.error_signature = signature
-        # Dependency-aware failure propagation: dependents are skipped, not
-        # re-executed, so a single failure doesn't cascade into retries.
+        # Dependency-aware failure propagation: dependents are skipped,
+        # not re-executed.
         for dep in self._dependents.get(tid, []):
             dt = self._tasks[dep]
             if dt.status == PENDING:
@@ -137,22 +160,19 @@ class TaskGraph:
         t.status = SKIPPED
         t.notes = reason
 
-    # ----- serialization (for checkpoints) --------------------------------
+    # ----- serialization ----------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:
         return {
             "tasks": [
                 {
-                    "id": t.id, "name": t.name, "stage": t.stage,
+                    "id": t.id, "name": t.name, "slug": t.slug,
                     "server": t.server, "tool": t.tool, "args": t.args,
-                    "deps": t.deps, "verify_tool": t.verify_tool,
-                    "verify_args": t.verify_args, "status": t.status,
+                    "deps": t.deps, "status": t.status,
                     "attempts": t.attempts, "max_attempts": t.max_attempts,
                     "result": t.result, "error": t.error,
                     "error_signature": t.error_signature,
                     "llm_diagnosed": t.llm_diagnosed,
-                    "expect": t.expect, "system": t.system,
-                    "criteria": t.criteria, "quality": t.quality,
-                    "notes": t.notes,
+                    "expect": t.expect, "why": t.why, "notes": t.notes,
                 }
                 for t in self._tasks.values()
             ]
@@ -163,11 +183,9 @@ class TaskGraph:
         g = cls()
         for td in d.get("tasks", []):
             g.add(Task(
-                id=td["id"], name=td["name"], stage=td["stage"],
+                id=td["id"], name=td["name"], slug=td.get("slug", "") or "",
                 server=td.get("server"), tool=td.get("tool"),
                 args=td.get("args", {}), deps=td.get("deps", []),
-                verify_tool=td.get("verify_tool"),
-                verify_args=td.get("verify_args", {}),
                 status=td.get("status", PENDING),
                 attempts=td.get("attempts", 0),
                 max_attempts=td.get("max_attempts", 3),
@@ -175,9 +193,7 @@ class TaskGraph:
                 error_signature=td.get("error_signature"),
                 llm_diagnosed=bool(td.get("llm_diagnosed", False)),
                 expect=td.get("expect"),
-                system=td.get("system", "") or "",
-                criteria=list(td.get("criteria", []) or []),
-                quality=list(td.get("quality", []) or []),
+                why=td.get("why", "") or "",
                 notes=td.get("notes", ""),
             ))
         return g

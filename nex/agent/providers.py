@@ -5,20 +5,20 @@ The architecture this module implements:
         USER
          |
          v
-    [ PLANNER ]  reasoning / architecture / decomposition   (rare, big calls)
+    [ CHAT ]  reasoning / architecture / decomposition   (rare, big calls)
          |
     exact build plan
          |
          v
-    [ BUILDER ]  executes the plan through MCP tools         (frequent calls)
+    [ AGENT ]  executes the plan through MCP tools         (frequent calls)
          |
-      MCP only  ->  Roblox MCP / Unreal MCP
+      MCP only  ->  a Blender MCP, a game MCP, anything
 
 Roles are separate on purpose:
 
-  * PLANNER  (default: the local model, or GPT when an OpenAI key is present)
+  * CHAT  (default: the local model, or GPT when an OpenAI key is present)
     is called a handful of times per run: design document, systems, tests.
-  * BUILDER  (default: NVIDIA NIM) is called during the build loop —
+  * AGENT  (default: NVIDIA NIM) is called during the build loop —
     failure diagnosis, repair decisions — and nothing else.
 
 Why a router instead of one model call: NIM's free tier is ~40 requests per
@@ -32,7 +32,7 @@ client-side and the failover has to be explicit:
         -> after cooldown the router hands back to NIM automatically
 
 Nothing here executes a tool. A provider returns TEXT; the agent loop turns
-that text into validated MCP calls. The builder therefore cannot reach the
+that text into validated MCP calls. The agent therefore cannot reach the
 machine — the only action surface remains the MCP registry.
 
 Configuration precedence (highest first):
@@ -61,16 +61,19 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 # Vocabulary
 # ---------------------------------------------------------------------------
 
-ROLE_PLANNER = "planner"
-ROLE_BUILDER = "builder"
-ROLES = (ROLE_PLANNER, ROLE_BUILDER)
+ROLE_CHAT = "chat"
+ROLE_AGENT = "agent"
+ROLES = (ROLE_CHAT, ROLE_AGENT)
+
+# Legacy 1.x role names → 2.x (settings-file migration).
+_ROLE_MIGRATION = {"planner": ROLE_CHAT, "builder": ROLE_AGENT}
 
 # EXPLICIT fallback lists. Nothing enters a chain implicitly: a provider has
 # to be named here (or by the operator) to be tried, so a future provider
 # added to the catalog can never silently become a fallback for a role.
 ROLE_DEFAULT_FALLBACKS: Dict[str, List[str]] = {
-    ROLE_BUILDER: ["gpt", "local"],
-    ROLE_PLANNER: ["nim", "local"],
+    ROLE_AGENT: ["gpt", "local"],
+    ROLE_CHAT: ["nim", "local"],
 }
 
 KIND_OLLAMA = "ollama"    # /api/chat, /api/tags
@@ -133,7 +136,7 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "rpm": 40,            # community baseline for the free tier
         "timeout": 240.0,
         "cooldown_s": 20.0,
-        "note": "Builder. ~40 RPM, limits are per-model and unpublished.",
+        "note": "Agent. ~40 RPM, limits are per-model and unpublished.",
     },
     "gpt": {
         "label": "GPT (OpenAI-compatible)",
@@ -144,7 +147,7 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "rpm": 0,
         "timeout": 240.0,
         "cooldown_s": 15.0,
-        "note": "Planner. Takes over as builder when NIM is rate-limited.",
+        "note": "Chat. Takes over as agent when NIM is rate-limited.",
     },
 }
 
@@ -153,53 +156,53 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
 CATALOG: List[Dict[str, Any]] = [
     # --- NVIDIA-native (best throughput on NIM, strong tool calling) -------
     {"provider": "nim", "id": "nvidia/nemotron-3-super-120b-a12b",
-     "role": "builder", "label": "Nemotron 3 Super 120B",
+     "role": "agent", "label": "Nemotron 3 Super 120B",
      "note": "Agentic workhorse: 1M context, strong SWE-bench, tool calling."},
     {"provider": "nim", "id": "nvidia/nemotron-3-ultra-550b-a55b",
-     "role": "planner", "label": "Nemotron 3 Ultra 550B",
+     "role": "chat", "label": "Nemotron 3 Ultra 550B",
      "note": "Frontier reasoning/coding, slower — good for planning."},
     {"provider": "nim", "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-     "role": "builder", "label": "Llama 3.3 Nemotron Super 49B",
+     "role": "agent", "label": "Llama 3.3 Nemotron Super 49B",
      "note": "Fastest native option, built for function calling."},
     {"provider": "nim", "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-     "role": "builder", "label": "Nemotron 3 Nano Omni 30B",
+     "role": "agent", "label": "Nemotron 3 Nano Omni 30B",
      "note": "Cheap small model — good for batched, mechanical steps."},
     # --- Third-party on NIM ------------------------------------------------
     {"provider": "nim", "id": "moonshotai/kimi-k2.6",
-     "role": "builder", "label": "Kimi K2.6",
+     "role": "agent", "label": "Kimi K2.6",
      "note": "Long-horizon agentic coding, 1M+ context."},
     {"provider": "nim", "id": "zhipuai/glm-5.1",
-     "role": "builder", "label": "GLM-5.1",
+     "role": "agent", "label": "GLM-5.1",
      "note": "Function calling + long-context coding."},
     {"provider": "nim", "id": "deepseek-ai/deepseek-v4-flash",
-     "role": "builder", "label": "DeepSeek V4 Flash",
+     "role": "agent", "label": "DeepSeek V4 Flash",
      "note": "Fast and cheap — batch work, small repairs."},
     {"provider": "nim", "id": "deepseek-ai/deepseek-v4-pro",
-     "role": "planner", "label": "DeepSeek V4 Pro",
+     "role": "chat", "label": "DeepSeek V4 Pro",
      "note": "Strongest coding scores, but slow (not for tight loops)."},
     {"provider": "nim", "id": "qwen/qwen3-coder-480b-a35b-instruct",
-     "role": "builder", "label": "Qwen3 Coder 480B",
+     "role": "agent", "label": "Qwen3 Coder 480B",
      "note": "Purpose-built for agentic coding."},
     {"provider": "nim", "id": "mistralai/devstral-2-123b-instruct-2512",
-     "role": "builder", "label": "Devstral 2 123B",
+     "role": "agent", "label": "Devstral 2 123B",
      "note": "Dev-focused, fast tool calling."},
     {"provider": "nim", "id": "mistralai/mistral-nemotron",
-     "role": "builder", "label": "Mistral Nemotron",
+     "role": "agent", "label": "Mistral Nemotron",
      "note": "Built for agentic workflows / function calling."},
     {"provider": "nim", "id": "minimaxai/minimax-m2.7",
-     "role": "builder", "label": "MiniMax M2.7",
+     "role": "agent", "label": "MiniMax M2.7",
      "note": "Strong all-rounder, high latency."},
     {"provider": "nim", "id": "meta/llama-4-maverick-17b-128e-instruct",
-     "role": "builder", "label": "Llama 4 Maverick",
+     "role": "agent", "label": "Llama 4 Maverick",
      "note": "Popular general purpose model."},
-    # --- Planner side ------------------------------------------------------
-    {"provider": "gpt", "id": "gpt-5.1", "role": "planner",
-     "label": "GPT-5.1", "note": "Flagship coding/agentic planner."},
-    {"provider": "gpt", "id": "gpt-5-mini", "role": "planner",
+    # --- Chat side ------------------------------------------------------
+    {"provider": "gpt", "id": "gpt-5.1", "role": "chat",
+     "label": "GPT-5.1", "note": "Flagship coding/agentic chat."},
+    {"provider": "gpt", "id": "gpt-5-mini", "role": "chat",
      "label": "GPT-5 mini", "note": "Cheaper planning."},
-    {"provider": "gpt", "id": "gpt-5.2", "role": "planner",
+    {"provider": "gpt", "id": "gpt-5.2", "role": "chat",
      "label": "GPT-5.2", "note": "Reasoning effort configurable."},
-    {"provider": "gpt", "id": "gpt-5.6-terra", "role": "planner",
+    {"provider": "gpt", "id": "gpt-5.6-terra", "role": "chat",
      "label": "GPT-5.6 Terra", "note": "Production generalist."},
 ]
 
@@ -1012,7 +1015,7 @@ class Router:
     def chain(self, role: str) -> List[str]:
         """Ordered provider names for a role: primary -> named fallbacks.
 
-        EXPLICIT only. Builder: NIM -> gpt -> local. Planner: gpt -> nim ->
+        EXPLICIT only. Agent: NIM -> gpt -> local. Chat: gpt -> nim ->
         local. A provider that is configured but not named in the role's
         fallback list can still be SELECTED as the primary — it just never
         appears in a chain by itself, so adding a provider (or a catalog
@@ -1127,7 +1130,7 @@ class Router:
                         "model": self.role_model(role),
                         "was": previous,
                         "detail": "%s is available again — %s is the "
-                                  "builder again"
+                                  "agent again"
                                   % (spec.label or name, purpose or role),
                         "roles": self.role_snapshot()})
 
@@ -1685,22 +1688,22 @@ class Router:
         snap = self.role_snapshot()
         return {
             "roles": snap,
-            "planner": snap.get(ROLE_PLANNER, {}),
-            "builder": snap.get(ROLE_BUILDER, {}),
+            "chat": snap.get(ROLE_CHAT, {}),
+            "agent": snap.get(ROLE_AGENT, {}),
             "providers": {name: dict(spec.masked(),
                                      **self.states[name].to_dict())
                           for name, spec in self.specs.items()},
             "chains": {role: self.chain(role) for role in ROLES},
-            "note": "planner decides what to build; builder does the work "
+            "note": "chat decides what to build; agent does the work "
                     "through MCP tools only",
         }
 
     def _detail_line(self) -> str:
         try:
             st = self.status()
-            return "planner=%s builder=%s" % (
-                st["planner"].get("active") or "-",
-                st["builder"].get("active") or "-")
+            return "chat=%s agent=%s" % (
+                st["chat"].get("active") or "-",
+                st["agent"].get("active") or "-")
         except Exception:  # noqa: BLE001
             return ""
 
@@ -1726,7 +1729,7 @@ class Router:
                 "files": env_file_paths(),
                 "nice_to_know": {
                     "NVIDIA_API_KEY": "NIM API key (nvapi-…) — build.nvidia.com",
-                    "OPENAI_API_KEY": "GPT planner key",
+                    "OPENAI_API_KEY": "GPT chat key",
                     "OLLAMA_HOST": "local model base URL",
                     "OLLAMA_MODEL": "local model name",
                     "NEX_PLANNER_PROVIDER": "which provider plans",
@@ -1967,30 +1970,43 @@ def _specs_from_env(base: Dict[str, ProviderSpec]) -> Dict[str, ProviderSpec]:
     return specs
 
 
+def _env_first(*names: str) -> str:
+    """First non-empty of the given env vars (new name wins over legacy)."""
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return ""
+
+
 def _default_roles(specs: Dict[str, ProviderSpec]) -> Dict[str, Dict[str, str]]:
-    planner_provider = os.environ.get("NEX_PLANNER_PROVIDER", "").strip()
-    builder_provider = os.environ.get("NEX_BUILDER_PROVIDER", "").strip()
-    if not planner_provider:
-        planner_provider = "gpt" if (specs.get("gpt") and
-                                     specs["gpt"].configured and
-                                     specs["gpt"].key) else "local"
-    if not builder_provider:
-        builder_provider = "nim" if (specs.get("nim") and specs["nim"].key) \
+    # 2.x names (NEX_CHAT_PROVIDER / NEX_AGENT_PROVIDER) with the 1.x
+    # names (NEX_PLANNER_* / NEX_BUILDER_*) still honored.
+    chat_provider = _env_first("NEX_CHAT_PROVIDER", "NEX_PLANNER_PROVIDER")
+    agent_provider = _env_first("NEX_AGENT_PROVIDER", "NEX_BUILDER_PROVIDER")
+    if not chat_provider:
+        chat_provider = "gpt" if (specs.get("gpt") and
+                                  specs["gpt"].configured and
+                                  specs["gpt"].key) else "local"
+    if not agent_provider:
+        agent_provider = "nim" if (specs.get("nim") and specs["nim"].key) \
             else "local"
     roles = {
-        ROLE_PLANNER: {
-            "provider": planner_provider,
-            "model": os.environ.get("NEX_PLANNER_MODEL", "").strip() or
-                     (specs[planner_provider].model if planner_provider in specs else ""),
-            "fallbacks": _env_fallbacks(ROLE_PLANNER,
-                                        ROLE_DEFAULT_FALLBACKS[ROLE_PLANNER]),
+        ROLE_CHAT: {
+            "provider": chat_provider,
+            "model": _env_first("NEX_CHAT_MODEL", "NEX_PLANNER_MODEL")
+                     or (specs[chat_provider].model
+                         if chat_provider in specs else ""),
+            "fallbacks": _env_fallbacks(ROLE_CHAT,
+                                        ROLE_DEFAULT_FALLBACKS[ROLE_CHAT]),
         },
-        ROLE_BUILDER: {
-            "provider": builder_provider,
-            "model": os.environ.get("NEX_BUILDER_MODEL", "").strip() or
-                     (specs[builder_provider].model if builder_provider in specs else ""),
-            "fallbacks": _env_fallbacks(ROLE_BUILDER,
-                                        ROLE_DEFAULT_FALLBACKS[ROLE_BUILDER]),
+        ROLE_AGENT: {
+            "provider": agent_provider,
+            "model": _env_first("NEX_AGENT_MODEL", "NEX_BUILDER_MODEL")
+                     or (specs[agent_provider].model
+                         if agent_provider in specs else ""),
+            "fallbacks": _env_fallbacks(ROLE_AGENT,
+                                        ROLE_DEFAULT_FALLBACKS[ROLE_AGENT]),
         },
     }
     return roles
@@ -2030,6 +2046,7 @@ def build_router(bus: Any = None, store: Optional[SettingsStore] = None,
             spec.bind_key()
     roles = _default_roles(specs)
     for role, cfg in (stored.get("roles") or {}).items():
+        role = _ROLE_MIGRATION.get(str(role), str(role))   # 1.x → 2.x
         if role in ROLES and isinstance(cfg, dict) and cfg.get("provider") in specs:
             falls = cfg.get("fallbacks")
             if not isinstance(falls, list):

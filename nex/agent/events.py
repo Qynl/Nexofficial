@@ -1,50 +1,51 @@
-"""Semantic agent events + states (STAGE 21 / STAGE 20).
+"""Agent event taxonomy — the vocabulary the UI understands.
 
-The frontend does NOT need to understand MCP internals — it only reacts
-to these semantic events. The agent publishes them on the shared EventBus
-(server.BUS) and the front-end maps them to the existing face states.
+The agent publishes semantic events on the server's EventBus; the
+frontend renders them as run progress (phase timeline, step list,
+tool activity). The contract:
+
+  * Events describe EXECUTION STATE, never private chain-of-thought.
+    A phase ("Evaluating progress"), a step title, a tool name, a
+    bounded result preview — all things an operator could read over
+    your shoulder. No raw model scratchpad is ever forwarded.
+  * Events are additive: the frontend must be able to render a run
+    from `run.plan` + `run.step` + `run.tool` alone.
 """
-
 from __future__ import annotations
 
-# Coarse agent lifecycle states. These are NOT emotion states; the
-# frontend maps each to an existing EMOTION state (see app.js).
-AGENT_STATES = (
-    "PLANNING", "OBSERVING", "EXECUTING", "VERIFYING",
-    "REPAIRING", "WAITING", "COMPLETED", "BLOCKED", "ERROR",
+import time
+from typing import Any, Callable, Dict, Optional
+
+# Coarse run phases (the visible loop).
+PHASES = (
+    "planning",      # decomposing the goal
+    "executing",     # acting through MCP tools
+    "evaluating",    # checking progress against the goal
+    "adapting",      # re-planning after evidence
+    "waiting",       # paused for the user (approval / question)
+    "finishing",     # composing the final report
 )
 
-# Event type strings the agent emits. Convention: type starts with
-# "agent." so the SSE handler / frontend can route them.
-EVENT_PLAN_STARTED = "agent.plan_started"
-EVENT_PLAN_UPDATED = "agent.plan_updated"
-EVENT_TASK_STARTED = "agent.task_started"
-EVENT_TOOL_CALLED = "agent.tool_called"
-EVENT_TOOL_SUCCEEDED = "agent.tool_succeeded"
-EVENT_TOOL_FAILED = "agent.tool_failed"
-EVENT_VERIFICATION_STARTED = "agent.verification_started"
-EVENT_VERIFICATION_PASSED = "agent.verification_passed"
-EVENT_VERIFICATION_FAILED = "agent.verification_failed"
-EVENT_REPAIR_STARTED = "agent.repair_started"
-EVENT_REPAIR_SUCCEEDED = "agent.repair_succeeded"
-EVENT_WAITING_FOR_CONFIRMATION = "agent.waiting_for_confirmation"
-EVENT_MCP_CONNECTED = "agent.mcp_connected"
-EVENT_MCP_DISCONNECTED = "agent.mcp_disconnected"
-EVENT_PROJECT_COMPLETED = "agent.project_completed"
-EVENT_PROJECT_BLOCKED = "agent.project_blocked"
-
-# Completion status vocabulary (STAGE 28).
-STATUS_COMPLETED = "COMPLETED"
-STATUS_PARTIAL = "PARTIAL"
-STATUS_BLOCKED = "BLOCKED"
-STATUS_FAILED = "FAILED"
-STATUS_WAITING_USER = "WAITING_FOR_USER"
+# Run outcomes.
+STATUS_COMPLETED = "completed"        # goal met, evidence recorded
+STATUS_PARTIAL = "partial"            # some steps failed, goal unproven
+STATUS_FAILED = "failed"              # the goal could not be reached
+STATUS_BLOCKED = "blocked"            # missing capability / refused
+STATUS_WAITING_USER = "waiting_user"  # paused on the user
+STATUS_CANCELLED = "cancelled"        # operator stopped the run
 
 
-def agent_event(agent_state=None, event_type=None, **payload) -> dict:
-    """Build a semantic agent event dict for the EventBus."""
-    evt: dict = {"type": event_type or "agent"}
-    if agent_state:
-        evt["agentState"] = agent_state
-    evt.update(payload)
-    return evt
+def run_event(run_id: str, event_type: str, **payload: Any) -> Dict[str, Any]:
+    return {"type": event_type, "run_id": run_id, "ts": time.time(),
+            **payload}
+
+
+def emit(bus: Optional[Callable], run_id: str, event_type: str,
+         **payload: Any) -> None:
+    """Publish a run event on the bus (never raises)."""
+    if bus is None:
+        return
+    try:
+        bus(run_event(run_id, event_type, **payload))
+    except Exception:  # noqa: BLE001
+        pass

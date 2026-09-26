@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List, Optional
 
-from agent.registry import ServerView, ToolView
+from mcp.registry import ServerView, ToolView
 from mcp.capability import capability_for_tool
 
 
@@ -72,8 +72,17 @@ class MockMCPServer:
             if args.get("build") or args.get("id"):
                 return {"playable": True}
             return {"playable": False}
-        # Generic fallback.
-        return {"ok": True, "tool": tool}
+        if tool == "create_thing":
+            return {"id": "thing_1", "name": args.get("name", "thing")}
+        if tool == "delete_thing":
+            return {"deleted": True, "id": args.get("id")}
+        if tool == "echo":
+            return {"text": args.get("text", "")}
+        if tool == "add":
+            return {"sum": (args.get("a") or 0) + (args.get("b") or 0)}
+        # Generic fallback: every synthetic result carries an id so
+        # $reference chains have something to point at.
+        return {"ok": True, "tool": tool, "id": tool + "_1"}
 
 
 def server_view(name: str, mock: MockMCPServer,
