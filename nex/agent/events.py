@@ -9,8 +9,9 @@ tool activity). The contract:
     bounded result preview — all things an operator could read over
     your shoulder. No raw model scratchpad is ever forwarded.
   * Events are additive: the frontend must be able to render a run
-    from `run.plan` + `run.step` + `run.tool` alone. `run.quality` adds a
-    public, evidence-backed game-production scorecard when applicable.
+    from `run.plan` + `run.step` + `run.tool` alone. `run.program` adds
+    large-scale milestone state and MCP readiness; `run.quality` adds a public,
+    evidence-backed game-production scorecard when applicable.
 """
 from __future__ import annotations
 

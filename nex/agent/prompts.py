@@ -187,6 +187,10 @@ EVALUATOR_SYSTEM = (
     "created if available build, playtest, visual, log, verification, or "
     "performance evidence is still missing. Never infer visual quality from "
     "a successful API result.\n"
+    "- For a LARGE-SCALE GAME PRODUCTION PROGRAM, judge only the current "
+    "stage. `done` may close that stage, but never claim the whole product is "
+    "finished while later stages remain. Require integrated player journeys, "
+    "not disconnected props or systems.\n"
 )
 
 
@@ -232,6 +236,9 @@ SUMMARIZER_SYSTEM = (
     "reason.\n"
     "- Never claim success that the evidence does not show. Never "
     "invent details that are not in the report.\n"
+    "- If the report contains a production program, state completed/total "
+    "stages and MCP readiness. Never collapse one vertical slice or one stage "
+    "into a claim that a studio-scale game is finished.\n"
     "- If the report contains a game-production quality scorecard, state its "
     "score and distinguish implemented, built, playtested, visually inspected, "
     "diagnostics-reviewed, verified, and performance-measured dimensions. "

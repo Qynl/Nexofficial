@@ -46,7 +46,7 @@ from mcp.audit import AuditLog
 from mcp.registry import CapabilityRegistry
 from mcp.capability import capability_for_tool, apply_capability_registry
 from mcp.policy import authorize, current_policy
-from mcp.schema import validate_arguments
+from mcp.schema import validate_arguments, validate_tool_output
 from mcp.transport import Upstream, UpstreamError
 
 # Statuses a server can be in.
@@ -585,6 +585,8 @@ class ServerManager:
                 "requires_confirmation": cap.requires_confirmation,
                 "schema": t.get("inputSchema", {})
                 if isinstance(t.get("inputSchema"), dict) else {},
+                "output_schema": t.get("outputSchema", {})
+                if isinstance(t.get("outputSchema"), dict) else {},
             })
         return out
 
@@ -753,6 +755,17 @@ class ServerManager:
                               detail=str(exc)[:300], context=audit_context)
             return {"error": str(exc)}
         result = resp.get("result") if isinstance(resp, dict) else resp
+        output_errors = validate_tool_output(
+            tool_def.get("outputSchema"), result)
+        if output_errors:
+            detail = "output validation failed: " + "; ".join(output_errors)
+            self.audit.record(
+                "invalid_output", server=server, tool=tool, args=args,
+                ok=False, detail=detail,
+                duration_ms=round((time.monotonic() - t0) * 1000),
+                context=audit_context)
+            return {"error": detail,
+                    "validation_errors": output_errors}
         self.audit.record("call", server=server, tool=tool, args=args, ok=True,
                           detail=("approved once" if approved_once else ""),
                           duration_ms=round((time.monotonic() - t0) * 1000),

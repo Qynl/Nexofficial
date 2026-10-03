@@ -237,6 +237,13 @@ class APITests(unittest.TestCase):
         for key in ("servers", "total", "connected", "tools"):
             expect(key in body, "summary lacks %r" % key)
 
+    def test_production_readiness_shape(self):
+        s, body = self.req("GET", "/api/production/readiness")
+        expect(s == 200, "production readiness: %s" % s)
+        for key in ("score", "ready_for_large_scope", "gates",
+                    "disciplines", "missing", "blockers"):
+            expect(key in body, "production readiness lacks %r" % key)
+
     def test_add_server_validation(self):
         s, body = self.req("POST", "/api/servers",
                            body={"name": "Bad Name",
@@ -286,6 +293,11 @@ class APITests(unittest.TestCase):
             names = {t["name"] for t in tools["tools"]}
             expect("echo" in names and "delete_thing" in names,
                    "tool names present: %r" % names)
+            create = next(t for t in tools["tools"]
+                          if t["name"] == "create_thing")
+            expect("id" in create.get("output_schema", {}).get(
+                "properties", {}),
+                "declared MCP output schema must reach the UI API")
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -349,7 +361,8 @@ class APITests(unittest.TestCase):
     def test_state_shape(self):
         s, body = self.req("GET", "/api/state")
         expect(s == 200, "state: %s" % s)
-        for key in ("conversations", "servers", "provider"):
+        for key in ("conversations", "servers", "production_readiness",
+                    "provider"):
             expect(key in body, "state lacks %r" % key)
 
     def test_unknown_api_404(self):

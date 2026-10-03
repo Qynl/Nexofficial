@@ -41,6 +41,7 @@ class Task:
     llm_diagnosed: bool = False   # bounded: LLM repair runs at most once/task
     expect: Optional[Any] = None  # what success should look like (from plan)
     why: str = ""                 # why this step exists (from the plan)
+    phase: str = ""               # production-program stage, when applicable
     notes: str = ""
 
     def to_public(self) -> Dict[str, Any]:
@@ -48,7 +49,7 @@ class Task:
         return {
             "id": self.id, "name": self.name, "status": self.status,
             "server": self.server, "tool": self.tool,
-            "why": self.why, "expect": self.expect,
+            "why": self.why, "expect": self.expect, "phase": self.phase,
             "error": self.error, "notes": self.notes,
         }
 
@@ -172,7 +173,8 @@ class TaskGraph:
                     "result": t.result, "error": t.error,
                     "error_signature": t.error_signature,
                     "llm_diagnosed": t.llm_diagnosed,
-                    "expect": t.expect, "why": t.why, "notes": t.notes,
+                    "expect": t.expect, "why": t.why,
+                    "phase": t.phase, "notes": t.notes,
                 }
                 for t in self._tasks.values()
             ]
@@ -194,6 +196,7 @@ class TaskGraph:
                 llm_diagnosed=bool(td.get("llm_diagnosed", False)),
                 expect=td.get("expect"),
                 why=td.get("why", "") or "",
+                phase=td.get("phase", "") or "",
                 notes=td.get("notes", ""),
             ))
         return g

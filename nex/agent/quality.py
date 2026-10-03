@@ -33,6 +33,7 @@ GATE_ORDER = (
     "build",
     "playtest",
     "visual",
+    "visual_review",
     "diagnostics",
     "verification",
     "performance",
@@ -43,7 +44,8 @@ _GATE_LABELS = {
     "implementation": "Implement and integrate the playable slice",
     "build": "Compile, build, bake, cook, or package successfully",
     "playtest": "Run the game in a real runtime or editor play session",
-    "visual": "Inspect captured visual output",
+    "visual": "Capture real visual output from the game or editor",
+    "visual_review": "Review captured output for composition, clarity, and defects",
     "diagnostics": "Review runtime logs, errors, or diagnostics",
     "verification": "Verify acceptance criteria with tests or checks",
     "performance": "Measure performance with profiling or telemetry",
@@ -54,7 +56,8 @@ _GAME_NOUNS = frozenset({
     "player", "players", "enemy", "enemies", "npc", "npcs", "quest",
     "quests", "combat", "platformer", "shooter", "rpg", "puzzle",
     "world", "worlds", "boss", "hud", "menu", "menus", "character",
-    "characters", "mechanic", "mechanics", "checkpoint", "arena",
+    "characters", "mechanic", "mechanics", "checkpoint", "arena", "gta",
+    "sandbox", "mmorpg", "mmo", "metroidvania",
 })
 _AUTHORING_WORDS = frozenset({
     "make", "create", "build", "develop", "design", "implement", "add",
@@ -96,7 +99,6 @@ def tool_gates(tool: Any) -> Set[str]:
     """
     name = str(getattr(tool, "name", "") or "").lower()
     desc = str(getattr(tool, "description", "") or "").lower()[:500]
-    text = name.replace("-", "_") + " " + desc
     cap = getattr(tool, "capability", None)
     category = getattr(cap, "category", None)
     gates: Set[str] = set()
@@ -121,6 +123,17 @@ def tool_gates(tool: Any) -> Set[str]:
         gates.add("visual")
 
     if _contains_any(name, (
+            "inspect_visual", "analyze_visual", "analyse_visual",
+            "analyze_screenshot", "analyse_screenshot", "review_frame",
+            "review_screenshot", "visual_diff", "compare_screenshot",
+            "validate_visual", "check_visual", "analyze_frame")):
+        gates.add("visual_review")
+        # Reviewing an existing image is independent from capturing one. A
+        # name containing "screenshot" for context must not clear both gates.
+        if not _contains_any(name, ("capture", "render", "snapshot")):
+            gates.discard("visual")
+
+    if _contains_any(name, (
             "log", "console_output", "diagnostic", "error_report", "crash",
             "warning", "runtime_output")):
         gates.add("diagnostics")
@@ -139,7 +152,7 @@ def tool_gates(tool: Any) -> Set[str]:
         gates.add("verification")
 
     specialized_observation = gates.intersection({
-        "visual", "diagnostics", "performance"
+        "visual", "visual_review", "diagnostics", "performance"
     })
     if category == READ and not specialized_observation and _contains_any(
             name, ("inspect", "list", "get", "read", "query", "describe",
@@ -150,7 +163,8 @@ def tool_gates(tool: Any) -> Set[str]:
     # Descriptions can disambiguate intentionally generic engine APIs, but
     # require a matching category so prose alone cannot claim a quality gate.
     if category == READ and not gates.intersection({
-            "inspection", "visual", "diagnostics", "performance"}):
+            "inspection", "visual", "visual_review", "diagnostics",
+            "performance"}):
         if _contains_any(desc, ("inspect project", "inspect scene",
                                 "project state", "scene hierarchy")):
             gates.add("inspection")
@@ -190,7 +204,7 @@ def profile_for_goal(goal: str) -> QualityProfile:
     return QualityProfile(
         True, "production", "Production game-making target",
         ("inspection", "implementation", "build", "playtest", "visual",
-         "diagnostics", "verification"),
+         "visual_review", "diagnostics", "verification"),
         100)
 
 
@@ -233,15 +247,16 @@ def planning_brief(profile: QualityProfile, registry: Any) -> str:
         "before mutation and reuse existing project conventions/assets.",
         "Make acceptance criteria concrete (gameplay behavior, visual result, "
         "runtime errors, and performance where measurable). A create/build "
-        "call is not a playtest; a playtest is not a screenshot; a screenshot "
-        "is not a performance profile.",
+        "call is not a playtest; a playtest is not a screenshot; capturing a "
+        "screenshot is not reviewing it; and a visual review is not a "
+        "performance profile.",
         "Do not repeat already-successful work during a corrective pass. Keep "
         "polish bounded and report every unverified dimension honestly.",
     ])
     return "\n".join(lines)
 
 
-def _result_declares_failure(value: Any, depth: int = 0) -> bool:
+def result_declares_failure(value: Any, depth: int = 0) -> bool:
     """Catch explicit negative verdicts without guessing from prose.
 
     Transport success is necessary but a verifier returning ``valid: false``
@@ -262,11 +277,11 @@ def _result_declares_failure(value: Any, depth: int = 0) -> bool:
             if low == "status" and isinstance(item, str) and item.lower() in {
                     "failed", "failure", "error", "invalid", "broken"}:
                 return True
-        return any(_result_declares_failure(item, depth + 1)
+        return any(result_declares_failure(item, depth + 1)
                    for key, item in value.items()
                    if str(key).lower() in {"result", "data", "payload"})
     if isinstance(value, list):
-        return any(_result_declares_failure(item, depth + 1)
+        return any(result_declares_failure(item, depth + 1)
                    for item in value[:100])
     return False
 
@@ -291,7 +306,7 @@ def assess(profile: QualityProfile, registry: Any,
                 registry.by_name(name)
         if tv is None:
             continue
-        if _result_declares_failure(getattr(task, "result", None)):
+        if result_declares_failure(getattr(task, "result", None)):
             rejected.append({
                 "step": str(getattr(task, "name", "") or name)[:120],
                 "tool": tv.full_name,

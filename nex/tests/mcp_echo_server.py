@@ -30,13 +30,25 @@ TOOLS = [
     {"name": "create_thing", "description": "Create a named thing.",
      "inputSchema": {"type": "object",
                      "properties": {"name": {"type": "string"}},
-                     "required": ["name"]}},
+                     "required": ["name"]},
+     "outputSchema": {"type": "object",
+                      "properties": {"id": {"type": "string"},
+                                     "name": {"type": "string"}},
+                      "required": ["id", "name"],
+                      "additionalProperties": False}},
+
     {"name": "delete_thing", "description": "Delete a thing by id.",
      "inputSchema": {"type": "object",
                      "properties": {"id": {"type": "string"}},
                      "required": ["id"]}},
     {"name": "fail_always", "description": "Always fails.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "read_broken_contract",
+     "description": "Test fixture that violates its declared output schema.",
+     "inputSchema": {"type": "object", "properties": {}},
+     "outputSchema": {"type": "object",
+                      "properties": {"ok": {"type": "boolean"}},
+                      "required": ["ok"]}},
 ]
 
 
@@ -80,14 +92,18 @@ class Handler(BaseHTTPRequestHandler):
                                  "text": str(args.get("a", 0)
                                              + args.get("b", 0))}]}
         if name == "create_thing":
-            return {"content": [{"type": "text", "text": json.dumps(
-                {"id": "thing_1", "name": args.get("name", "?")})}]}
+            structured = {"id": "thing_1", "name": args.get("name", "?")}
+            return {"content": [{"type": "text",
+                                 "text": json.dumps(structured)}],
+                    "structuredContent": structured}
         if name == "delete_thing":
             return {"content": [{"type": "text",
                                  "text": "deleted " + str(args.get("id"))}]}
         if name == "fail_always":
             return {"isError": True,
                     "content": [{"type": "text", "text": "boom: nope"}]}
+        if name == "read_broken_contract":
+            return {"content": [{"type": "text", "text": "looks fine"}]}
         return {"isError": True,
                 "content": [{"type": "text", "text": "unknown tool"}]}
 

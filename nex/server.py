@@ -44,6 +44,7 @@ _providers.load_env()
 from agent import prompts as _prompts
 from agent.jsonreply import extract_json_with_key
 from agent.loop import RunCoordinator
+from agent.production import readiness as production_readiness
 from mcp.manager import get_manager, validate_server_entry
 from mcp.policy import Policy, set_policy
 from store import Store
@@ -598,6 +599,8 @@ class NexHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "conversations": STORE.list_conversations(),
                 "servers": MANAGER.summary(),
+                "production_readiness": production_readiness(
+                    MANAGER.registry()),
                 "provider": _provider_view(),
                 "audit": MANAGER.audit.recent(20),
             })
@@ -615,6 +618,8 @@ class NexHandler(BaseHTTPRequestHandler):
             self._handle_conversation_get(path)
         elif path == "/api/servers":
             self._send_json(200, MANAGER.summary())
+        elif path == "/api/production/readiness":
+            self._send_json(200, production_readiness(MANAGER.registry()))
         elif path.startswith("/api/servers/"):
             self._handle_server_get(path)
         elif path == "/api/audit":

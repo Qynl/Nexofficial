@@ -23,6 +23,7 @@ os.environ["NEX_HOME"] = tempfile.mkdtemp(prefix="nex-mgr-")
 
 from mcp import manager as manager_mod                # noqa: E402
 from mcp.manager import ServerManager                 # noqa: E402
+from mcp.schema import validate_tool_output            # noqa: E402
 
 _FAILED = []
 
@@ -56,7 +57,7 @@ class ManagerTests(unittest.TestCase):
     def test_status_connected_with_tools(self):
         s = self.mgr.server_status("echo")
         self.assertEqual(s["status"], "connected")
-        self.assertEqual(s["tools_count"], 5)
+        self.assertEqual(s["tools_count"], 6)
         self.assertTrue(s["trusted"])
 
     def test_add_validates_names(self):
@@ -179,6 +180,30 @@ class ManagerTests(unittest.TestCase):
         tool = sv.by_name("add")
         self.assertIsNotNone(tool)
         self.assertIn("a", tool.schema.get("properties", {}))
+        self.assertEqual(tool.output_schema, {})
+        create = sv.by_name("create_thing")
+        self.assertIn("id", create.output_schema.get("properties", {}))
+        out = self.mgr.call("echo", "create_thing", {"name": "gizmo"})
+        self.assertEqual(
+            out["result"]["structuredContent"]["id"], "thing_1")
+
+    def test_declared_output_schema_is_enforced(self):
+        schema = {
+            "type": "object",
+            "properties": {"build_id": {"type": "string"},
+                           "ok": {"type": "boolean"}},
+            "required": ["build_id", "ok"],
+            "additionalProperties": False,
+        }
+        good = {"structuredContent": {"build_id": "b1", "ok": True}}
+        bad = {"structuredContent": {"build_id": 7, "ok": True}}
+        self.assertEqual(validate_tool_output(schema, good), [])
+        self.assertTrue(validate_tool_output(schema, bad))
+        self.assertIn("structuredContent",
+                      validate_tool_output(schema, {"content": []})[0])
+        broken = self.mgr.call("echo", "read_broken_contract", {})
+        self.assertIn("validation_errors", broken, broken)
+        self.assertIn("output validation failed", broken["error"])
 
     # ── audit ────────────────────────────────────────────────────
 

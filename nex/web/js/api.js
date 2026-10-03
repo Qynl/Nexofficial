@@ -67,6 +67,7 @@ export const api = {
 
   // -- servers
   servers: () => request('GET', '/api/servers'),
+  productionReadiness: () => request('GET', '/api/production/readiness'),
   serverTools: (name) => request('GET', `/api/servers/${name}/tools`),
   addServer: (entry) => request('POST', '/api/servers', entry),
   removeServer: (name) => request('DELETE', `/api/servers/${name}`),

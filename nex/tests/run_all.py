@@ -21,6 +21,7 @@ SUITES = [
     "test_manager.py",        # server lifecycle, calls, approvals, audit
     "test_agent_loop.py",     # plan → act → observe → evaluate → adapt
     "test_quality.py",        # game production gates + bounded polish pass
+    "test_production.py",     # multi-stage studio program + MCP readiness
     "test_store.py",          # conversation persistence
     "test_server_api.py",     # HTTP API: auth, CSRF, chat, SSE
     "test_escape.py",         # adversarial boundary: no hidden PC route

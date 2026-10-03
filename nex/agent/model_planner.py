@@ -18,15 +18,15 @@ Safety properties (so the model cannot degrade the plan):
   * Only tools that actually exist in the registry become steps.
     A hallucinated tool name is dropped and reported as "missing",
     never executed.
-  * `depends_on` becomes real DAG edges; dangling names are ignored.
+  * `depends_on` becomes real DAG edges; dangling names fail closed.
   * Required-args are checked against the live inputSchema.
   * If the model is unreachable or returns nothing usable, the caller
     falls back to the deterministic planner (agent/planner.py).
 
-Argument references: a step arg may be the string "$step-name" (a
-dependency's whole result) or "$step-name.key" (a field of it). They
-are resolved at execution time by agent/loop.py — validated here only
-for shape (they must point at a real step in the plan).
+Argument references: any nested argument may be the string "$step-name" (a
+dependency's whole result) or "$step-name.key" (a field of it). They are
+resolved at execution time by agent/loop.py and must point at an explicitly
+declared dependency.
 """
 from __future__ import annotations
 
@@ -59,14 +59,26 @@ def catalog_text(registry, goal: str = "",
         props = schema.get("properties", {}) or {}
         req = schema.get("required", []) or []
         for k in list(props.keys())[:8]:
-            typ = props.get(k, {}).get("type", "?")
+            spec = props.get(k, {})
+            typ = spec.get("type", "?") if isinstance(spec, dict) else "?"
             mark = "*" if k in req else ""
-            schema_bits.append("%s:%s%s" % (k, typ, mark))
+            schema_bits.append("%s:%s%s" %
+                               (str(k)[:64], str(typ)[:24], mark))
         line = "- %s (category=%s)" % (t.full_name, cat)
         if schema_bits:
             line += " args: " + ", ".join(schema_bits)
         if req:
             line += "  (* = required)"
+        output = t.output_schema if isinstance(t.output_schema, dict) else {}
+        output_props = output.get("properties", {}) or {}
+        if isinstance(output_props, dict) and output_props:
+            returns = []
+            for k in list(output_props.keys())[:8]:
+                spec = output_props.get(k, {})
+                typ = spec.get("type", "?") if isinstance(spec, dict) else "?"
+                returns.append("%s:%s" %
+                               (str(k)[:64], str(typ)[:24]))
+            line += " returns: " + ", ".join(returns)
         desc = (t.description or "").strip().split("\n")[0]
         if desc:
             line += " — " + desc[:180]
@@ -114,6 +126,25 @@ def _lookup(registry, tool: str, server: str = None):
     return registry.by_name(tool)
 
 
+def _argument_references(value: Any, path: str = "$", depth: int = 0
+                         ) -> List[Tuple[str, str]]:
+    """Bounded recursive ``(path, reference)`` pairs from JSON arguments."""
+    if depth > 40:
+        return []
+    if isinstance(value, str) and value.startswith("$"):
+        return [(path, value)]
+    out: List[Tuple[str, str]] = []
+    if isinstance(value, dict):
+        for key, child in list(value.items())[:2048]:
+            out.extend(_argument_references(
+                child, "%s.%s" % (path, str(key)[:80]), depth + 1))
+    elif isinstance(value, list):
+        for i, child in enumerate(value[:4096]):
+            out.extend(_argument_references(
+                child, "%s[%d]" % (path, i), depth + 1))
+    return out[:10000]
+
+
 def validate_plan_deep(plan: Dict[str, Any],
                        registry) -> Tuple[List[str], List[str]]:
     """Canonical live-registry validation for any plan.
@@ -155,20 +186,25 @@ def validate_plan_deep(plan: Dict[str, Any],
                 errors.append("step '%s': missing required arg '%s' "
                               "(required by live schema of '%s')"
                               % (label, req, tv.name))
-        for key, val in args.items():
+        for key in args:
             if props and key not in props:
                 warnings.append("step '%s': arg '%s' not in live schema of "
                                 "'%s' (server may ignore it)"
                                 % (label, key, tv.name))
-            if isinstance(val, str) and val.startswith("$"):
-                m = _REF_RE.match(val)
-                if not m:
-                    warnings.append("step '%s': arg '%s' reference %r does "
-                                    "not look like $step or $step.key"
-                                    % (label, key, val[:40]))
-                elif m.group(1) not in names:
-                    errors.append("step '%s': arg '%s' references unknown "
-                                  "step '%s'" % (label, key, m.group(1)))
+        deps = set(s.get("depends_on") or [])
+        for path, ref in _argument_references(args):
+            m = _REF_RE.match(ref)
+            if not m:
+                warnings.append("step '%s': arg '%s' reference %r does "
+                                "not look like $step or $step.key"
+                                % (label, path, ref[:40]))
+            elif m.group(1) not in names:
+                errors.append("step '%s': arg '%s' references unknown "
+                              "step '%s'" % (label, path, m.group(1)))
+            elif m.group(1) not in deps:
+                errors.append("step '%s': arg '%s' references step '%s' "
+                              "without declaring it in depends_on"
+                              % (label, path, m.group(1)))
     return errors, warnings
 
 
@@ -195,8 +231,8 @@ def plan_to_graph(plan: Dict[str, Any], registry,
             dropped.append("step_%d: step must be an object" % i)
             continue
         name = str(s.get("name") or "s%d" % i)
-        if name in names:
-            dropped.append("%s: duplicate step name" % name)
+        if name in names or name in external_refs:
+            dropped.append("%s: duplicate current/historical step name" % name)
             continue
         names.add(name)
         if not isinstance(s.get("args", {}) or {}, dict):
@@ -222,9 +258,18 @@ def plan_to_graph(plan: Dict[str, Any], registry,
         for item in candidates:
             _, name, s, _ = item
             deps = s.get("depends_on") or []
-            if not isinstance(deps, list) or any(
-                    not isinstance(d, str) or d not in available for d in deps):
-                dropped.append("%s: dependency is missing or invalid" % name)
+            invalid_dep = (not isinstance(deps, list) or any(
+                not isinstance(d, str) or d not in available for d in deps))
+            invalid_ref = False
+            for _path, ref in _argument_references(s.get("args", {}) or {}):
+                match = _REF_RE.match(ref)
+                if (match is None or match.group(1) not in available or
+                        match.group(1) not in deps):
+                    invalid_ref = True
+                    break
+            if invalid_dep or invalid_ref:
+                dropped.append("%s: dependency/reference is missing or invalid"
+                               % name)
                 changed = True
             else:
                 kept.append(item)
@@ -298,9 +343,10 @@ def model_driven_planner(goal: str, registry,
                          ) -> Tuple[TaskGraph, Optional[Dict[str, Any]]]:
     """Ask the LLM for a plan; validate it; return (graph, plan_dict).
 
-    On any failure returns a graph with no tasks and None — the caller
-    decides how to report it (the deterministic planner is the caller's
-    fallback).
+    If no plan document can be parsed, returns an empty graph and ``None`` so
+    the caller may use its deterministic fallback. A parsed but invalid plan
+    returns its empty/partial graph plus the plan, preserving validation
+    findings rather than silently substituting unrelated work.
 
     `note` is guidance for a RE-PLAN (what the previous attempt taught).
     `feedback` is a list of concrete findings to address.
@@ -364,11 +410,17 @@ def model_driven_planner(goal: str, registry,
 
     valid, missing = validate_plan_tools(plan, registry)
     if not valid:
-        return TaskGraph(), None
+        graph = TaskGraph()
+        graph.plan_meta = {
+            "dropped": ["all proposed tools were unavailable"],
+            "missing_tools": missing,
+            "title": str(plan.get("title") or ""),
+            "rationale": str(plan.get("rationale") or ""),
+            "requested": len(plan.get("steps") or []), "kept": 0,
+        }
+        return graph, plan
     graph = plan_to_graph(plan, registry,
                           external_refs=completed_refs,
                           id_prefix=id_prefix)
-    if not graph.all():
-        return TaskGraph(), None
     graph.plan_meta["missing_tools"] = missing
     return graph, plan

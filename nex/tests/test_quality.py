@@ -30,6 +30,7 @@ GAME_TOOLS = [
     tool("build_game", "Build the game project."),
     tool("run_game", "Run a real game session for playtesting."),
     tool("capture_frame", "Capture a viewport screenshot."),
+    tool("analyze_screenshot", "Review a screenshot for visual defects."),
     tool("inspect_logs", "Read runtime logs and errors."),
     tool("verify_game", "Verify gameplay acceptance criteria."),
     tool("get_performance_metrics", "Read FPS and frame-time telemetry."),
@@ -63,6 +64,9 @@ class CatalogAndScoreTests(unittest.TestCase):
             self.assertTrue(catalog[gate], gate + " should be available")
         self.assertEqual(
             [t.name for t in catalog["visual"]], ["capture_frame"])
+        self.assertEqual(
+            [t.name for t in catalog["visual_review"]],
+            ["analyze_screenshot"])
         self.assertEqual(
             [t.name for t in catalog["performance"]],
             ["get_performance_metrics"])
@@ -165,6 +169,8 @@ class LoopQualityTests(unittest.TestCase):
                 verify = next(s for s in initial["plan"]["steps"]
                               if s["name"] == "verify_game")
                 verify["args"] = {"build": "$build_game.id"}
+                verify["depends_on"] = list(dict.fromkeys(
+                    (verify.get("depends_on") or []) + ["build_game"]))
                 return json.dumps(initial)
             return "Production evidence was checked."
 

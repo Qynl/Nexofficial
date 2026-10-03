@@ -42,6 +42,13 @@ from agent.events import (
 from agent.model_planner import model_driven_planner, validate_plan_deep
 from agent.planner import plan as skeleton_plan
 from agent.prompts import EVALUATOR_SYSTEM, SUMMARIZER_SYSTEM
+from agent.production import (
+    STAGES as PRODUCTION_STAGES,
+    is_large_game_goal,
+    public_program,
+    stage_brief as production_stage_brief,
+    stage_evidence as assess_stage_evidence,
+)
 from agent.quality import (
     assess as assess_quality,
     correction_note as quality_correction_note,
@@ -74,10 +81,11 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-DEFAULT_MAX_STEPS = _env_int("NEX_MAX_STEPS", 24)
-DEFAULT_MAX_REPLANS = _env_int("NEX_MAX_REPLANS", 2)
+DEFAULT_MAX_STEPS = _env_int("NEX_MAX_STEPS", 64)
+DEFAULT_MAX_REPLANS = _env_int("NEX_MAX_REPLANS", 3)
 DEFAULT_MAX_QUALITY_PASSES = _env_int("NEX_MAX_QUALITY_PASSES", 1)
-DEFAULT_BUDGET_S = _env_float("NEX_RUN_BUDGET_S", 900.0)
+DEFAULT_MAX_PRODUCTION_STAGES = _env_int("NEX_MAX_PRODUCTION_STAGES", 8)
+DEFAULT_BUDGET_S = _env_float("NEX_RUN_BUDGET_S", 1800.0)
 DEFAULT_APPROVAL_TIMEOUT_S = _env_float("NEX_APPROVAL_TIMEOUT_S", 600.0)
 
 _MAX_REPEAT = 2          # retries for the SAME error signature
@@ -190,6 +198,7 @@ class AgentRun:
                  max_steps: int = DEFAULT_MAX_STEPS,
                  max_replans: int = DEFAULT_MAX_REPLANS,
                  max_quality_passes: int = DEFAULT_MAX_QUALITY_PASSES,
+                 max_production_stages: int = DEFAULT_MAX_PRODUCTION_STAGES,
                  budget_s: float = DEFAULT_BUDGET_S,
                  on_summary: Optional[Callable] = None):
         self.run_id = run_id
@@ -201,6 +210,8 @@ class AgentRun:
         self.max_steps = max_steps
         self.max_replans = max_replans
         self.max_quality_passes = max(0, max_quality_passes)
+        self.max_production_stages = max(
+            1, min(max_production_stages, len(PRODUCTION_STAGES)))
         self.budget_s = budget_s
         self.on_summary = on_summary      # (run, text) -> None
         self._stop = threading.Event()
@@ -212,9 +223,14 @@ class AgentRun:
         self.report: Dict[str, Any] = {}
         self.started_at = time.time()
         self._steps_executed = 0
+        self._step_budget_hit = False
         self._replans = 0
         self._quality_passes = 0
         self._quality_profile = profile_for_goal(goal)
+        self._program_active = is_large_game_goal(goal)
+        self._program_stage = 0
+        self._program_completed: List[str] = []
+        self._program_reviews: Dict[str, Dict[str, Any]] = {}
         self._eval_note = ""
         self.thread: Optional[threading.Thread] = None
 
@@ -225,8 +241,8 @@ class AgentRun:
              conversation_id=self.conversation_id, **payload)
 
     def _check_stop(self) -> bool:
-        return self._stop.is_set() or (time.time() - self.started_at
-                                       > self.budget_s)
+        return (self._stop.is_set() or self._step_budget_hit or
+                (time.time() - self.started_at > self.budget_s))
 
     def cancel(self) -> None:
         self._stop.set()
@@ -249,6 +265,8 @@ class AgentRun:
     def run(self) -> Dict[str, Any]:
         self.status = "running"
         self._emit("run.started", goal=self.goal)
+        if self._program_active:
+            self._emit("run.program", program=self._program_public())
 
         # ---- PLAN ------------------------------------------------------------
         self._emit("run.phase", phase="planning",
@@ -263,11 +281,20 @@ class AgentRun:
         # ---- EXECUTE / EVALUATE / ADAPT ---------------------------------------
         while not self._check_stop():
             progressed = self._execute_wave()
-            if self._stop.is_set():
+            if self._stop.is_set() or self._step_budget_hit or \
+                    time.time() - self.started_at > self.budget_s:
                 break
             if self.graph.is_terminal():
+                # Studio-scale goals advance through several independently
+                # planned stages. A single successful graph is one production
+                # milestone, never proof that an open-world game is finished.
+                if self._program_active:
+                    if self._advance_production_stage():
+                        continue
+                    if not self._program_is_complete():
+                        break
                 # A successful implementation is not automatically a
-                # production-quality game.  Audit distinct evidence gates and
+                # production-quality game. Audit distinct evidence gates and
                 # use one bounded corrective plan when suitable live tools
                 # were available but omitted.
                 if self._try_quality_pass():
@@ -307,26 +334,53 @@ class AgentRun:
             return self._finish(self._build_report(
                 STATUS_FAILED, ["run budget of %ds exhausted"
                                 % int(self.budget_s)]))
+        if self._step_budget_hit:
+            # Preserve useful completed work as partial rather than reporting a
+            # user cancellation or discarding it as a total failure.
+            return self._finish(self._build_report(
+                None, ["step budget of %d reached" % self.max_steps]))
         return self._finish(self._build_report(None))
 
     # ----- planning ---------------------------------------------------------
 
+    def _planning_brief(self, registry: Any) -> str:
+        parts: List[str] = []
+        # Early studio stages should not waste calls proving an intentionally
+        # incomplete foundation. The full evidence contract joins the program
+        # for validation and polish, then remains active for final scoring.
+        if (not self._program_active or
+                self._program_stage >= len(PRODUCTION_STAGES) - 2):
+            parts.append(quality_planning_brief(
+                self._quality_profile, registry))
+        if self._program_active:
+            parts.append(production_stage_brief(
+                self.goal, self._program_stage, registry))
+        return "\n\n".join(p for p in parts if p)
+
     def _make_plan(self) -> TaskGraph:
         reg = self.manager.registry()
-        graph, _plan = model_driven_planner(
+        graph, model_plan = model_driven_planner(
             self.goal, reg, llm=self.llm,
             note=self._eval_note,
-            quality_brief=quality_planning_brief(
-                self._quality_profile, reg))
-        if not graph.all():
+            quality_brief=self._planning_brief(reg),
+            id_prefix=("p0_" if self._program_active else ""))
+        # Fall back only when no usable model-plan document existed. An
+        # explicitly empty or wholly invalid model plan is an honest block,
+        # not permission to substitute an unrelated keyword-matched action.
+        if not graph.all() and model_plan is None:
             graph = skeleton_plan(self.goal, reg)
         if graph.all():
             errors, warnings = validate_plan_deep(
-                _plan_as_dict(graph), reg) if _plan else ([], [])
+                _plan_as_dict(graph), reg) if model_plan else ([], [])
             # Missing-required-arg errors: keep the step; the recovery
             # ladder may still fix it at runtime. Report as warnings.
             for w in warnings:
                 self.context.failures.append("plan: " + w)
+        if self._program_active and graph.all():
+            stage = PRODUCTION_STAGES[self._program_stage]
+            for task in graph.all():
+                task.phase = stage.id
+            graph.plan_meta["production_stage"] = stage.to_public()
         return graph
 
     def _plan_public(self) -> Dict[str, Any]:
@@ -350,12 +404,12 @@ class AgentRun:
             for task in ready:
                 if self._check_stop():
                     break
-                self._steps_executed += 1
-                if self._steps_executed > self.max_steps:
-                    self._stop.set()
+                if self._steps_executed >= self.max_steps:
+                    self._step_budget_hit = True
                     self.context.failures.append(
-                        "run exceeded the %d-step budget" % self.max_steps)
+                        "run reached the %d-step budget" % self.max_steps)
                     break
+                self._steps_executed += 1
                 before = task.status
                 self._execute_task(task)
                 if task.status != before:
@@ -365,36 +419,67 @@ class AgentRun:
         return progressed
 
     def _resolve_args(self, task: Task) -> Dict[str, Any]:
-        """Fill `$step` / `$step.key` references from dependency results.
+        """Recursively fill `$step` / `$step.key` references from dependencies.
 
-        A reference that cannot be resolved at execution time is a hard
-        step failure — sending the raw "$name.key" string to a server
-        would be quiet garbage, never an honest action.
+        Real engine schemas commonly nest actor ids inside arrays/objects. Every
+        exact reference is resolved at any bounded depth and must name a
+        declared dependency. Hidden ordering based on list position is refused.
         """
-        args = dict(task.args or {})
-        for k, v in list(args.items()):
-            if isinstance(v, str) and v.startswith("$") and len(v) > 1:
-                m = _REF_RE.match(v)
+        seen = set()
+        nodes = [0]
+
+        def walk(value: Any, path: str, depth: int) -> Any:
+            nodes[0] += 1
+            if depth > 40 or nodes[0] > 10000:
+                raise ArgResolutionError(
+                    "argument %r is too deeply nested to resolve safely" % path)
+            if isinstance(value, str) and value.startswith("$"):
+                m = _REF_RE.match(value)
                 if not m:
-                    continue
+                    raise ArgResolutionError(
+                        "argument %r contains invalid reference %r"
+                        % (path, value[:80]))
                 ref_name, key = m.group(1), m.group(2)
-                # Find the referenced task (by plan name → id map).
                 ref_task = self._task_by_name(ref_name)
                 if ref_task is None:
                     raise ArgResolutionError(
                         "argument %r references step %r which is not in "
-                        "the plan" % (k, ref_name))
+                        "the plan" % (path, ref_name))
+                if ref_task.id not in task.deps:
+                    raise ArgResolutionError(
+                        "argument %r references step %r without declaring it "
+                        "in depends_on" % (path, ref_name))
                 if ref_task.status != SUCCESS:
                     raise ArgResolutionError(
                         "argument %r depends on step %r which did not "
-                        "succeed" % (k, ref_name))
-                val = _result_value(ref_task.result, key)
-                if val is None:
+                        "succeed" % (path, ref_name))
+                resolved = _result_value(ref_task.result, key)
+                if resolved is None:
                     raise ArgResolutionError(
                         "step %r produced no %r to fill argument %r"
-                        % (ref_name, key or "value", k))
-                args[k] = val
-        return args
+                        % (ref_name, key or "value", path))
+                return resolved
+            if isinstance(value, (dict, list)):
+                ident = id(value)
+                if ident in seen:
+                    raise ArgResolutionError(
+                        "argument %r contains a cyclic structure" % path)
+                seen.add(ident)
+                try:
+                    if isinstance(value, dict):
+                        return {k: walk(v, "%s.%s" % (path, str(k)[:80]),
+                                        depth + 1)
+                                for k, v in value.items()}
+                    return [walk(v, "%s[%d]" % (path, i), depth + 1)
+                            for i, v in enumerate(value)]
+                finally:
+                    seen.remove(ident)
+            return value
+
+        resolved = walk(task.args or {}, "$", 0)
+        if not isinstance(resolved, dict):
+            raise ArgResolutionError("arguments did not resolve to an object")
+        return resolved
 
     def _task_by_name(self, name: str) -> Optional[Task]:
         name_l = (name or "").lower()
@@ -680,10 +765,19 @@ class AgentRun:
         failures = self.context.failure_block()
         if failures:
             parts.append("\nOpen failures:\n" + failures)
+        if self._program_active:
+            parts.append("\nLarge-scale production program:\n" +
+                         _jsonish(self._program_public()))
         scorecard = self._quality_scorecard()
-        if scorecard.get("active"):
+        quality_due = (not self._program_active or
+                       self._program_stage >= len(PRODUCTION_STAGES) - 2)
+        if scorecard.get("active") and quality_due:
             parts.append("\nGame-production evidence scorecard:\n" +
                          _jsonish(scorecard))
+        elif scorecard.get("active"):
+            parts.append("\nFinal quality scoring is deferred until the "
+                         "validation stage; evaluate only the current "
+                         "production-stage acceptance criteria.")
         parts.append(
             "\nDecide: done? continue? replan? stop? Reply with the JSON "
             "object only.")
@@ -709,6 +803,127 @@ class AgentRun:
         if adjust == "replan" and note:
             self._eval_note = note
         return verdict
+
+    # ----- hierarchical game production ----------------------------------------
+
+    def _program_public(self) -> Dict[str, Any]:
+        return public_program(
+            self.goal, self.manager.registry(), self._program_stage,
+            self._program_completed, stage_limit=self.max_production_stages,
+            reviews=self._program_reviews)
+
+    def _program_is_complete(self) -> bool:
+        return (not self._program_active or
+                len(set(self._program_completed)) >= len(PRODUCTION_STAGES))
+
+    def _advance_production_stage(self) -> bool:
+        """Close one successful milestone and plan the next one.
+
+        Returns True only when a new executable stage was installed. Every
+        prior successful task remains in the graph, so `$slug.field` dataflow
+        can cross stage boundaries without rerunning side effects.
+        """
+        if not self._program_active:
+            return False
+        stage = PRODUCTION_STAGES[self._program_stage]
+        stage_tasks = [t for t in self.graph.all() if t.phase == stage.id]
+        if not stage_tasks or any(t.status != SUCCESS for t in stage_tasks):
+            self.context.failures.append(
+                "production stage '%s' did not complete" % stage.label)
+            return False
+        review = assess_stage_evidence(
+            stage, self.manager.registry(), stage_tasks)
+        self._program_reviews[stage.id] = review
+        if not review.get("passed"):
+            missing = ", ".join(review.get("missing") or [])
+            self.context.failures.append(
+                "production stage '%s' lacks evidence: %s" %
+                (stage.label, missing))
+            correctable = review.get("correctable") or []
+            if (correctable and self.llm is not None and
+                    self._replans < self.max_replans and not self._check_stop()):
+                note = (
+                    "Current production stage '%s' is not complete. Add only "
+                    "work proving these missing machine-audited requirements: "
+                    "%s. Reuse all successful work."
+                    % (stage.label, ", ".join(correctable)))
+                self._eval_note = note
+                return self._replan({
+                    "done": False, "adjust": "replan",
+                    "reason": "stage evidence is incomplete", "note": note})
+            return False
+        if stage.id not in self._program_completed:
+            self._program_completed.append(stage.id)
+        self._emit("run.program", program=self._program_public())
+
+        if self._program_stage + 1 >= self.max_production_stages:
+            if self.max_production_stages < len(PRODUCTION_STAGES):
+                self.context.failures.append(
+                    "production stage cap reached (%d/%d)" %
+                    (self.max_production_stages, len(PRODUCTION_STAGES)))
+            return False
+        if self.llm is None or self._check_stop():
+            self.context.failures.append(
+                "the next production stage needs an agent model")
+            return False
+        if self._steps_executed >= self.max_steps:
+            self.context.failures.append(
+                "production stage budget ended after '%s'" % stage.label)
+            return False
+
+        self._program_stage += 1
+        next_stage = PRODUCTION_STAGES[self._program_stage]
+        self._emit("run.phase", phase="planning",
+                   detail="Planning stage %d/%d · %s" %
+                          (self._program_stage + 1,
+                           self.max_production_stages, next_stage.label))
+        self._emit("run.program", program=self._program_public())
+
+        completed = [t for t in self.graph.all() if t.status == SUCCESS]
+        completed_refs = {(t.slug or t.id): t.id for t in completed}
+        recent = completed[-24:]
+        summary = "\n".join(
+            "- DONE $%s: %s (%s) — %s" %
+            (t.slug or t.id, t.name, t.tool,
+             result_preview(t.result, 100))
+            for t in recent)
+        reg = self.manager.registry()
+        graph, _ = model_driven_planner(
+            self.goal, reg, llm=self.llm,
+            note=("The previous production stage completed. Preserve and "
+                  "reuse these results; plan only the newly assigned stage:\n"
+                  + (summary or "(no reusable outputs)")),
+            quality_brief=self._planning_brief(reg),
+            completed_refs=completed_refs,
+            id_prefix="p%d_" % self._program_stage)
+        if graph is None or not graph.all():
+            self.context.failures.append(
+                "could not make an executable plan for production stage '%s'"
+                % next_stage.label)
+            return False
+
+        new_graph = TaskGraph()
+        for t in completed:
+            new_graph.add(Task(
+                id=t.id, name=t.name, slug=t.slug, server=t.server,
+                tool=t.tool, args=t.args, deps=[], status=SUCCESS,
+                result=t.result, expect=t.expect, why=t.why,
+                phase=t.phase))
+        for t in graph.all():
+            if t.status == PENDING:
+                t.phase = next_stage.id
+                new_graph.add(t)
+        if not new_graph.pending():
+            self.context.failures.append(
+                "production stage '%s' contained no new work" %
+                next_stage.label)
+            return False
+        new_graph.plan_meta = dict(getattr(graph, "plan_meta", {}) or {})
+        new_graph.plan_meta["production_stage"] = next_stage.to_public()
+        self.graph = new_graph
+        self._emit("run.plan", plan=self._plan_public(),
+                   production_stage=self._program_stage)
+        return True
 
     # ----- production quality review -------------------------------------------
 
@@ -778,8 +993,7 @@ class AgentRun:
                   % (verdict.get("reason", ""), summary or "(nothing)",
                      note or "")),
             feedback=feedback,
-            quality_brief=quality_planning_brief(
-                self._quality_profile, reg),
+            quality_brief=self._planning_brief(reg),
             completed_refs=completed_refs,
             id_prefix="r%d_" % self._replans)
         if graph is None or not graph.all():
@@ -790,12 +1004,15 @@ class AgentRun:
             t2 = Task(id=t.id, name=t.name, slug=t.slug,
                       server=t.server, tool=t.tool,
                       args=t.args, deps=[], status=SUCCESS,
-                      result=t.result, expect=t.expect, why=t.why)
+                      result=t.result, expect=t.expect, why=t.why,
+                      phase=t.phase)
             new_graph.add(t2)
         # The replan planner has already namespaced new task ids while leaving
         # dependencies on historical success ids intact.
         for t in graph.all():
             if t.status == PENDING:
+                if self._program_active:
+                    t.phase = PRODUCTION_STAGES[self._program_stage].id
                 new_graph.add(t)
         new_graph.plan_meta = dict(getattr(graph, "plan_meta", {}) or {})
         if not new_graph.pending():
@@ -832,12 +1049,38 @@ class AgentRun:
             status = STATUS_PARTIAL
         else:
             status = STATUS_COMPLETED
-        missing = (getattr(self.graph, "plan_meta", {})
-                   .get("missing_tools") or [])
+        plan_meta = getattr(self.graph, "plan_meta", {}) or {}
+        missing = plan_meta.get("missing_tools") or []
+        dropped = plan_meta.get("dropped") or []
         out_reasons = list(reasons or [])
+        if (dropped or missing) and status == STATUS_COMPLETED:
+            status = STATUS_PARTIAL
+        if dropped:
+            out_reasons.append(
+                "plan validation dropped %d invalid step(s): %s" %
+                (len(dropped), "; ".join(str(x) for x in dropped[:3])))
+        if missing:
+            out_reasons.append(
+                "plan referenced unavailable tools: " +
+                ", ".join(str(x) for x in missing[:6]))
         if status == STATUS_BLOCKED:
             out_reasons.append(
                 "no executable plan could be made for this goal")
+        program = self._program_public() if self._program_active else {
+            "active": False, "scope": "single_run", "complete": True}
+        if program.get("active") and not program.get("complete"):
+            if status == STATUS_COMPLETED:
+                status = STATUS_PARTIAL
+            current_obj = program.get("current") or {}
+            current = current_obj.get("label", "next stage")
+            out_reasons.append(
+                "large-scale production program incomplete at: " + current)
+            review = (program.get("stage_reviews") or {}).get(
+                current_obj.get("id"))
+            if review and review.get("missing"):
+                out_reasons.append(
+                    "stage evidence missing: " +
+                    ", ".join(review.get("missing") or []))
         quality = self._quality_scorecard()
         if quality.get("active") and not quality.get("passed"):
             # A graph where every mutation returned successfully can still be
@@ -868,6 +1111,7 @@ class AgentRun:
             "replans": self._replans,
             "quality_passes": self._quality_passes,
             "quality": quality,
+            "production_program": program,
             "duration_s": round(time.time() - self.started_at, 1),
         }
 
@@ -887,6 +1131,9 @@ class AgentRun:
         self.status = report["status"]
         self._emit("run.phase", phase="finishing",
                    detail="Writing the summary")
+        if (report.get("production_program") or {}).get("active"):
+            self._emit("run.program",
+                       program=report["production_program"], final=True)
         if (report.get("quality") or {}).get("active"):
             self._emit("run.quality", scorecard=report["quality"], final=True)
         text = self._summarize(report)
@@ -925,6 +1172,9 @@ class AgentRun:
             "steps": [t.to_public() for t in self.graph.all()],
             "waiting": (self._approval is not None),
             "quality": self._quality_scorecard(),
+            "production_program": (
+                self._program_public() if self._program_active else
+                {"active": False}),
         }
 
 
@@ -972,6 +1222,18 @@ def _fallback_summary(report: Dict[str, Any]) -> str:
     skipped = report.get("skipped") or []
     if skipped:
         lines.append("\nSkipped: %d step(s)" % len(skipped))
+    program = report.get("production_program") or {}
+    if program.get("active"):
+        completed_stages = program.get("completed_stages") or []
+        lines.append("\nProduction program: **%d/%d stages** complete." %
+                     (len(completed_stages),
+                      program.get("stages_total", 0)))
+        if not program.get("complete"):
+            current = (program.get("current") or {}).get("label", "next stage")
+            lines.append("Current/incomplete stage: %s." % current)
+        readiness = program.get("readiness") or {}
+        lines.append("Connected MCP production readiness: **%d/100**." %
+                     readiness.get("score", 0))
     quality = report.get("quality") or {}
     if quality.get("active"):
         gates = quality.get("gates") or []

@@ -9,7 +9,7 @@ Python standard library. No frontend build. No hidden computer access.
 
 ![Python standard library](https://img.shields.io/badge/runtime-Python%20stdlib-3776AB?style=flat-square)
 ![Action boundary](https://img.shields.io/badge/actions-MCP%20only-54D3B5?style=flat-square)
-![Test suites](https://img.shields.io/badge/test%20suites-10-8B7CF6?style=flat-square)
+![Test suites](https://img.shields.io/badge/test%20suites-11-8B7CF6?style=flat-square)
 ![Shell access](https://img.shields.io/badge/model%20shell-none-20242C?style=flat-square)
 
 </div>
@@ -80,11 +80,60 @@ That is the kind of prompt the production protocol is designed to handle—**pro
 | **Presence** | WebGL face with idle, listening, thinking, speaking, planning, working, and verifying states | Fake activity with decorative progress |
 | **Conversation** | Streaming chat, markdown, code blocks, voice, search, regeneration, persistent history | Send provider secrets to the browser |
 | **Agent loop** | Plans a DAG, executes ready tasks, records evidence, evaluates, recovers, replans, and summarizes | Treat “the tool returned” as “the goal is complete” |
+| **Studio program** | Breaks whole-game/open-world goals into eight separately planned production stages with cross-stage dataflow | Confuse one vertical slice with a finished giant game |
 | **Game-production protocol** | Applies capability-aware quality gates and a bounded corrective pass to game-authoring goals | Promise artistic, commercial, or literal AAA quality |
 | **MCP boundary** | Discovers and calls operator-connected tools through one manager/policy/audit path | Expose a built-in shell, filesystem, terminal, or arbitrary host tool |
 | **Operator controls** | Exact-call approvals, session approvals, server trust, category policy, budgets, cancellation | Let the model grant itself permissions |
 
-## The game-production protocol
+## From “make GTA 7” to an actual production program
+
+A city-scale game is not a 16-step task. Nex now recognizes whole-game,
+open-world, MMO, sandbox, and similarly large requests and switches from a
+single DAG to the hierarchical studio program in `agent/production.py`.
+
+| Stage | Production question |
+| --- | --- |
+| **1. Discovery & constraints** | What project, engine state, reusable systems, assets, conventions, platforms, and hard constraints actually exist? |
+| **2. Production foundation** | What architecture, data model, input/state/save/restart paths, and acceptance contracts can carry the game rather than a demo? |
+| **3. Playable vertical slice** | Can one small experience deliver traversal, interaction, challenge, feedback, UI, audio, and recovery at representative quality? |
+| **4. Scalable game systems** | Can proven foundations support missions, vehicles, AI, combat, economy, streaming, progression, and their edge cases? |
+| **5. World, content & presentation** | Does representative breadth have coherent art direction, lighting, animation, audio, navigation, landmarks, and pacing? |
+| **6. Full-loop integration** | Do start-to-finish player journeys survive system boundaries, save/load, failure, UI, controls, and accessibility paths? |
+| **7. Validation & optimization** | Do real builds, play sessions, captures, visual reviews, logs, tests, and profiles meet explicit targets? |
+| **8. Evidence-driven polish** | Can the highest-impact observed defects be fixed and the affected checks rerun without endless random tweaking? |
+
+Each stage gets a fresh 3–8 step plan against the live catalog. Successful
+steps from earlier stages remain in the graph and expose `$step.field` outputs
+to later stages; they are not replayed just to recover an ID. New task IDs are
+namespaced per milestone, so an eight-stage build cannot collide with its own
+history.
+
+Stage completion is machine-audited too. Discovery must contain inspection
+evidence; a vertical slice must show implementation, gameplay, presentation,
+UI, and an actual play session; systems/world/integration stages require their
+relevant production disciplines; validation must independently build, run,
+capture, visually review, inspect diagnostics, verify, and profile. Every
+milestone also has a minimum number of distinct relevant successful steps, so
+one conveniently named “do everything” call cannot certify a whole stage. If an
+available requirement was omitted, Nex makes a bounded corrective plan for
+that stage. If the capability is unavailable, the program stops partial rather
+than advancing on vibes. The run card shows the current stage, evidence gaps,
+progress rail, and connected MCP production-readiness score.
+
+Readiness covers both proof capabilities—inspect, build, run, capture, visually
+review, diagnose, test, profile—and practical disciplines such as world
+authoring, gameplay, AI/navigation, presentation, UI/accessibility, and
+save/progression data. Missing implementation, playtest, visual capture, or
+visual-review tools are hard readiness blockers. This does not stop useful work;
+it stops Nex from calling a thin editor bridge a virtual game studio.
+
+The program remains bounded: 64 tool calls, eight production stages, three
+structural replans, one final evidence/polish pass, and a 30-minute wall clock by
+default. If any stage cannot be planned or completed, the result is `partial`,
+not “GTA finished.” Those limits are configurable for an operator who really
+has the engine automation and compute to support a larger campaign.
+
+## The game-production quality protocol
 
 Most “AI made a game” demos stop after files exist. Nex asks a less flattering and much more useful question:
 
@@ -92,7 +141,7 @@ Most “AI made a game” demos stop after files exist. Nex asks a less flatteri
 
 For game-authoring requests, `agent/quality.py` derives a production contract from the **goal plus the live MCP catalog**. It is engine-agnostic and deterministic. A tool is never invented because a workflow would look nicer with it.
 
-### The eight evidence gates
+### The nine evidence gates
 
 | Gate | What counts | What does **not** count |
 | --- | --- | --- |
@@ -100,12 +149,13 @@ For game-authoring requests, `agent/quality.py` derives a production contract fr
 | **Implementation** | Successful create/modify/code integration calls | A written plan or generated prose |
 | **Build** | A successful compile, build, bake, cook, or package call | “The script was saved” |
 | **Playtest** | A real runtime, simulation, PIE, or editor play session | Build success by itself |
-| **Visual** | A screenshot, captured frame, viewport image, or rendered preview inspection | Inferring beauty from JSON like `{ "ok": true }` |
+| **Visual capture** | A screenshot, captured frame, viewport image, or rendered preview | Inferring appearance from JSON like `{ "ok": true }` |
+| **Visual review** | A separate visual-analysis, screenshot-review, comparison, or defect-check tool | Treating possession of a screenshot as evidence that anyone inspected it |
 | **Diagnostics** | Runtime logs, console output, errors, warnings, or crash diagnostics reviewed | A process merely starting |
 | **Verification** | A verification, validation, automation, functional, integration, or acceptance check | The implementation tool reporting its own success |
 | **Performance** | Profiling, frame-time/FPS, memory/GPU stats, telemetry, or benchmark evidence | “It felt fast” without a measurement |
 
-A normal production game-making run requires the first seven. A **flagship** request—terms such as “AAA-style,” “high-quality,” “professional,” “shippable,” or “cinematic”—also requires performance evidence.
+A normal production game-making run requires the first eight. A **flagship** request—terms such as “AAA-style,” “high-quality,” “professional,” “shippable,” or “cinematic”—also requires performance evidence. Visual capture and visual review are deliberately separate: pixels existing is not the same as those pixels being judged.
 
 The final report contains a score from `0–100`, gate-by-gate state, supporting step/tool evidence, missing gates, unavailable capabilities, and the number of corrective passes. A gate can be:
 
@@ -122,11 +172,11 @@ Unavailable does **not** quietly become passed. If a plan omitted an available g
 ```json
 {
   "tier": "flagship",
-  "score": 75,
+  "score": 78,
   "passed": false,
-  "missing": ["visual", "performance"],
+  "missing": ["visual_review", "performance"],
   "unavailable": ["performance"],
-  "correctable": ["visual"],
+  "correctable": ["visual_review"],
   "disclaimer": "This score measures MCP-backed production evidence, not artistic taste, market readiness, or guaranteed AAA quality."
 }
 ```
@@ -169,6 +219,7 @@ create_level / add_actor / set_component_property / create_asset
 compile_project / build_game / bake_lighting / cook_content
 run_game / play_in_editor / start_pie / run_playtest
 capture_frame / screenshot_viewport / render_preview
+analyze_screenshot / inspect_visual / visual_diff / review_frame
 inspect_logs / console_output / get_diagnostics
 verify_game / automation_test / functional_test
 get_performance_metrics / profiler_capture / benchmark
@@ -203,7 +254,7 @@ Plans are checked for:
 - policy denial;
 - live JSON input-schema requirements;
 - object-shaped arguments;
-- valid `$step` and `$step.field` references;
+- recursively valid `$step` and `$step.field` references tied to declared dependencies;
 - duplicate names, missing dependencies, and cycles; and
 - bounded plan size.
 
@@ -222,7 +273,7 @@ Later steps can consume prior MCP results:
 }
 ```
 
-References resolve only after the dependency succeeds. If `id` is absent, the step fails before transport. Nex never sends a raw string such as `$package-game.id` and hopes the server understands the accident.
+References resolve recursively inside nested objects and arrays, but only after an explicitly declared dependency succeeds. Hidden ordering by list position is refused. If `id` is absent, a reference is malformed, nesting is hostile, or `depends_on` is missing, the step fails before transport. Nex never sends a raw string such as `$package-game.id` and hopes the server understands the accident.
 
 ### Recovery without thrashing
 
@@ -238,7 +289,7 @@ Retries, replans, steps, quality passes, approval waits, and wall time all have 
 ### Completion has semantics
 
 - `completed` — executable work succeeded **and**, for game production, every required evidence gate passed;
-- `partial` — useful work landed, but a task failed or production evidence remains incomplete;
+- `partial` — useful work landed, but a task failed, plan validation dropped a proposed step, a stage remains incomplete, or production evidence is missing;
 - `failed` — the goal could not be reached;
 - `blocked` — no executable plan/capability exists or policy prevented action; and
 - `cancelled` — the operator stopped the run.
@@ -321,9 +372,11 @@ Unicode is normalized and common URL encoding is decoded before checks. Refusal 
 
 **Approve once** is bound to the server, tool, and canonical argument digest, then consumed. Changing one argument invalidates it. The approval UI shows the complete bounded payload. **Allow for this session** is a separate deliberate action.
 
-### 5. Live schemas are enforced before transport
+### 5. MCP contracts are enforced in both directions
 
 Arguments are checked against the discovered MCP `inputSchema`: required fields, types, unknown properties when disallowed, nesting depth, collection size, string length, and total payload bounds. Invalid calls never reach the server.
+
+When a tool declares an MCP `outputSchema`, Nex exposes its return fields to the planner so later steps can use real `$step.field` dataflow instead of guessing IDs. A successful response must then include matching `structuredContent`; missing or wrong-typed output becomes `invalid_output`, is audited as failure, and cannot count as production evidence. The Capabilities UI shows both **Input** and **Returns (validated)** contracts.
 
 ### 6. Transports assume hostile input
 
@@ -368,7 +421,7 @@ This is execution state, not exposed chain-of-thought. Nex shows what it is doin
 
 ### Capabilities
 
-The Capabilities view connects/disconnects/reconnects/removes servers, exposes live health and latency, lists discovered tools and schemas, shows classification, and makes server trust explicit.
+The Capabilities view connects/disconnects/reconnects/removes servers, exposes live health and latency, lists discovered input/output contracts, shows classification, and makes server trust explicit. It also calculates **Game-production MCP readiness** before a run, with chips for every evidence gate and production discipline plus explicit hard blockers.
 
 ### Conversation
 
@@ -423,10 +476,11 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_ALLOW_CODE_EXECUTION` | empty | Servers explicitly approved for engine/language code tools |
 | `NEX_ALLOW_CONFIRMATIONS` | empty | Servers pre-approved for non-code confirmation categories |
 | `NEX_CAPABILITY_FILE` | `~/.nex/capabilities.json` | Operator classification pins; escalation only |
-| `NEX_MAX_STEPS` | `24` | Maximum executed steps per run |
-| `NEX_MAX_REPLANS` | `2` | Maximum structural replans |
-| `NEX_MAX_QUALITY_PASSES` | `1` | Maximum evidence/polish passes after game work |
-| `NEX_RUN_BUDGET_S` | `900` | Run wall-clock budget |
+| `NEX_MAX_STEPS` | `64` | Maximum executed tool steps per run |
+| `NEX_MAX_REPLANS` | `3` | Maximum structural replans |
+| `NEX_MAX_QUALITY_PASSES` | `1` | Maximum final evidence/polish passes after game work |
+| `NEX_MAX_PRODUCTION_STAGES` | `8` | Milestone-plan cap for studio-scale game goals |
+| `NEX_RUN_BUDGET_S` | `1800` | Run wall-clock budget |
 | `NEX_APPROVAL_TIMEOUT_S` | `600` | Approval wait budget |
 | `NEX_HOST` / `NEX_PORT` | `0.0.0.0` / `8787` | HTTP bind address |
 | `NEX_HOME` | `~/.nex` | Persistent state directory |
@@ -442,16 +496,17 @@ cd nex
 python3 tests/run_all.py
 ```
 
-Ten suites run in isolated processes because several intentionally configure different state homes and policies:
+Eleven suites run in isolated processes because several intentionally configure different state homes and policies:
 
 | Suite | What it proves |
 | --- | --- |
 | `test_architecture` | Dependency direction; metadata-only registry; no local tool surface; subprocess use confined to MCP stdio transport; immutable MCP-only boundary |
 | `test_capability` | Severity-max classification, editor vocabulary, code-execution distinctions, confirmation gates |
 | `test_transport` | NDJSON/LSP framing, fragmented reads, limits, process lifecycle, HTTP round-trips, hostile responses |
-| `test_manager` | Server lifecycle, trust, schema validation, policy path, approvals, audit, persistence |
+| `test_manager` | Server lifecycle, trust, input/output contract validation, policy path, approvals, audit, persistence |
 | `test_agent_loop` | Planning, DAG validation, references, retries, argument repair, replanning, budgets, cancellation, reports |
-| `test_quality` | Game intent detection, live quality-gate mapping, evidence-only scoring, unavailable gates, bounded corrective polish |
+| `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
+| `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
@@ -479,6 +534,7 @@ Nexofficial/
     ├── .env.example                providers, MCP, policy, budgets, server
     ├── agent/
     │   ├── loop.py                 plan → act → observe → evaluate → adapt
+    │   ├── production.py           eight-stage studio program + MCP readiness
     │   ├── quality.py              production contracts, gates, scorecards
     │   ├── model_planner.py        model plan + deterministic live validation
     │   ├── planner.py              conservative no-model fallback

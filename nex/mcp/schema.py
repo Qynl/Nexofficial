@@ -115,10 +115,10 @@ def validate_arguments(schema: Any, arguments: Any) -> List[str]:
             required = required if isinstance(required, list) else []
             for key in required[:1024]:
                 if isinstance(key, str) and key not in value:
-                    add("%s.%s is required" % (path, key))
+                    add("%s.%s is required" % (path, key[:120]))
             additional = spec.get("additionalProperties", True)
             for key, child in list(value.items())[:2048]:
-                child_path = "%s.%s" % (path, key)
+                child_path = "%s.%s" % (path, str(key)[:120])
                 if key in props:
                     walk(props[key], child, child_path, depth + 1)
                 elif additional is False:
@@ -162,3 +162,24 @@ def validate_arguments(schema: Any, arguments: Any) -> List[str]:
 
     walk(schema, arguments, "$", 0)
     return errors
+
+
+def validate_tool_output(schema: Any, result: Any) -> List[str]:
+    """Validate MCP ``structuredContent`` against a tool's outputSchema.
+
+    MCP servers are untrusted and outputSchema is a contract, not decoration.
+    When a tool declares one, a successful call must return structuredContent
+    that satisfies it. Text content may accompany that data, but cannot stand
+    in for the declared machine-readable result.
+    """
+    if not isinstance(schema, dict) or not schema:
+        return []
+    if not isinstance(result, dict):
+        return ["tool declared outputSchema but returned no result object"]
+    if "structuredContent" not in result:
+        return ["tool declared outputSchema but returned no structuredContent"]
+    structured = result.get("structuredContent")
+    if not isinstance(structured, dict):
+        return ["structuredContent must be a JSON object"]
+    errors = validate_arguments(schema, structured)
+    return [e.replace("$", "$.structuredContent", 1) for e in errors]

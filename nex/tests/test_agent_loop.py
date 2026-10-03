@@ -30,6 +30,7 @@ os.environ.setdefault("NEX_HOME", "/tmp/nex-loop-tests")
 
 from agent.mock_mcp import MockMCPServer, server_view          # noqa: E402
 from agent.loop import AgentRun, RunCoordinator                # noqa: E402
+from agent.model_planner import plan_to_graph                   # noqa: E402
 from mcp.registry import CapabilityRegistry                    # noqa: E402
 from mcp.capability import capability_for_tool                 # noqa: E402
 from mcp.policy import authorize                               # noqa: E402
@@ -146,6 +147,10 @@ ECHO_TOOLS = [
                      "properties": {"id": {"type": "string"}}}},
     {"name": "fail_always", "description": "Always fails.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "inspect_nested", "description": "Inspect nested structured ids.",
+     "inputSchema": {"type": "object",
+                     "properties": {"config": {"type": "object"}},
+                     "required": ["config"]}},
 ]
 
 
@@ -178,7 +183,8 @@ class PlanningTests(unittest.TestCase):
                     '{"name": "No server", "server": "nope", "tool": "echo",'
                     ' "args": {}}]}')
         report = AgentRun("t3", "say hi", self.mgr, llm=llm).run()
-        self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["status"], "partial")
+        self.assertTrue(any("dropped" in r for r in report["reasons"]))
         names = [s["name"] for s in report["completed"]]
         self.assertEqual(names, ["Say it"])
 
@@ -196,6 +202,7 @@ class PlanningTests(unittest.TestCase):
         report = AgentRun("t4b", "perform zqx", self.mgr, llm=llm).run()
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(self.mgr.calls, [])
+        self.assertTrue(any("dropped" in r for r in report["reasons"]))
 
     def test_cyclic_model_plan_never_reports_completed(self):
         def llm(prompt):
@@ -214,7 +221,8 @@ class PlanningTests(unittest.TestCase):
                     '{"name": "Make", "server": "echo", "tool": "create_thing",'
                     ' "args": {"name": "gizmo"}},'
                     '{"name": "Remove", "server": "echo", "tool": "delete_thing",'
-                    ' "args": {"id": "$Make.id"}}]}')
+                    ' "args": {"id": "$Make.id"},'
+                    ' "depends_on": ["Make"]}]}')
         # destructive step: standing approval, so the sync test doesn't wait
         self.mgr.approve_tool("echo", "delete_thing")
         report = AgentRun("t5", "make and remove", self.mgr, llm=llm).run()
@@ -227,6 +235,45 @@ class PlanningTests(unittest.TestCase):
                        if t == "delete_thing"][0]
         self.assertNotIn("$Make", str(delete_args),
                          "references must be resolved, not passed raw")
+
+    def test_nested_references_are_resolved_recursively(self):
+        def llm(prompt):
+            return ('{"steps": ['
+                    '{"name":"make","tool":"echo.create_thing",'
+                    ' "args":{"name":"car"}},'
+                    '{"name":"inspect","tool":"echo.inspect_nested",'
+                    ' "args":{"config":{"actors":[{"id":"$make.id"}]}},'
+                    ' "depends_on":["make"]}]}')
+        report = AgentRun("t5b", "create and inspect nested", self.mgr,
+                          llm=llm).run()
+        self.assertEqual(report["status"], "completed")
+        args = [a for _, name, a in self.mgr.calls
+                if name == "inspect_nested"][0]
+        self.assertEqual(args["config"]["actors"][0]["id"], "thing_1")
+
+    def test_reference_without_declared_dependency_fails_closed(self):
+        def llm(prompt):
+            return ('{"steps": ['
+                    '{"name":"make","tool":"echo.create_thing",'
+                    ' "args":{"name":"car"}},'
+                    '{"name":"inspect","tool":"echo.inspect_nested",'
+                    ' "args":{"config":{"id":"$make.id"}}}]}')
+        report = AgentRun("t5c", "create then inspect undeclared", self.mgr,
+                          llm=llm).run()
+        self.assertNotEqual(report["status"], "completed")
+        called = [name for _, name, _ in self.mgr.calls]
+        self.assertEqual(called, ["create_thing"])
+        self.assertTrue(any("dropped" in r for r in report["reasons"]))
+
+    def test_replan_cannot_shadow_a_historical_step_name(self):
+        plan = {"steps": [{"name": "made", "tool": "echo.echo",
+                           "args": {"text": "again"}}]}
+        graph = plan_to_graph(
+            plan, self.mgr.registry(), external_refs={"made": "old-id"},
+            id_prefix="r1_")
+        self.assertEqual(graph.all(), [])
+        self.assertTrue(any("historical" in item
+                            for item in graph.plan_meta["dropped"]))
 
 
 class RecoveryTests(unittest.TestCase):
@@ -255,6 +302,23 @@ class RecoveryTests(unittest.TestCase):
                           budget_s=0.05, max_steps=2).run()
         self.assertIn(report["status"],
                       ("failed", "partial", "cancelled", "blocked"))
+
+    def test_step_budget_is_partial_not_user_cancellation(self):
+        def llm(messages):
+            if "planning mind" in messages[0]["content"]:
+                return ('{"steps": ['
+                        '{"name":"one","tool":"echo.echo",'
+                        ' "args":{"text":"one"}},'
+                        '{"name":"two","tool":"echo.echo",'
+                        ' "args":{"text":"two"}}]}')
+            return "Budget reached after useful work."
+        mgr = FakeManager([self.mock])
+        report = AgentRun("r3b", "perform two echoes", mgr, llm=llm,
+                          max_steps=1).run()
+        self.assertEqual(report["status"], "partial")
+        self.assertNotEqual(report["status"], "cancelled")
+        self.assertIn("step budget", " ".join(report["reasons"]))
+        self.assertEqual(len(mgr.calls), 1)
 
     def test_cancellation_stops(self):
         # Park the call inside the "transport" so cancel arrives mid-step.

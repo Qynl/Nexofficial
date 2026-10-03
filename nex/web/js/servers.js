@@ -31,6 +31,7 @@ export function showServersView() {
   store.set({ view: 'servers' });
   renderServerList();
   api.servers().then((s) => store.set({ servers: s })).catch(() => {});
+  refreshProductionReadiness();
 }
 
 export function showChatView() {
@@ -38,6 +39,61 @@ export function showChatView() {
   document.getElementById('view-servers').hidden = true;
   document.getElementById('view-chat').hidden = false;
   store.set({ view: 'chat' });
+}
+
+async function refreshProductionReadiness() {
+  try {
+    renderProductionReadiness(await api.productionReadiness());
+  } catch {
+    const el = document.getElementById('production-readiness');
+    if (el) el.hidden = true;
+  }
+}
+
+function renderProductionReadiness(data) {
+  const el = document.getElementById('production-readiness');
+  if (!el) return;
+  el.hidden = false;
+  el.innerHTML = '';
+
+  const top = document.createElement('div');
+  top.className = 'pr-head';
+  const label = document.createElement('strong');
+  label.textContent = 'Game-production MCP readiness';
+  const score = document.createElement('span');
+  score.className = 'pr-score';
+  score.dataset.ready = data.ready_for_large_scope ? '1' : '0';
+  score.textContent = `${Number(data.score || 0)}/100`;
+  top.appendChild(label);
+  top.appendChild(score);
+  el.appendChild(top);
+
+  const desc = document.createElement('p');
+  desc.textContent = data.ready_for_large_scope
+    ? 'The connected tool surface covers the minimum evidence loop for large staged builds.'
+    : 'Nex can still do useful work, but this is not yet a complete virtual game studio.';
+  el.appendChild(desc);
+
+  const checks = document.createElement('div');
+  checks.className = 'pr-checks';
+  const entries = [
+    ...Object.entries(data.gates || {}),
+    ...Object.entries(data.disciplines || {}),
+  ];
+  for (const [name, ok] of entries) {
+    const chip = document.createElement('span');
+    chip.dataset.ok = ok ? '1' : '0';
+    chip.textContent = `${ok ? '✓' : '—'} ${name.replaceAll('_', ' ')}`;
+    checks.appendChild(chip);
+  }
+  el.appendChild(checks);
+
+  if ((data.blockers || []).length) {
+    const blockers = document.createElement('div');
+    blockers.className = 'pr-blockers';
+    blockers.textContent = `Hard gaps: ${data.blockers.join(', ')}`;
+    el.appendChild(blockers);
+  }
 }
 
 /* ─── list ───────────────────────────────────────────────────── */
@@ -233,6 +289,7 @@ function serverCard(s) {
 
   function refresh() {
     api.servers().then((res) => store.set({ servers: res })).catch(() => {});
+    refreshProductionReadiness();
   }
 }
 
@@ -268,7 +325,13 @@ function toolCard(t) {
   if (t.schema && Object.keys(t.schema.properties || {}).length) {
     const pre = document.createElement('div');
     pre.className = 't-schema';
-    pre.textContent = fmtSchema(t.schema);
+    pre.textContent = `Input\n${fmtSchema(t.schema)}`;
+    el.appendChild(pre);
+  }
+  if (t.output_schema && Object.keys(t.output_schema.properties || {}).length) {
+    const pre = document.createElement('div');
+    pre.className = 't-schema';
+    pre.textContent = `Returns (validated)\n${fmtSchema(t.output_schema)}`;
     el.appendChild(pre);
   }
   return el;
@@ -417,6 +480,7 @@ function addServerDialog() {
             'Discovering its tools now.');
       const res = await api.servers();
       store.set({ servers: res });
+      refreshProductionReadiness();
     } catch (err) {
       errEl.textContent = err.message + (err.detail ? ' — ' + err.detail : '');
       errEl.hidden = false;

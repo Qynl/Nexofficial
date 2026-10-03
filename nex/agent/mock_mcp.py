@@ -93,7 +93,9 @@ def server_view(name: str, mock: MockMCPServer,
         cap = capability_for_tool(t)
         tools.append(ToolView(
             server=name, name=t.get("name", ""), full_name=name + "." + t.get("name", ""),
-            description=t.get("description", ""), schema=t.get("inputSchema", {}) or {},
+            description=t.get("description", ""),
+            schema=t.get("inputSchema", {}) or {},
+            output_schema=t.get("outputSchema", {}) or {},
             capability=cap, annotations=t.get("annotations", {}) or {},
         ))
     return ServerView(name=name, tools=tools, protocol=protocol,

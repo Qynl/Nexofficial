@@ -719,7 +719,11 @@ class Upstream:
                     raise UpstreamError("server returned duplicate tool name %r"
                                         % name)
                 schema = tool.get("inputSchema")
+                output_schema = tool.get("outputSchema")
                 if schema is not None and not isinstance(schema, dict):
+                    continue
+                if output_schema is not None and not isinstance(
+                        output_schema, dict):
                     continue
                 clean = dict(tool)
                 clean["description"] = (tool.get("description")
@@ -729,6 +733,8 @@ class Upstream:
                                         if isinstance(tool.get("annotations"), dict)
                                         else {})
                 clean["inputSchema"] = schema or {}
+                if output_schema is not None:
+                    clean["outputSchema"] = output_schema
                 out.append(clean)
                 seen_names.add(name)
                 if len(out) > _MAX_TOOLS:

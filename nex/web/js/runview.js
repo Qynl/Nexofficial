@@ -103,6 +103,11 @@ function renderCard(card) {
   body.className = 'run-body';
   const inner = document.createElement('div');
   inner.className = 'run-body-inner';
+  const program = document.createElement('section');
+  program.className = 'run-program';
+  program.hidden = true;
+  program.setAttribute('aria-label', 'Production program');
+  inner.appendChild(program);
   const steps = document.createElement('div');
   steps.className = 'run-steps';
   inner.appendChild(steps);
@@ -114,6 +119,7 @@ function renderCard(card) {
   body.appendChild(inner);
   el.appendChild(body);
   card.stepsEl = steps;
+  card.programEl = program;
   card.qualityEl = quality;
 
   updateStatusLine(card);
@@ -317,6 +323,65 @@ export function onRunProgress(ev) {
 }
 
 export function onRunEval() { /* verdict details stay internal */ }
+
+export function onRunProgram(ev) {
+  const card = runCards.get(ev.run_id);
+  const program = ev.program || {};
+  if (!card || !program.active || !card.programEl) return;
+  card.program = program;
+  const el = card.programEl;
+  el.hidden = false;
+  el.innerHTML = '';
+
+  const current = program.current || {};
+  const head = document.createElement('div');
+  head.className = 'program-head';
+  const title = document.createElement('strong');
+  title.textContent = 'Studio program';
+  const stage = document.createElement('span');
+  stage.className = 'program-stage-count';
+  stage.textContent = program.complete ? 'all stages complete'
+    : `stage ${Number(program.current_index || 0) + 1}/${program.stages_total || 0}`;
+  head.appendChild(title);
+  head.appendChild(stage);
+  el.appendChild(head);
+
+  const name = document.createElement('div');
+  name.className = 'program-current';
+  name.textContent = current.label || 'Preparing production stage';
+  el.appendChild(name);
+
+  const stages = document.createElement('div');
+  stages.className = 'program-rail';
+  const completeCount = (program.completed_stages || []).length;
+  for (let i = 0; i < Number(program.stages_total || 0); i += 1) {
+    const dot = document.createElement('span');
+    dot.dataset.state = i < completeCount ? 'done'
+      : i === Number(program.current_index || 0) ? 'current' : 'future';
+    dot.title = i < completeCount ? 'Stage complete'
+      : i === Number(program.current_index || 0) ? current.label || 'Current stage'
+      : 'Future stage';
+    stages.appendChild(dot);
+  }
+  el.appendChild(stages);
+
+  const readiness = program.readiness || {};
+  const note = document.createElement('div');
+  note.className = 'program-readiness';
+  note.textContent = `MCP production readiness ${Number(readiness.score || 0)}/100`;
+  if ((readiness.blockers || []).length) {
+    note.textContent += ` · blockers: ${readiness.blockers.join(', ')}`;
+  }
+  el.appendChild(note);
+
+  const review = (program.stage_reviews || {})[current.id];
+  if (review && !review.passed) {
+    const missing = document.createElement('div');
+    missing.className = 'program-missing';
+    missing.textContent = `Stage evidence missing: ${(review.missing || []).join(', ')}`;
+    el.appendChild(missing);
+  }
+}
 
 export function onRunQuality(ev) {
   const card = runCards.get(ev.run_id);

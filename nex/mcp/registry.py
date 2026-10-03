@@ -23,6 +23,7 @@ class ToolView:
     full_name: str                 # server.name + "." + name
     description: str
     schema: Dict[str, Any]
+    output_schema: Dict[str, Any]
     capability: ToolCapability
     annotations: Dict[str, Any] = field(default_factory=dict)
 
@@ -32,6 +33,8 @@ class ToolView:
             "name": self.name,
             "full_name": self.full_name,
             "description": (self.description or "")[:240],
+            "input_schema": self.schema,
+            "output_schema": self.output_schema,
             "category": self.capability.category,
             "capability": self.capability.to_dict(),
         }
@@ -163,6 +166,7 @@ class CapabilityRegistry:
                     full_name=s.name + "." + t.get("name", ""),
                     description=t.get("description", ""),
                     schema=t.get("inputSchema", {}) or {},
+                    output_schema=t.get("outputSchema", {}) or {},
                     capability=cap,
                     annotations=t.get("annotations", {}) or {},
                 ))
@@ -196,6 +200,7 @@ class CapabilityRegistry:
                     full_name=up.name + "." + t.get("name", ""),
                     description=t.get("description", ""),
                     schema=t.get("inputSchema", {}) or {},
+                    output_schema=t.get("outputSchema", {}) or {},
                     capability=cap,
                     annotations=t.get("annotations", {}) or {},
                 ))
