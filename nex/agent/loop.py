@@ -42,6 +42,12 @@ from agent.events import (
 from agent.model_planner import model_driven_planner, validate_plan_deep
 from agent.planner import plan as skeleton_plan
 from agent.prompts import EVALUATOR_SYSTEM, SUMMARIZER_SYSTEM
+from agent.quality import (
+    assess as assess_quality,
+    correction_note as quality_correction_note,
+    planning_brief as quality_planning_brief,
+    profile_for_goal,
+)
 from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING, WAITING,
 )
@@ -70,6 +76,7 @@ def _env_float(name: str, default: float) -> float:
 
 DEFAULT_MAX_STEPS = _env_int("NEX_MAX_STEPS", 24)
 DEFAULT_MAX_REPLANS = _env_int("NEX_MAX_REPLANS", 2)
+DEFAULT_MAX_QUALITY_PASSES = _env_int("NEX_MAX_QUALITY_PASSES", 1)
 DEFAULT_BUDGET_S = _env_float("NEX_RUN_BUDGET_S", 900.0)
 DEFAULT_APPROVAL_TIMEOUT_S = _env_float("NEX_APPROVAL_TIMEOUT_S", 600.0)
 
@@ -182,6 +189,7 @@ class AgentRun:
                  conversation_id: Optional[str] = None,
                  max_steps: int = DEFAULT_MAX_STEPS,
                  max_replans: int = DEFAULT_MAX_REPLANS,
+                 max_quality_passes: int = DEFAULT_MAX_QUALITY_PASSES,
                  budget_s: float = DEFAULT_BUDGET_S,
                  on_summary: Optional[Callable] = None):
         self.run_id = run_id
@@ -192,6 +200,7 @@ class AgentRun:
         self.conversation_id = conversation_id
         self.max_steps = max_steps
         self.max_replans = max_replans
+        self.max_quality_passes = max(0, max_quality_passes)
         self.budget_s = budget_s
         self.on_summary = on_summary      # (run, text) -> None
         self._stop = threading.Event()
@@ -204,6 +213,8 @@ class AgentRun:
         self.started_at = time.time()
         self._steps_executed = 0
         self._replans = 0
+        self._quality_passes = 0
+        self._quality_profile = profile_for_goal(goal)
         self._eval_note = ""
         self.thread: Optional[threading.Thread] = None
 
@@ -255,6 +266,12 @@ class AgentRun:
             if self._stop.is_set():
                 break
             if self.graph.is_terminal():
+                # A successful implementation is not automatically a
+                # production-quality game.  Audit distinct evidence gates and
+                # use one bounded corrective plan when suitable live tools
+                # were available but omitted.
+                if self._try_quality_pass():
+                    continue
                 break
             if not progressed:
                 # Nothing ready and not terminal — stuck deps or all
@@ -298,7 +315,9 @@ class AgentRun:
         reg = self.manager.registry()
         graph, _plan = model_driven_planner(
             self.goal, reg, llm=self.llm,
-            note=self._eval_note)
+            note=self._eval_note,
+            quality_brief=quality_planning_brief(
+                self._quality_profile, reg))
         if not graph.all():
             graph = skeleton_plan(self.goal, reg)
         if graph.all():
@@ -379,10 +398,13 @@ class AgentRun:
 
     def _task_by_name(self, name: str) -> Optional[Task]:
         name_l = (name or "").lower()
-        for t in self.graph.all():
+        # Newer re-plan tasks come after historical successes. Prefer them
+        # when a corrective plan reuses a human slug such as "verify-game".
+        tasks = self.graph.all()
+        for t in reversed(tasks):
             if t.slug.lower() == name_l or t.id == name_l:
                 return t
-        for t in self.graph.all():
+        for t in reversed(tasks):
             if t.name.lower() == name_l:
                 return t
         return None
@@ -412,7 +434,7 @@ class AgentRun:
 
         # --- user approval --------------------------------------------------
         if "needs_confirmation" in outcome:
-            approved = self._await_approval(task, outcome)
+            approved = self._await_approval(task, outcome, args)
             if self._stop.is_set():
                 return
             if not approved:
@@ -426,6 +448,11 @@ class AgentRun:
             outcome = self.manager.call(
                 task.server, task.tool, args,
                 audit_context={"run": self.run_id, "step": task.id})
+            if "needs_confirmation" in outcome:
+                # Fail closed if a buggy/custom manager did not consume the
+                # exact approval. Never reinterpret another prompt as success.
+                outcome = {"refused":
+                           "the one-time approval did not match this exact call"}
 
         # --- refusal (policy) -------------------------------------------------
         if "refused" in outcome:
@@ -458,7 +485,8 @@ class AgentRun:
                    preview=result_preview(result))
         self._emit("run.step", step=task.to_public())
 
-    def _await_approval(self, task: Task, outcome: Dict[str, Any]) -> bool:
+    def _await_approval(self, task: Task, outcome: Dict[str, Any],
+                        resolved_args: Dict[str, Any]) -> bool:
         req = ApprovalRequest(task, outcome.get("needs_confirmation", ""),
                               outcome.get("decision", {}))
         with self._approval_lock:
@@ -466,7 +494,10 @@ class AgentRun:
         self.graph.mark_waiting(task.id)
         self._emit("run.waiting", kind="approval",
                    step=task.to_public(), tool=task.tool, server=task.server,
-                   args=_public_args(task.args), reason=req.reason,
+                   # Approval is for the resolved arguments, not the plan's
+                   # pre-reference placeholders. The policy caps inspected
+                   # payloads so this remains bounded.
+                   args=resolved_args, reason=req.reason,
                    decision=req.decision)
         self._emit("run.phase", phase="waiting",
                    detail="Waiting for your approval")
@@ -479,8 +510,15 @@ class AgentRun:
                            detail="Approval timed out — continuing without")
                 return False
         answer = req.answer or {"approved": False}
-        if answer.get("always") and answer.get("approved"):
-            self.manager.approve_tool(task.server, task.tool)
+        if answer.get("approved"):
+            if answer.get("always"):
+                self.manager.approve_tool(task.server, task.tool)
+            else:
+                # One-shot approval is argument-bound and consumed by the
+                # immediately retried manager call.
+                approve_once = getattr(self.manager, "approve_once", None)
+                if callable(approve_once):
+                    approve_once(task.server, task.tool, resolved_args)
         self.graph.mark_pending(task.id)
         self._emit("run.resumed", step_id=task.id,
                    approved=bool(answer.get("approved")))
@@ -642,6 +680,10 @@ class AgentRun:
         failures = self.context.failure_block()
         if failures:
             parts.append("\nOpen failures:\n" + failures)
+        scorecard = self._quality_scorecard()
+        if scorecard.get("active"):
+            parts.append("\nGame-production evidence scorecard:\n" +
+                         _jsonish(scorecard))
         parts.append(
             "\nDecide: done? continue? replan? stop? Reply with the JSON "
             "object only.")
@@ -668,6 +710,47 @@ class AgentRun:
             self._eval_note = note
         return verdict
 
+    # ----- production quality review -------------------------------------------
+
+    def _quality_scorecard(self) -> Dict[str, Any]:
+        """Assess only successful calls to tools in the current live registry."""
+        return assess_quality(self._quality_profile, self.manager.registry(),
+                              self.graph.all())
+
+    def _try_quality_pass(self) -> bool:
+        """Start one bounded evidence/polish pass when it can improve proof.
+
+        Missing *capabilities* do not cause a loop: they are reported as
+        unavailable. Only gates with suitable live tools are correctable.
+        """
+        scorecard = self._quality_scorecard()
+        if not scorecard.get("active"):
+            return False
+        self._emit("run.quality", scorecard=scorecard)
+        if scorecard.get("passed"):
+            return False
+        if not scorecard.get("correctable"):
+            return False
+        if self.llm is None or self._quality_passes >= self.max_quality_passes:
+            return False
+        if self._replans >= self.max_replans or self._check_stop():
+            return False
+        note = quality_correction_note(scorecard)
+        if not note:
+            return False
+        self._eval_note = note
+        self._emit("run.phase", phase="evaluating",
+                   detail="Reviewing production evidence (%d/100)" %
+                          scorecard.get("score", 0))
+        if not self._replan({
+                "done": False,
+                "adjust": "replan",
+                "reason": "production evidence is incomplete",
+                "note": note}):
+            return False
+        self._quality_passes += 1
+        return True
+
     # ----- adaptation ------------------------------------------------------------
 
     def _replan(self, verdict: Dict[str, Any]) -> bool:
@@ -679,9 +762,11 @@ class AgentRun:
         self._emit("run.phase", phase="adapting",
                    detail="Adjusting the plan (attempt %d)" % self._replans)
         completed = [t for t in self.graph.all() if t.status == SUCCESS]
+        completed_refs = {(t.slug or t.id): t.id for t in completed}
         summary = "\n".join(
-            "- DONE: %s (%s) — %s" % (t.name, t.tool,
-                                      result_preview(t.result, 100))
+            "- DONE $%s: %s (%s) — %s" %
+            (t.slug or t.id, t.name, t.tool,
+             result_preview(t.result, 100))
             for t in completed)
         note = self._eval_note or verdict.get("note") or verdict.get("reason")
         feedback = self.context.failures[-6:]
@@ -692,19 +777,27 @@ class AgentRun:
                   "repeat it):\n%s\nWhat to change: %s"
                   % (verdict.get("reason", ""), summary or "(nothing)",
                      note or "")),
-            feedback=feedback)
+            feedback=feedback,
+            quality_brief=quality_planning_brief(
+                self._quality_profile, reg),
+            completed_refs=completed_refs,
+            id_prefix="r%d_" % self._replans)
         if graph is None or not graph.all():
             return False
         # Keep completed history; adopt the new pending steps.
         new_graph = TaskGraph()
         for t in completed:
-            t2 = Task(id=t.id, name=t.name, server=t.server, tool=t.tool,
+            t2 = Task(id=t.id, name=t.name, slug=t.slug,
+                      server=t.server, tool=t.tool,
                       args=t.args, deps=[], status=SUCCESS,
                       result=t.result, expect=t.expect, why=t.why)
             new_graph.add(t2)
+        # The replan planner has already namespaced new task ids while leaving
+        # dependencies on historical success ids intact.
         for t in graph.all():
             if t.status == PENDING:
                 new_graph.add(t)
+        new_graph.plan_meta = dict(getattr(graph, "plan_meta", {}) or {})
         if not new_graph.pending():
             return False
         self.graph = new_graph
@@ -727,13 +820,15 @@ class AgentRun:
         completed = [t for t in tasks if t.status == SUCCESS]
         failed = [t for t in tasks if t.status == FAILED]
         skipped = [t for t in tasks if t.status == SKIPPED]
+        unfinished = [t for t in tasks
+                      if t.status not in (SUCCESS, FAILED, SKIPPED)]
         if status_override is not None:
             status = status_override
         elif not tasks:
             status = STATUS_BLOCKED
-        elif not completed and failed:
+        elif not completed and (failed or unfinished):
             status = STATUS_FAILED
-        elif failed or skipped:
+        elif failed or skipped or unfinished:
             status = STATUS_PARTIAL
         else:
             status = STATUS_COMPLETED
@@ -743,6 +838,18 @@ class AgentRun:
         if status == STATUS_BLOCKED:
             out_reasons.append(
                 "no executable plan could be made for this goal")
+        quality = self._quality_scorecard()
+        if quality.get("active") and not quality.get("passed"):
+            # A graph where every mutation returned successfully can still be
+            # unproven as a playable, visual, stable product. Preserve that
+            # distinction in the machine-readable outcome.
+            if status == STATUS_COMPLETED:
+                status = STATUS_PARTIAL
+            missing_gates = quality.get("missing") or []
+            if missing_gates:
+                out_reasons.append(
+                    "production evidence incomplete: " +
+                    ", ".join(missing_gates))
         return {
             "status": status,
             "goal": self.goal,
@@ -750,12 +857,17 @@ class AgentRun:
             "completed": [{"name": t.name, "tool": t.tool,
                            "preview": result_preview(t.result)}
                           for t in completed],
-            "failed": [{"name": t.name, "tool": t.tool,
-                        "error": (t.error or "")[:200]} for t in failed],
+            "failed": ([{"name": t.name, "tool": t.tool,
+                         "error": (t.error or "")[:200]} for t in failed]
+                       + [{"name": t.name, "tool": t.tool,
+                           "error": "step was not executed (plan stalled)"}
+                          for t in unfinished]),
             "skipped": [{"name": t.name, "note": t.notes} for t in skipped],
             "reasons": out_reasons,
             "missing": missing,
             "replans": self._replans,
+            "quality_passes": self._quality_passes,
+            "quality": quality,
             "duration_s": round(time.time() - self.started_at, 1),
         }
 
@@ -775,6 +887,8 @@ class AgentRun:
         self.status = report["status"]
         self._emit("run.phase", phase="finishing",
                    detail="Writing the summary")
+        if (report.get("quality") or {}).get("active"):
+            self._emit("run.quality", scorecard=report["quality"], final=True)
         text = self._summarize(report)
         self._emit("run.completed", report=report, summary=text)
         if self.on_summary is not None:
@@ -810,6 +924,7 @@ class AgentRun:
             "started_at": self.started_at,
             "steps": [t.to_public() for t in self.graph.all()],
             "waiting": (self._approval is not None),
+            "quality": self._quality_scorecard(),
         }
 
 
@@ -857,6 +972,20 @@ def _fallback_summary(report: Dict[str, Any]) -> str:
     skipped = report.get("skipped") or []
     if skipped:
         lines.append("\nSkipped: %d step(s)" % len(skipped))
+    quality = report.get("quality") or {}
+    if quality.get("active"):
+        gates = quality.get("gates") or []
+        passed = sum(1 for g in gates if g.get("status") == "passed")
+        lines.append("\nProduction evidence: **%d/100** (%d/%d gates)." %
+                     (quality.get("score", 0), passed, len(gates)))
+        if quality.get("missing"):
+            lines.append("Unverified: %s." %
+                         ", ".join(quality.get("missing") or []))
+        if quality.get("unavailable"):
+            lines.append("No connected MCP capability for: %s." %
+                         ", ".join(quality.get("unavailable") or []))
+        lines.append("This is an evidence score, not a guarantee of AAA or "
+                     "commercial quality.")
     return "\n".join(lines)
 
 

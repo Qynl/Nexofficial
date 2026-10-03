@@ -83,7 +83,8 @@ def validate_plan_tools(plan: Dict[str, Any],
     valid, missing = [], []
     for s in plan.get("steps", []):
         tool = s.get("tool", "")
-        tv = _lookup(registry, tool)
+        server = str(s.get("server") or "").strip()
+        tv = _lookup(registry, tool, server=server or None)
         if tv is None:
             missing.append(tool)
         else:
@@ -92,21 +93,25 @@ def validate_plan_tools(plan: Dict[str, Any],
 
 
 def _lookup(registry, tool: str, server: str = None):
-    """Find a tool by name. With `server`, only that server counts —
-    a plan naming a server that does not expose the tool is invalid."""
+    """Resolve a tool without ever discarding a claimed namespace.
+
+    Falling back from ``evil.echo`` to the first bare ``echo`` silently
+    changed the server the model named. A qualified name is now exact; an
+    explicit ``server`` field must agree with its prefix.
+    """
+    if not isinstance(tool, str) or not tool:
+        return None
     if server:
         sv = registry.server(server)
-        if sv is not None:
-            tv = sv.by_name(tool)
-            if tv is not None:
-                return tv
-            if "." in tool:
-                return sv.by_name(tool.split(".", 1)[-1])
-        return None
-    tv = registry.by_name(tool)
-    if tv is None and "." in tool:
-        tv = registry.by_name(tool.split(".", 1)[-1])
-    return tv
+        if sv is None:
+            return None
+        if "." in tool:
+            prefix, bare = tool.split(".", 1)
+            if prefix != server:
+                return None
+            return sv.by_name(bare)
+        return sv.by_name(tool)
+    return registry.by_name(tool)
 
 
 def validate_plan_deep(plan: Dict[str, Any],
@@ -128,7 +133,8 @@ def validate_plan_deep(plan: Dict[str, Any],
     for i, s in enumerate(plan.get("steps", [])):
         tool = s.get("tool", "")
         label = s.get("name") or tool or ("step_%d" % i)
-        tv = _lookup(registry, tool)
+        server = str(s.get("server") or "").strip()
+        tv = _lookup(registry, tool, server=server or None)
         if tv is None:
             errors.append("step '%s': tool '%s' not found on any connected "
                           "server" % (label, tool))
@@ -166,61 +172,117 @@ def validate_plan_deep(plan: Dict[str, Any],
     return errors, warnings
 
 
-def plan_to_graph(plan: Dict[str, Any], registry) -> TaskGraph:
-    """Convert a parsed plan into a TaskGraph.
+def plan_to_graph(plan: Dict[str, Any], registry,
+                  external_refs: Optional[Dict[str, str]] = None,
+                  id_prefix: str = "") -> TaskGraph:
+    """Convert a model plan into a validated, executable DAG.
 
-    Steps referencing tools that don't exist in the registry are
-    dropped (the caller reports them as missing capability). Dependency
-    names are resolved to ids; unresolvable ones are ignored.
+    Missing tools, duplicate names, dangling dependencies and dependency
+    cycles fail closed; dependency names are never silently discarded.
+    ``external_refs`` maps successful historical slugs to task ids during a
+    replan, allowing corrective work to consume prior outputs without rerunning
+    the producing tool.
     """
     g = TaskGraph()
-    name_to_id: Dict[str, str] = {}
+    external_refs = dict(external_refs or {})
     steps = plan.get("steps", []) or []
-    kept: List[Dict[str, Any]] = []
-
+    candidates = []
     dropped: List[str] = []
-    for i, s in enumerate(steps):
+    names = set()
+
+    for i, s in enumerate(steps[:200]):
+        if not isinstance(s, dict):
+            dropped.append("step_%d: step must be an object" % i)
+            continue
+        name = str(s.get("name") or "s%d" % i)
+        if name in names:
+            dropped.append("%s: duplicate step name" % name)
+            continue
+        names.add(name)
+        if not isinstance(s.get("args", {}) or {}, dict):
+            dropped.append("%s: args must be an object" % name)
+            continue
         raw_tool = str(s.get("tool") or "")
         step_server = str(s.get("server") or "").strip()
         tv = _lookup(registry, raw_tool, server=step_server or None)
         if tv is None:
-            if step_server and _lookup(registry, raw_tool) is not None:
-                dropped.append("%s: tool %r is not on server %r"
-                               % (s.get("name") or ("step_%d" % i),
-                                  raw_tool, step_server))
-            else:
-                dropped.append("%s: tool %r does not exist"
-                               % (s.get("name") or ("step_%d" % i),
-                                  raw_tool))
-            name_to_id[str(s.get("name") or "step_%d" % i)] = "__missing__"
+            dropped.append("%s: tool %r does not exist on the named server"
+                           % (name, raw_tool))
             continue
-        kept.append((i, s, tv))
+        candidates.append((i, name, s, tv))
 
-    for i, s, tv in kept:
-        tid = "s%d" % i
-        name = str(s.get("name") or tid)
-        deps = [name_to_id[d] for d in (s.get("depends_on") or [])
-                if name_to_id.get(d)
-                and name_to_id[d] not in ("__missing__",)]
+    # A dependency on a dropped/nonexistent step invalidates its dependent;
+    # repeat because that invalidation may cascade.
+    changed = True
+    while changed:
+        changed = False
+        available = ({name for _, name, _, _ in candidates}
+                     | set(external_refs))
+        kept = []
+        for item in candidates:
+            _, name, s, _ = item
+            deps = s.get("depends_on") or []
+            if not isinstance(deps, list) or any(
+                    not isinstance(d, str) or d not in available for d in deps):
+                dropped.append("%s: dependency is missing or invalid" % name)
+                changed = True
+            else:
+                kept.append(item)
+        candidates = kept
+
+    deps_by_name = {
+        name: list(s.get("depends_on") or []) for _, name, s, _ in candidates
+    }
+    visiting, visited = set(), set()
+
+    def cyclic(name: str) -> bool:
+        if name in visiting:
+            return True
+        if name in visited:
+            return False
+        visiting.add(name)
+        if any(cyclic(dep) for dep in deps_by_name.get(name, [])):
+            return True
+        visiting.remove(name)
+        visited.add(name)
+        return False
+
+    if any(cyclic(name) for name in list(deps_by_name)):
+        empty = TaskGraph()
+        empty.plan_meta = {
+            "dropped": dropped + ["plan contains a dependency cycle"],
+            "title": str(plan.get("title") or ""),
+            "rationale": str(plan.get("rationale") or ""),
+            "requested": len(steps), "kept": 0,
+        }
+        return empty
+
+    name_to_id = dict(external_refs)
+    name_to_id.update({name: "%ss%d" % (id_prefix, i)
+                       for i, name, _, _ in candidates})
+    for i, name, s, tv in candidates:
+        raw_args = s.get("args", {}) or {}
+        if not isinstance(raw_args, dict):
+            dropped.append("%s: args must be an object" % name)
+            continue
         g.add(Task(
-            id=tid,
+            id=name_to_id[name],
             name=str(s.get("title") or name),
             slug=name,
             server=tv.server,
             tool=tv.name,
-            args=dict(s.get("args", {}) or {}),
-            deps=deps,
+            args=dict(raw_args),
+            deps=[name_to_id[d] for d in (s.get("depends_on") or [])],
             expect=s.get("expect"),
             why=str(s.get("why") or ""),
         ))
-        name_to_id[name] = tid
 
     g.plan_meta = {
         "dropped": dropped,
         "title": str(plan.get("title") or ""),
         "rationale": str(plan.get("rationale") or ""),
         "requested": len(steps),
-        "kept": len(kept),
+        "kept": len(g.all()),
     }
     return g
 
@@ -229,7 +291,10 @@ def model_driven_planner(goal: str, registry,
                          llm: Optional[Callable] = None,
                          max_catalog: int = 80,
                          note: str = "",
-                         feedback: Optional[List[str]] = None
+                         feedback: Optional[List[str]] = None,
+                         quality_brief: str = "",
+                         completed_refs: Optional[Dict[str, str]] = None,
+                         id_prefix: str = ""
                          ) -> Tuple[TaskGraph, Optional[Dict[str, Any]]]:
     """Ask the LLM for a plan; validate it; return (graph, plan_dict).
 
@@ -239,6 +304,11 @@ def model_driven_planner(goal: str, registry,
 
     `note` is guidance for a RE-PLAN (what the previous attempt taught).
     `feedback` is a list of concrete findings to address.
+    `quality_brief` is a deterministic, live-catalog production contract for
+    game-authoring runs; empty for ordinary goals. `completed_refs` exposes
+    successful historical step slugs as dependencies/references during a
+    replan so outputs can be reused without repeating effects. `id_prefix`
+    keeps newly planned task ids distinct from retained history.
     """
     if llm is None:
         return TaskGraph(), None
@@ -250,6 +320,15 @@ def model_driven_planner(goal: str, registry,
     if feedback:
         user_msg += ("\n\nAddress these findings:\n- "
                      + "\n- ".join(str(f) for f in feedback[:6]))
+    if quality_brief:
+        user_msg += "\n\n" + quality_brief
+    if completed_refs:
+        user_msg += (
+            "\n\nSuccessful historical steps available to this replan:\n- " +
+            "\n- ".join("%s (reference its result as $%s or $%s.field; "
+                         "it may appear in depends_on and MUST NOT be rerun)"
+                         % (name, name, name)
+                         for name in list(completed_refs)[:24]))
     messages = [
         {"role": "system",
          "content": system + "\n\nLIVE TOOL CATALOG "
@@ -286,7 +365,9 @@ def model_driven_planner(goal: str, registry,
     valid, missing = validate_plan_tools(plan, registry)
     if not valid:
         return TaskGraph(), None
-    graph = plan_to_graph(plan, registry)
+    graph = plan_to_graph(plan, registry,
+                          external_refs=completed_refs,
+                          id_prefix=id_prefix)
     if not graph.all():
         return TaskGraph(), None
     graph.plan_meta["missing_tools"] = missing

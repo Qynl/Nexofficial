@@ -7,22 +7,46 @@ summary of the arguments — never full secrets or huge payloads.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
 
+_SECRET_KEY = re.compile(
+    r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|"
+    r"credential|private[_-]?key)")
+
+
+def _value_shape(value: Any) -> Any:
+    """Describe an argument without retaining its possibly-private value."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return "<string:%d chars>" % len(value)
+    if isinstance(value, bytes):
+        return "<bytes:%d>" % len(value)
+    if isinstance(value, dict):
+        return "<object:%d keys>" % len(value)
+    if isinstance(value, (list, tuple)):
+        return "<array:%d items>" % len(value)
+    return "<%s>" % type(value).__name__
+
+
 def _arg_summary(args: Any, cap: int = 60) -> Any:
-    """Redact potentially-large/secret values; keep keys + short previews."""
+    """Keep argument names and shapes, never raw string payloads/secrets."""
     if isinstance(args, dict):
         out: Dict[str, Any] = {}
-        for k, v in args.items():
-            s = repr(v)
-            out[str(k)] = s if len(s) <= cap else s[:cap - 3] + "..."
+        for i, (k, v) in enumerate(args.items()):
+            if i >= 50:
+                out["…"] = "<additional keys omitted>"
+                break
+            key = str(k)[:cap]
+            out[key] = "<redacted>" if _SECRET_KEY.search(key) \
+                else _value_shape(v)
         return out
-    s = repr(args)
-    return s if len(s) <= cap else s[:cap - 3] + "..."
+    return _value_shape(args)
 
 
 class AuditLog:

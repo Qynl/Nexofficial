@@ -91,6 +91,11 @@ class APITests(unittest.TestCase):
                         headers={"X-Nex-Auth": "wrong-token"})
         expect(s == 401, "wrong token must 401, got %s" % s)
 
+    def test_api_rejects_query_string_credentials(self):
+        s, _ = self.req("GET", "/api/health?nex_token=" + self.token,
+                        auth=False)
+        expect(s == 401, "API must never authenticate a secret in its URL")
+
     def test_post_without_csrf_rejected(self):
         s, _ = self.req("POST", "/api/conversations", csrf=False)
         expect(s == 403, "POST without X-Nex must 403, got %s" % s)
@@ -106,10 +111,29 @@ class APITests(unittest.TestCase):
                          body={"token": "nope"}, auth=False, csrf=False)
         expect(s2 in (401, 403), "login with wrong token must fail")
 
+    def test_token_link_exchanges_for_cookie_and_cleans_url(self):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(NoRedirect())
+        try:
+            opener.open(self.base + "/?nex_token=" + self.token, timeout=10)
+            self.fail("bootstrap should redirect")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 303)
+            self.assertEqual(exc.headers.get("Location"), "/")
+            cookie = exc.headers.get("Set-Cookie", "")
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("SameSite=Strict", cookie)
+            self.assertNotIn(self.token, exc.headers.get("Location", ""))
+
     def test_static_index_served(self):
         with urllib.request.urlopen(self.base + "/", timeout=10) as r:
             self.assertEqual(r.status, 200)
             self.assertIn(b"Nex", r.read())
+            self.assertEqual(r.headers.get("X-Frame-Options"), "DENY")
+            self.assertIn("default-src 'self'",
+                          r.headers.get("Content-Security-Policy", ""))
         with urllib.request.urlopen(self.base + "/js/main.js",
                                     timeout=10) as r:
             self.assertEqual(r.status, 200)

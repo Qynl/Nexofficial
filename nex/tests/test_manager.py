@@ -41,7 +41,7 @@ class ManagerTests(unittest.TestCase):
         threading.Thread(target=cls.httpd.serve_forever,
                          daemon=True).start()
         cls.mgr = ServerManager()
-        added, err = cls.mgr.add({"name": "echo",
+        added, err = cls.mgr.add({"name": "echo", "trusted": True,
                                   "url": "http://127.0.0.1:%d/mcp" % cls.port})
         expect(err == "", "add should succeed: %s" % err)
 
@@ -121,12 +121,29 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(out["decision"].get("requires_confirmation", True)
                         or out.get("status") == "needs_confirmation")
 
-    def test_approval_grants_once(self):
+    def test_standing_approval_grants_tool(self):
         with self.mgr._lock:
             self.mgr._approvals.clear()
         self.mgr.approve_tool("echo", "delete_thing")
         out = self.mgr.call("echo", "delete_thing", {"id": "y"})
         self.assertNotIn("error", out, out)
+
+    def test_one_time_approval_is_exact_and_consumed(self):
+        with self.mgr._lock:
+            self.mgr._approvals.clear()
+            self.mgr._once_approvals.clear()
+        self.mgr.approve_once("echo", "delete_thing", {"id": "x"})
+        wrong = self.mgr.call("echo", "delete_thing", {"id": "y"})
+        self.assertIn("needs_confirmation", wrong)
+        allowed = self.mgr.call("echo", "delete_thing", {"id": "x"})
+        self.assertIn("result", allowed, allowed)
+        replay = self.mgr.call("echo", "delete_thing", {"id": "x"})
+        self.assertIn("needs_confirmation", replay)
+
+    def test_live_schema_rejects_bad_arguments_before_call(self):
+        out = self.mgr.call("echo", "add", {"a": 1})
+        self.assertIn("validation_errors", out, out)
+        self.assertIn("required", out["error"])
 
     def test_untrusted_server_refused_in_autonomous_runs(self):
         with self.mgr._lock:
@@ -165,11 +182,15 @@ class ManagerTests(unittest.TestCase):
 
     # ── audit ────────────────────────────────────────────────────
 
-    def test_calls_are_audited(self):
+    def test_calls_are_audited_without_raw_string_payloads(self):
+        secretish_private_text = "private-note-not-a-credential"
+        self.mgr.call("echo", "echo", {"text": secretish_private_text})
         entries = self.mgr.audit_entries(limit=100)
         kinds = {e["tool"] for e in entries}
         expect("echo" in kinds or "add" in kinds or "delete_thing" in kinds,
                "audit log must record tool calls")
+        self.assertNotIn(secretish_private_text, json.dumps(entries))
+        self.assertIn("<string:", json.dumps(entries))
 
     # ── persistence ──────────────────────────────────────────────
 
@@ -178,6 +199,24 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(home, "servers.json")))
         data = json.load(open(os.path.join(home, "servers.json")))
         self.assertIn("echo", json.dumps(data))
+
+    def test_valid_persisted_config_reloads(self):
+        other = ServerManager()
+        try:
+            names = {e["name"] for e in other.config()}
+            self.assertIn("echo", names)
+        finally:
+            other.close()
+
+    def test_new_server_defaults_untrusted(self):
+        added, err = self.mgr.add(
+            {"name": "review-first", "url": "http://127.0.0.1:1/mcp"},
+            connect=False)
+        try:
+            self.assertEqual(err, "")
+            self.assertFalse(self.mgr.server_status("review-first")["trusted"])
+        finally:
+            self.mgr.remove("review-first")
 
 
 if __name__ == "__main__":

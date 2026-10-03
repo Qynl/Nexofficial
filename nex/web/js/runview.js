@@ -106,9 +106,15 @@ function renderCard(card) {
   const steps = document.createElement('div');
   steps.className = 'run-steps';
   inner.appendChild(steps);
+  const quality = document.createElement('section');
+  quality.className = 'run-quality';
+  quality.hidden = true;
+  quality.setAttribute('aria-label', 'Production evidence');
+  inner.appendChild(quality);
   body.appendChild(inner);
   el.appendChild(body);
   card.stepsEl = steps;
+  card.qualityEl = quality;
 
   updateStatusLine(card);
   updateCounts(card);
@@ -312,6 +318,56 @@ export function onRunProgress(ev) {
 
 export function onRunEval() { /* verdict details stay internal */ }
 
+export function onRunQuality(ev) {
+  const card = runCards.get(ev.run_id);
+  const scorecard = ev.scorecard || {};
+  if (!card || !scorecard.active || !card.qualityEl) return;
+  const el = card.qualityEl;
+  el.hidden = false;
+  el.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'quality-head';
+  const title = document.createElement('strong');
+  title.textContent = 'Production evidence';
+  const score = document.createElement('span');
+  score.className = 'quality-score';
+  score.dataset.passed = scorecard.passed ? '1' : '0';
+  score.textContent = `${Number(scorecard.score || 0)}/100`;
+  head.appendChild(title);
+  head.appendChild(score);
+  el.appendChild(head);
+
+  const track = document.createElement('div');
+  track.className = 'quality-track';
+  const fill = document.createElement('span');
+  fill.style.width = `${Math.max(0, Math.min(100,
+    Number(scorecard.score || 0)))}%`;
+  track.appendChild(fill);
+  el.appendChild(track);
+
+  const gates = document.createElement('div');
+  gates.className = 'quality-gates';
+  for (const gate of scorecard.gates || []) {
+    const chip = document.createElement('span');
+    chip.className = 'quality-gate';
+    chip.dataset.status = gate.status || 'not_run';
+    chip.title = gate.label || gate.id || '';
+    const mark = gate.status === 'passed' ? '✓' : gate.status === 'unavailable'
+      ? '—' : '○';
+    chip.textContent = `${mark} ${gate.id || 'gate'}`;
+    gates.appendChild(chip);
+  }
+  el.appendChild(gates);
+
+  const note = document.createElement('p');
+  note.className = 'quality-note';
+  note.textContent = scorecard.passed
+    ? 'All required MCP evidence gates passed. This is evidence coverage, not an artistic AAA guarantee.'
+    : 'Unverified dimensions stay visible; Nex will not rename missing evidence “done.”';
+  el.appendChild(note);
+}
+
 export function onRunWaiting(ev) {
   const card = runCards.get(ev.run_id);
   if (!card) return;
@@ -332,6 +388,16 @@ export function onRunWaiting(ev) {
   call.textContent = `${ev.server}.${ev.tool}(${fmtArgs(ev.args)})`;
   wrap.appendChild(call);
 
+  const exact = document.createElement('details');
+  exact.className = 'appr-exact';
+  const exactTitle = document.createElement('summary');
+  exactTitle.textContent = 'Review exact arguments';
+  const exactBody = document.createElement('pre');
+  exactBody.textContent = safeJson(ev.args || {});
+  exact.appendChild(exactTitle);
+  exact.appendChild(exactBody);
+  wrap.appendChild(exact);
+
   if (ev.reason) {
     const reason = document.createElement('div');
     reason.className = 'appr-reason';
@@ -344,7 +410,7 @@ export function onRunWaiting(ev) {
 
   const approve = document.createElement('button');
   approve.className = 'btn-approve';
-  approve.textContent = 'Approve once';
+  approve.textContent = 'Approve exact call once';
   approve.addEventListener('click', () => {
     resolveApproval(card, wrap, true, false);
   });
@@ -353,7 +419,7 @@ export function onRunWaiting(ev) {
   always.className = 'btn-approve';
   always.style.background = 'var(--accent)';
   always.style.color = '#06231d';
-  always.textContent = 'Always allow';
+  always.textContent = 'Allow tool for this session';
   always.addEventListener('click', () => {
     resolveApproval(card, wrap, true, true);
   });
@@ -450,11 +516,21 @@ function scrollFollow() {
   }
 }
 
+function safeJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 function fmtArgs(args) {
   if (!args) return '';
-  const parts = Object.entries(args).map(([k, v]) =>
-    `${k}=${String(v).slice(0, 40)}`);
-  return parts.join(', ').slice(0, 220);
+  const parts = Object.entries(args).map(([k, v]) => {
+    const rendered = typeof v === 'string' ? v : safeJson(v);
+    return `${k}=${rendered.slice(0, 90)}`;
+  });
+  return parts.join(', ').slice(0, 500);
 }
 
 function fmtDur(ms) {

@@ -19,7 +19,7 @@ sys.path.insert(0, NEX)
 os.environ.setdefault("NEX_HOME", tempfile.mkdtemp(prefix="nex-transport-"))
 
 from mcp.transport import (StdioDecoder, encode_frame, Upstream,  # noqa: E402
-                           UpstreamError)
+                           UpstreamError, _stdio_environment)
 
 _FAILED = []
 
@@ -145,6 +145,11 @@ class FrameCodecTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.feed(b"Content-Length: 999999999\r\n\r\n")
 
+    def test_negative_frame_rejected(self):
+        d = StdioDecoder()
+        with self.assertRaises(ValueError):
+            d.feed(b"Content-Length: -1\r\n\r\n")
+
     def test_partial_line_kept(self):
         d = StdioDecoder()
         self.assertEqual(d.feed(b'{"not": "yet"'), [])
@@ -153,6 +158,27 @@ class FrameCodecTests(unittest.TestCase):
 
 
 class StdioTransportTests(unittest.TestCase):
+    def test_child_environment_does_not_inherit_nex_or_provider_secrets(self):
+        old_auth = os.environ.get("NEX_AUTH_TOKEN")
+        old_key = os.environ.get("OPENAI_API_KEY")
+        old_allow = os.environ.get("NEX_STDIO_ENV_ALLOW")
+        try:
+            os.environ["NEX_AUTH_TOKEN"] = "never-delegate"
+            os.environ["OPENAI_API_KEY"] = "provider-secret"
+            os.environ.pop("NEX_STDIO_ENV_ALLOW", None)
+            child = _stdio_environment()
+            self.assertNotIn("NEX_AUTH_TOKEN", child)
+            self.assertNotIn("OPENAI_API_KEY", child)
+            self.assertIn("PATH", child)
+        finally:
+            for key, value in (("NEX_AUTH_TOKEN", old_auth),
+                               ("OPENAI_API_KEY", old_key),
+                               ("NEX_STDIO_ENV_ALLOW", old_allow)):
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     @classmethod
     def setUpClass(cls):
         cls.script = os.path.join(
@@ -250,10 +276,56 @@ class HTTPTransportTests(unittest.TestCase):
         text = resp["result"]["content"][0]["text"]
         expect(text == "42", "http call: %r" % text)
 
+    def test_tool_result_is_error_is_not_success(self):
+        up = Upstream("echo", "http://127.0.0.1:%d/mcp" % self.port)
+        up.connect()
+        with self.assertRaises(UpstreamError):
+            up.call("fail_always", {})
+
     def test_unreachable_server_raises_upstream_error(self):
         up = Upstream("dead", "http://127.0.0.1:1/mcp")
         with self.assertRaises(UpstreamError):
             up.connect()
+
+    def test_cross_origin_redirect_is_refused(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        hits = []
+
+        class Target(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+            def do_POST(self):  # noqa: N802
+                hits.append(True)
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+        target_port = target.server_address[1]
+
+        class Redirect(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(307)
+                self.send_header("Location", "http://127.0.0.1:%d/mcp"
+                                 % target_port)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        threading.Thread(target=redirect.serve_forever, daemon=True).start()
+        try:
+            up = Upstream("redirect", "http://127.0.0.1:%d/mcp"
+                          % redirect.server_address[1])
+            with self.assertRaises(UpstreamError):
+                up.connect()
+            self.assertEqual(hits, [], "redirect target must never receive MCP data")
+        finally:
+            redirect.shutdown(); redirect.server_close()
+            target.shutdown(); target.server_close()
 
     def test_bad_json_response_is_upstream_error(self):
         # A server that returns non-JSON: the transport must raise

@@ -36,10 +36,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent import providers as _providers
+
+# Load operator .env before importing modules whose defaults are evaluated at
+# import time (agent budgets) or constructing stateful singletons.
+_providers.load_env()
+
 from agent import prompts as _prompts
 from agent.jsonreply import extract_json_with_key
 from agent.loop import RunCoordinator
 from mcp.manager import get_manager, validate_server_entry
+from mcp.policy import Policy, set_policy
 from store import Store
 
 HOST = os.environ.get("NEX_HOST", "0.0.0.0")
@@ -54,7 +60,11 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 def _nex_dir() -> str:
     base = os.environ.get("NEX_HOME") or os.path.join(
         os.path.expanduser("~"), ".nex")
-    os.makedirs(base, exist_ok=True)
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(base, 0o700)
+    except OSError:
+        pass
     return base
 
 
@@ -65,22 +75,38 @@ def _token_file_path() -> str:
 def _load_or_create_auth_token() -> str:
     env_token = os.environ.get("NEX_AUTH_TOKEN", "").strip()
     if env_token:
+        if len(env_token) < 32:
+            raise RuntimeError("NEX_AUTH_TOKEN must be at least 32 characters")
         return env_token
     path = _token_file_path()
     try:
         with open(path, "r", encoding="utf-8") as f:
             tok = f.read().strip()
             if tok:
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
                 return tok
     except OSError:
         pass
     tok = secrets.token_urlsafe(32)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(tok)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(tok)
+            f.flush()
+            os.fsync(f.fileno())
+    except FileExistsError:
+        # Another process won the creation race. Read its complete token.
+        with open(path, "r", encoding="utf-8") as f:
+            existing = f.read().strip()
+        if existing:
+            return existing
+        raise RuntimeError("authentication token file is empty")
     return tok
 
 
@@ -136,6 +162,19 @@ STORE = Store()
 ROUTER = _providers.build_router(bus=BUS)
 MANAGER = get_manager(bus=BUS)
 
+
+def _env_set(name: str) -> set:
+    return {v.strip() for v in (os.environ.get(name, "") or "").split(",")
+            if v.strip()}
+
+
+# Operator standing approvals are composition-root configuration, never model
+# input. Server trust itself is enforced dynamically by ServerManager.
+set_policy(Policy(
+    allow_code_execution=_env_set("NEX_ALLOW_CODE_EXECUTION") or None,
+    allow_confirmations=_env_set("NEX_ALLOW_CONFIRMATIONS") or None,
+))
+
 # ---------------------------------------------------------------------------
 # Error taxonomy (the UI renders these distinctly)
 # ---------------------------------------------------------------------------
@@ -183,6 +222,7 @@ def error_payload(code: str, detail: str = "") -> Dict[str, Any]:
 
 MAX_HISTORY_MESSAGES = 24
 MAX_MESSAGE_CHARS = 4000
+MAX_USER_MESSAGE_CHARS = 32 * 1024
 _DIRECTIVE_BUFFER_LIMIT = 4096
 
 # one chat generation at a time per conversation
@@ -339,6 +379,28 @@ class NexHandler(BaseHTTPRequestHandler):
     server_version = "Nex/2.0"
     protocol_version = "HTTP/1.1"
 
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(30)
+
+    def end_headers(self) -> None:
+        # Defense in depth for the local operator UI. No endpoint enables
+        # CORS, framing, plugins, inline scripts, or cross-origin requests.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Permissions-Policy",
+                         "camera=(), geolocation=(), microphone=(self)")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+            "object-src 'none'; form-action 'self'; connect-src 'self'; "
+            "img-src 'self' data:; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'")
+        super().end_headers()
+
     # ----- helpers ---------------------------------------------------------
 
     def _send_json(self, status: int, payload: Any) -> None:
@@ -348,7 +410,8 @@ class NexHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _send_file(self, path: str) -> None:
         try:
@@ -368,8 +431,19 @@ class NexHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json_body(self) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
+        if self.headers.get("Transfer-Encoding"):
+            # BaseHTTPRequestHandler does not decode chunked request bodies;
+            # close rather than leave bytes to be parsed as another request.
+            self.close_connection = True
+            return {}
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self.close_connection = True
+            return {}
         if length <= 0 or length > 2 * 1024 * 1024:
+            if length > 0:
+                self.close_connection = True
             return {}
         try:
             raw = self.rfile.read(length)
@@ -401,21 +475,18 @@ class NexHandler(BaseHTTPRequestHandler):
             auth = (self.headers.get("Authorization") or "").strip()
             if auth.lower().startswith("bearer "):
                 tok = auth[7:].strip()
-        if not tok:
-            q = self.path.split("?")
-            if len(q) == 2 and "nex_token=" in q[1]:
-                from urllib.parse import parse_qs
-                vals = parse_qs(q[1]).get("nex_token") or []
-                if vals and secrets.compare_digest(vals[0], AUTH_TOKEN):
-                    self._set_cookie = True
-                    return True
+        # Query-string credentials are accepted only by the root bootstrap
+        # redirect in do_GET; APIs never accept secrets in URLs.
         return bool(tok and secrets.compare_digest(tok, AUTH_TOKEN))
 
     def _set_auth_cookie(self) -> None:
+        secure = "; Secure" if os.environ.get(
+            "NEX_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes") \
+            else ""
         self.send_header(
             "Set-Cookie",
-            "nex_auth=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"
-            % AUTH_TOKEN)
+            "nex_auth=%s; Path=/; HttpOnly; SameSite=Strict; "
+            "Max-Age=31536000%s" % (AUTH_TOKEN, secure))
 
     def _mutating_origin_ok(self) -> bool:
         """CSRF defense: mutating requests must carry our custom header.
@@ -454,10 +525,50 @@ class NexHandler(BaseHTTPRequestHandler):
     # ----- dispatch ----------------------------------------------------------
 
     def do_HEAD(self) -> None:  # noqa: N802
-        self.do_GET()
+        path = self.path.split("?")[0]
+        if path.startswith("/api"):
+            if not self._auth_gate(mutating=False):
+                return
+            self.send_response(405)
+            self.send_header("Allow", "GET")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        target = None
+        if path in ("/", "/index.html"):
+            target = os.path.join(WEB_DIR, "index.html")
+        elif path.startswith("/css/") or path.startswith("/js/"):
+            rel = os.path.normpath(path.lstrip("/"))
+            if rel.startswith(("css", "js")) and ".." not in rel:
+                target = os.path.join(WEB_DIR, rel)
+        elif path == "/favicon.svg":
+            target = os.path.join(WEB_DIR, "favicon.svg")
+        if not target or not os.path.isfile(target):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(target)[0]
+                         or "application/octet-stream")
+        self.send_header("Content-Length", str(os.path.getsize(target)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?")[0]
+        # Bootstrap links exchange the token for an HttpOnly cookie and
+        # immediately remove it from the address bar/history/referrers.
+        query_token = _query_param(self.path, "nex_token")
+        if path in ("/", "/index.html") and query_token and \
+                secrets.compare_digest(query_token, AUTH_TOKEN):
+            self.send_response(303)
+            self._set_auth_cookie()
+            self.send_header("Location", path)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if not self._auth_gate(mutating=False):
             return
         if path == "/api/auth/logout":
@@ -650,6 +761,11 @@ class NexHandler(BaseHTTPRequestHandler):
             self._send_json(400, error_payload(ERR_USER,
                                                "conversation_id and "
                                                "message are required"))
+            return
+        if len(message) > MAX_USER_MESSAGE_CHARS:
+            self._send_json(413, error_payload(
+                ERR_USER, "message exceeds %d characters"
+                % MAX_USER_MESSAGE_CHARS))
             return
         if STORE.get_conversation(cid) is None:
             self._send_json(404, error_payload(ERR_USER,

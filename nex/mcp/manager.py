@@ -11,10 +11,10 @@ Design rules
   (0600) plus ``NEX_SERVERS`` env entries. The model can never add,
   remove, or reconfigure a server — there is no path from model output
   to this module's config.
-* CONNECTED != TRUSTED. A server marked ``trusted`` (the operator's
-  explicit toggle when adding it, or NEX_TRUSTED_SERVERS) may serve
-  autonomous tool calls in strict mode; an untrusted one is refused by
-  the policy regardless of being connected.
+* CONNECTED != TRUSTED. New UI-added servers default to untrusted. A server
+  marked ``trusted`` (an explicit toggle, environment config, or
+  NEX_TRUSTED_SERVERS) may serve autonomous calls; an untrusted server needs
+  exact interactive approval and is refused when no approver is present.
 * Every tool call goes through ``mcp.policy.authorize`` (name
   classification + argument scanning) before it is sent, and is
   recorded in the audit log after.
@@ -30,17 +30,23 @@ server, and a weather API are the same object.
 """
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import os
 import re
+import shlex
 import threading
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit
 
 from mcp.audit import AuditLog
 from mcp.registry import CapabilityRegistry
-from mcp.capability import capability_for_tool
-from mcp.policy import authorize, current_policy, Decision
+from mcp.capability import capability_for_tool, apply_capability_registry
+from mcp.policy import authorize, current_policy
+from mcp.schema import validate_arguments
 from mcp.transport import Upstream, UpstreamError
 
 # Statuses a server can be in.
@@ -57,12 +63,54 @@ _BAD_CMD_CHARS = set(" ;|&>$`\t\n'\"\\")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_METADATA_HOSTS = {
+    "metadata.google.internal", "metadata.goog", "instance-data",
+    "169.254.169.254", "169.254.170.2", "100.100.100.200",
+    "fd00:ec2::254",
+}
+_MAX_CONFIG_BYTES = 1024 * 1024
+_MAX_STDIO_ARGS = 128
+_MAX_STDIO_ARG_CHARS = 8192
+
+
+def _norm_host(host: str) -> str:
+    return (host or "").strip().lower().rstrip(".").strip("[]")
+
+
+def _is_loopback(host: str) -> bool:
+    host = _norm_host(host)
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_metadata_target(host: str) -> bool:
+    """Metadata/link-local endpoints are never valid MCP servers.
+
+    Explicit remote confirmation permits normal LAN/Internet MCP servers,
+    but it must not turn the UI into an SSRF client for cloud credentials.
+    """
+    host = _norm_host(host)
+    if host in _METADATA_HOSTS:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_link_local or str(addr) in _METADATA_HOSTS
+    except ValueError:
+        return False
 
 
 def _nex_dir() -> str:
     base = os.environ.get("NEX_HOME") or os.path.join(
         os.path.expanduser("~"), ".nex")
-    os.makedirs(base, exist_ok=True)
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(base, 0o700)
+    except OSError:
+        pass
     return base
 
 
@@ -71,9 +119,9 @@ def servers_config_path() -> str:
 
 
 def http_allowlist() -> List[str]:
-    """Hosts the operator allows beyond loopback (NEX_HTTP_ALLOW)."""
+    """Exact hosts the operator allows beyond loopback (NEX_HTTP_ALLOW)."""
     raw = os.environ.get("NEX_HTTP_ALLOW", "")
-    return [a.strip().lower() for a in raw.split(",") if a.strip()]
+    return [_norm_host(a) for a in raw.split(",") if _norm_host(a)]
 
 
 def stdio_allowlist() -> List[str]:
@@ -81,6 +129,11 @@ def stdio_allowlist() -> List[str]:
     a lockdown lever. Empty means: operator-added commands allowed."""
     raw = os.environ.get("NEX_STDIO_ALLOW", "")
     return [a.strip() for a in raw.split(",") if a.strip()]
+
+
+def env_name_set(name: str) -> Set[str]:
+    return {v.strip() for v in (os.environ.get(name, "") or "").split(",")
+            if v.strip()}
 
 
 def validate_server_entry(entry: Any,
@@ -125,30 +178,48 @@ def validate_server_entry(entry: Any,
         if args is not None and not isinstance(args, list):
             problems.append("'args' must be a list")
         if isinstance(args, list):
+            if len(args) > _MAX_STDIO_ARGS:
+                problems.append("'args' has too many entries (max %d)"
+                                % _MAX_STDIO_ARGS)
             for a in args:
                 if not isinstance(a, (str, int, float)):
                     problems.append("'args' must be strings/numbers")
                     break
+                if len(str(a)) > _MAX_STDIO_ARG_CHARS:
+                    problems.append("a stdio argument is too long (max %d chars)"
+                                    % _MAX_STDIO_ARG_CHARS)
+                    break
     else:
-        url = str(entry.get("url") or "")
+        url = str(entry.get("url") or "").strip()
         if not url:
             problems.append("server needs a 'url' (http) or a 'command' (stdio)")
-        elif not url.startswith(("http://", "https://")):
-            problems.append("url must start with http:// or https://")
         else:
             try:
-                from urllib.parse import urlparse
-                p = urlparse(url)
-                host = (p.hostname or "").lower()
+                p = urlsplit(url)
+                if p.scheme.lower() not in ("http", "https"):
+                    problems.append("url must start with http:// or https://")
+                if "@" in (p.netloc or ""):
+                    problems.append("credentials inside an MCP URL are not allowed")
+                host = _norm_host(p.hostname or "")
                 if not host:
                     problems.append("url has no host")
-                elif host not in _LOOPBACK_HOSTS and host not in http_allowlist():
-                    if not allow_remote:
-                        problems.append(
-                            "endpoint %r is not loopback and not in "
-                            "NEX_HTTP_ALLOW — connecting requires an "
-                            "explicit confirmation" % url)
-            except Exception:  # noqa: BLE001
+                try:
+                    _ = p.port
+                except ValueError:
+                    problems.append("url has an invalid port")
+                if p.query or p.fragment:
+                    problems.append("url must not contain credentials/query/fragment")
+                if _is_metadata_target(host):
+                    problems.append(
+                        "refusing cloud metadata/link-local endpoint %r"
+                        % host)
+                elif not _is_loopback(host) and host not in http_allowlist() \
+                        and not allow_remote:
+                    problems.append(
+                        "endpoint %r is not loopback and not in "
+                        "NEX_HTTP_ALLOW — connecting requires an "
+                        "explicit confirmation" % url)
+            except (TypeError, ValueError):
                 problems.append("unparseable url")
     to = entry.get("timeout_s")
     if to is not None:
@@ -162,16 +233,26 @@ def validate_server_entry(entry: Any,
 
 
 def _entry_from_env_spec(spec: str) -> Optional[Dict[str, Any]]:
-    """'name=url' from NEX_SERVERS / NEX_TUNNELS env."""
-    if "=" not in spec:
-        return None
-    name, val = spec.split("=", 1)
-    name = name.strip()
-    val = val.strip()
-    if not name or not val:
-        return None
-    return {"name": name, "url": val, "transport": "http",
-            "trusted": True, "source": "env"}
+    """Parse ``name=url`` or ``name:command arg...`` from NEX_SERVERS."""
+    if "=" in spec:
+        name, val = spec.split("=", 1)
+        name, val = name.strip(), val.strip()
+        if not name or not val:
+            return None
+        return {"name": name, "url": val, "transport": "http",
+                "trusted": True, "source": "env"}
+    if ":" in spec:
+        name, raw_command = spec.split(":", 1)
+        try:
+            parts = shlex.split(raw_command, posix=(os.name != "nt"))
+        except ValueError:
+            return None
+        if not name.strip() or not parts:
+            return None
+        return {"name": name.strip(), "command": parts[0],
+                "args": parts[1:], "transport": "stdio",
+                "trusted": True, "source": "env"}
+    return None
 
 
 def env_servers() -> List[Dict[str, Any]]:
@@ -202,6 +283,9 @@ class ServerManager:
         self._live: Dict[str, Upstream] = {}
         self._status: Dict[str, Dict[str, Any]] = {}
         self._approvals: Dict[str, Set[str]] = {}   # session tool approvals
+        # One-shot approvals are bound to server + tool + canonical arguments.
+        # This prevents "approve A, execute B" argument substitution.
+        self._once_approvals: Dict[Tuple[str, str], Set[str]] = {}
         self._monitor_stop = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._load()
@@ -221,19 +305,33 @@ class ServerManager:
 
     def _load(self) -> None:
         cfg: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
         path = servers_config_path()
         try:
+            if os.path.getsize(path) > _MAX_CONFIG_BYTES:
+                raise ValueError("servers config is too large")
             with open(path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, list):
-                for e in raw:
-                    if isinstance(e, dict) and validate_server_entry(e):
-                        cfg.append(self._normalize(e))
+                for e in raw[:1000]:
+                    # validate_server_entry returns PROBLEMS.  Only entries
+                    # with no problems may cross the persisted config boundary.
+                    if isinstance(e, dict) and not validate_server_entry(
+                            e, allow_remote=True):
+                        norm = self._normalize(e)
+                        if norm["name"] not in seen:
+                            cfg.append(norm)
+                            seen.add(norm["name"])
         except (OSError, ValueError):
             pass
         for e in env_servers():
-            if validate_server_entry(e, allow_remote=True):
-                cfg.append(self._normalize(e))
+            if not validate_server_entry(e, allow_remote=True):
+                norm = self._normalize(e)
+                # Explicit environment config wins over a persisted entry of
+                # the same name without creating an ambiguous duplicate.
+                cfg = [old for old in cfg if old["name"] != norm["name"]]
+                cfg.append(norm)
+                seen.add(norm["name"])
         self._config = cfg
         for e in cfg:
             if e.get("enabled", True):
@@ -244,12 +342,21 @@ class ServerManager:
         path = servers_config_path()
         tmp = path + ".tmp"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(tmp, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, path)
         except OSError:
-            pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     @staticmethod
     def _normalize(e: Dict[str, Any]) -> Dict[str, Any]:
@@ -259,7 +366,9 @@ class ServerManager:
                                      or (e.get("command")
                                          and not e.get("url"))) else "http",
             "enabled": bool(e.get("enabled", True)),
-            "trusted": bool(e.get("trusted", True)),
+            # Connecting discovers metadata; it is not a grant to act.
+            # Environment-defined entries explicitly carry trusted=True.
+            "trusted": bool(e.get("trusted", False)),
         }
         if out["transport"] == "stdio":
             out["command"] = str(e.get("command") or "")
@@ -303,6 +412,8 @@ class ServerManager:
             up = self._live.pop(name, None)
             self._status.pop(name, None)
             self._approvals.pop(name, None)
+            for key in [k for k in self._once_approvals if k[0] == name]:
+                self._once_approvals.pop(key, None)
         if up is not None:
             try:
                 up.disconnect()
@@ -316,6 +427,13 @@ class ServerManager:
             for c in self._config:
                 if c["name"] == name:
                     c["trusted"] = bool(trusted)
+                    if not trusted:
+                        # Revocation is immediate: old session approvals must
+                        # not silently survive a move back to untrusted.
+                        self._approvals.pop(name, None)
+                        for key in [k for k in self._once_approvals
+                                    if k[0] == name]:
+                            self._once_approvals.pop(key, None)
                     self._save()
                     return True, ""
             return False, "no server named '%s'" % name
@@ -425,7 +543,7 @@ class ServerManager:
             "url": entry.get("url"),
             "command": entry.get("command"),
             "args": entry.get("args"),
-            "trusted": bool(entry.get("trusted", True)),
+            "trusted": self._is_trusted(name, entry),
             "enabled": bool(entry.get("enabled", True)),
             "status": st.get("status", ST_DISCONNECTED),
             "error": st.get("error"),
@@ -443,8 +561,8 @@ class ServerManager:
     def status(self) -> List[Dict[str, Any]]:
         return [self.server_status(c["name"]) for c in self.config()]
 
-    def _tool_summaries(self, name: str) -> List[Dict[str, Any]]:
-        up = self.upstream(name)
+    def _tool_summaries(self, server_name: str) -> List[Dict[str, Any]]:
+        up = self.upstream(server_name)
         if up is None:
             return []
         try:
@@ -453,13 +571,20 @@ class ServerManager:
             return []
         out = []
         for t in raw:
-            cap = capability_for_tool(t)
+            if not isinstance(t, dict):
+                continue
+            tool_name = t.get("name", "")
+            if not isinstance(tool_name, str) or not tool_name:
+                continue
+            cap = apply_capability_registry(
+                capability_for_tool(t), server_name, tool_name)
             out.append({
-                "name": t.get("name", ""),
-                "description": (t.get("description") or "")[:400],
+                "name": tool_name,
+                "description": str(t.get("description") or "")[:400],
                 "category": cap.category,
                 "requires_confirmation": cap.requires_confirmation,
-                "schema": t.get("inputSchema", {}) or {},
+                "schema": t.get("inputSchema", {})
+                if isinstance(t.get("inputSchema"), dict) else {},
             })
         return out
 
@@ -485,20 +610,53 @@ class ServerManager:
             "tools": sum(s.get("tools_count", 0) for s in connected),
         }
 
+    def _is_trusted(self, name: str, entry: Optional[Dict[str, Any]] = None) -> bool:
+        e = entry if entry is not None else (self._entry(name) or {})
+        return bool(e.get("trusted", False)) or \
+            name in env_name_set("NEX_TRUSTED_SERVERS")
+
     def trusted_servers(self) -> set:
-        return {c["name"] for c in self._config if c.get("trusted", True)}
+        return {c["name"] for c in self._config
+                if self._is_trusted(c["name"], c)}
 
     # ----- the action path ------------------------------------------------------
 
+    @staticmethod
+    def _approval_fingerprint(args: Dict[str, Any]) -> str:
+        try:
+            raw = json.dumps(args or {}, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError):
+            raw = repr(args)
+        return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
     def approve_tool(self, server: str, tool: str) -> None:
-        """Record a user approval for one tool on one server
-        (session-scoped: it dies with the process)."""
+        """Record a standing approval for this process lifetime."""
         with self._lock:
             self._approvals.setdefault(server, set()).add(tool)
+
+    def approve_once(self, server: str, tool: str,
+                     args: Dict[str, Any]) -> None:
+        """Approve exactly one matching call, bound to canonical arguments."""
+        fp = self._approval_fingerprint(args)
+        with self._lock:
+            self._once_approvals.setdefault((server, tool), set()).add(fp)
 
     def is_tool_approved(self, server: str, tool: str) -> bool:
         with self._lock:
             return tool in self._approvals.get(server, set())
+
+    def _consume_once_approval(self, server: str, tool: str,
+                               args: Dict[str, Any]) -> bool:
+        fp = self._approval_fingerprint(args)
+        with self._lock:
+            values = self._once_approvals.get((server, tool))
+            if not values or fp not in values:
+                return False
+            values.remove(fp)
+            if not values:
+                self._once_approvals.pop((server, tool), None)
+            return True
 
     def call(self, server: str, tool: str, args: Dict[str, Any],
              audit_context: Optional[Dict[str, Any]] = None,
@@ -518,64 +676,85 @@ class ServerManager:
         if up is None:
             return {"error": "server '%s' is not connected" % server}
         entry = self._entry(server) or {}
-        trusted = bool(entry.get("trusted", True))
-        if not trusted:
-            if autonomous:
-                self.audit.record("refuse", server=server, tool=tool,
-                                  ok=False,
-                                  detail="untrusted server in autonomous "
-                                         "run",
-                                  context=audit_context)
-                return {
-                    "refused": "server '%s' is not trusted; it cannot be "
-                               "used in autonomous runs (mark it trusted "
-                               "after reviewing it)" % server,
-                    "decision": {"category": "untrusted_server"},
-                }
-            # Interactive: never silent — every tool on an untrusted
-            # server goes through the human.
-            if not self.is_tool_approved(server, tool):
-                self.audit.record(
-                    "confirm_required", server=server, tool=tool, ok=False,
-                    detail="untrusted server — confirmation required",
-                    context=audit_context)
-                return {
-                    "needs_confirmation":
-                        "server '%s' is untrusted; confirm this call" % server,
-                    "decision": {"category": "untrusted_server"},
-                }
+        trusted = self._is_trusted(server, entry)
+        if not trusted and autonomous:
+            self.audit.record("refuse", server=server, tool=tool,
+                              args=args, ok=False,
+                              detail="untrusted server in autonomous run",
+                              context=audit_context)
+            return {
+                "refused": "server '%s' is not trusted; it cannot be used "
+                           "in autonomous runs (mark it trusted only after "
+                           "reviewing it)" % server,
+                "decision": {"category": "untrusted_server"},
+            }
+
         try:
             raw = up.tools()
         except UpstreamError as exc:
             return {"error": "server '%s' is unreachable: %s" % (server, exc)}
-        tool_def = next((t for t in raw if t.get("name") == tool), None)
+        tool_def = next((t for t in raw
+                         if isinstance(t, dict) and t.get("name") == tool), None)
         if tool_def is None:
             return {"error": "server '%s' has no tool '%s'" % (server, tool)}
+
         cap = capability_for_tool(tool_def)
-        decision = authorize(server, tool, cap, args=args)
+        pol = current_policy()
+        # Strict policy tracks the live operator trust registry.  Taking a
+        # fresh immutable copy here avoids stale trust after a UI toggle.
+        if pol.strict_servers:
+            pol = replace(pol, trusted_servers=self.trusted_servers())
+        decision = authorize(server, tool, cap, policy=pol, args=args)
         if not decision.allowed:
-            self.audit.record("refuse", server=server, tool=tool,
+            self.audit.record("refuse", server=server, tool=tool, args=args,
                               ok=False, detail=decision.reason,
                               context=audit_context)
             return {"refused": decision.reason,
                     "decision": decision.to_dict()}
-        if decision.requires_confirmation and \
-                not self.is_tool_approved(server, tool):
-            self.audit.record("confirm_required", server=server, tool=tool,
-                              ok=False, detail=decision.reason,
+
+        schema_errors = validate_arguments(tool_def.get("inputSchema"), args)
+        if schema_errors:
+            detail = "argument validation failed: " + "; ".join(schema_errors)
+            self.audit.record("invalid_arguments", server=server, tool=tool,
+                              args=args, ok=False, detail=detail,
                               context=audit_context)
-            return {"needs_confirmation": decision.reason,
-                    "decision": decision.to_dict()}
+            return {"error": detail, "validation_errors": schema_errors}
+
+        needs_confirmation = (not trusted) or decision.requires_confirmation
+        reason = decision.reason
+        public_decision = decision.to_dict()
+        if not trusted:
+            reason = ("server '%s' is untrusted; confirm this exact call"
+                      % server)
+            public_decision["server_trust"] = "untrusted"
+            if public_decision.get("category") == "unknown":
+                public_decision["category"] = "untrusted_server"
+
+        standing = self.is_tool_approved(server, tool)
+        approved_once = False
+        if needs_confirmation and not standing:
+            # A one-shot grant is consumed only after policy + schema checks
+            # pass, and only for the exact canonical arguments approved.
+            approved_once = self._consume_once_approval(server, tool, args)
+            if not approved_once:
+                self.audit.record(
+                    "confirm_required", server=server, tool=tool, args=args,
+                    ok=False, detail=reason, context=audit_context)
+                return {"needs_confirmation": reason,
+                        "decision": public_decision}
+
         t0 = time.monotonic()
         try:
             resp = up.call(tool, args or {})
         except UpstreamError as exc:
-            self.audit.record("call", server=server, tool=tool, ok=False,
+            self.audit.record("call", server=server, tool=tool, args=args,
+                              ok=False,
                               duration_ms=round((time.monotonic() - t0) * 1000),
                               detail=str(exc)[:300], context=audit_context)
             return {"error": str(exc)}
         result = resp.get("result") if isinstance(resp, dict) else resp
-        self.audit.record("call", server=server, tool=tool, ok=True,
+        self.audit.record("call", server=server, tool=tool, args=args, ok=True,
+                          detail=("approved once" if approved_once else ""),
                           duration_ms=round((time.monotonic() - t0) * 1000),
                           context=audit_context)
         return {"result": result}

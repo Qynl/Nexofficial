@@ -120,9 +120,9 @@ def apply_decision(decision: Dict[str, Any], task: Any, registry
         tool = str(decision.get("tool") or "").strip()
         if not tool:
             return None
+        # Qualified names are exact; never strip a model-supplied server
+        # namespace and silently execute the same bare name elsewhere.
         tv = registry.by_name(tool)
-        if tv is None and "." in tool:
-            tv = registry.by_name(tool.split(".", 1)[-1])
         if tv is None:
             return None      # hallucinated escape hatch — rejected
         if tv.name == getattr(task, "tool", None) \

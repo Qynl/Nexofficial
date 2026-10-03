@@ -60,6 +60,7 @@ class FakeManager:
         self.fail = fail or {}
         self.block = block or {}
         self.approved = set()
+        self.approved_once = set()
         self.calls = []
         self.trusted = {m.name: True for m in mocks}
 
@@ -76,10 +77,14 @@ class FakeManager:
         if not decision.allowed:
             return {"refused": decision.reason,
                     "decision": decision.to_dict()}
+        once = (server, tool, repr(sorted((args or {}).items())))
         if decision.requires_confirmation and \
                 (server, tool) not in self.approved:
-            return {"needs_confirmation": decision.reason,
-                    "decision": decision.to_dict()}
+            if once in self.approved_once:
+                self.approved_once.remove(once)
+            else:
+                return {"needs_confirmation": decision.reason,
+                        "decision": decision.to_dict()}
         gate = self.block.get(tool)
         if gate is not None:
             gate.wait(timeout=30)     # simulate a slow server
@@ -99,6 +104,10 @@ class FakeManager:
 
     def approve_tool(self, server, tool):
         self.approved.add((server, tool))
+
+    def approve_once(self, server, tool, args):
+        self.approved_once.add(
+            (server, tool, repr(sorted((args or {}).items()))))
 
     def summary(self):
         return {"servers": [{"server": n, "status": "connected",
@@ -179,6 +188,25 @@ class PlanningTests(unittest.TestCase):
         report = AgentRun("t4", "echo something", self.mgr, llm=llm).run()
         # fallback: deterministic planner still handles the direct request
         self.assertEqual(report["status"], "completed")
+
+    def test_qualified_tool_namespace_is_never_stripped(self):
+        def llm(prompt):
+            return ('{"steps": [{"name": "Wrong server", '
+                    '"tool": "evil.echo", "args": {"text": "hi"}}]}')
+        report = AgentRun("t4b", "perform zqx", self.mgr, llm=llm).run()
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(self.mgr.calls, [])
+
+    def test_cyclic_model_plan_never_reports_completed(self):
+        def llm(prompt):
+            return ('{"steps": ['
+                    '{"name":"a","tool":"echo.echo",'
+                    ' "args":{"text":"a"},"depends_on":["b"]},'
+                    '{"name":"b","tool":"echo.echo",'
+                    ' "args":{"text":"b"},"depends_on":["a"]}]}')
+        report = AgentRun("t4c", "perform cycle-zqx", self.mgr, llm=llm).run()
+        self.assertNotEqual(report["status"], "completed")
+        self.assertEqual(self.mgr.calls, [])
 
     def test_arg_references_chain_steps(self):
         def llm(prompt):

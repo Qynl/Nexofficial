@@ -11,7 +11,7 @@ connected server actually exposed during discovery.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from mcp.capability import ToolCapability, capability_for_tool
 
@@ -39,8 +39,8 @@ class ToolView:
 
 @dataclass
 class ServerView:
+    """Metadata-only projection; actions exist only on ServerManager."""
     name: str
-    client: Any                    # object with .call(tool, args) -> dict
     tools: List[ToolView] = field(default_factory=list)
     protocol: Optional[str] = None
     health: str = "ok"
@@ -48,9 +48,6 @@ class ServerView:
     resources: int = 0
     prompts: int = 0
     last_error: Optional[str] = None
-
-    def call(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        return self.client.call(tool, args or {})
 
     def by_name(self, name: str) -> Optional[ToolView]:
         for t in self.tools:
@@ -81,17 +78,12 @@ class CapabilityRegistry:
                 if t.capability.category == category]
 
     def by_name(self, name: str) -> Optional[ToolView]:
-        for t in self.all_tools():
-            if t.name == name or t.full_name == name:
-                return t
-        return None
-
-    def call(self, server: str, tool: str,
-             args: Dict[str, Any]) -> Dict[str, Any]:
-        s = self.server(server)
-        if s is None:
-            return {"error": "no such server: " + str(server)}
-        return s.call(tool, args)
+        tools = self.all_tools()
+        if "." in (name or ""):
+            return next((t for t in tools if t.full_name == name), None)
+        matches = [t for t in tools if t.name == name]
+        # A bare name is safe only when unambiguous across connected servers.
+        return matches[0] if len(matches) == 1 else None
 
     # ----- compact capability summary (STAGE 26) --------------------------
     def relevant_tools(self, goal: str, limit: int = 40
@@ -155,8 +147,7 @@ class CapabilityRegistry:
     # ----- builder from live Upstream objects -----------------------------
     @classmethod
     def from_servers(cls, servers: List[Any]) -> "CapabilityRegistry":
-        """Build from objects exposing .name / .tools() / .call(tool, args)
-        (the MockMCPServer interface used by tests)."""
+        """Build metadata from objects exposing ``name`` and ``tools()``."""
         views: List[ServerView] = []
         for s in servers or []:
             tools: List[ToolView] = []
@@ -175,8 +166,7 @@ class CapabilityRegistry:
                     capability=cap,
                     annotations=t.get("annotations", {}) or {},
                 ))
-            views.append(ServerView(
-                name=s.name, client=s, tools=tools))
+            views.append(ServerView(name=s.name, tools=tools))
         return cls(views)
 
     @classmethod
@@ -212,7 +202,6 @@ class CapabilityRegistry:
             st = up.status() if hasattr(up, "status") else {}
             servers.append(ServerView(
                 name=up.name,
-                client=_UpstreamClient(up),
                 tools=tools,
                 protocol=st.get("protocol_version"),
                 health=st.get("health", "ok"),
@@ -222,22 +211,3 @@ class CapabilityRegistry:
                 last_error=st.get("last_error"),
             ))
         return cls(servers)
-
-
-class _UpstreamClient:
-    """Adapts a real Upstream so .call() returns a normalized dict."""
-
-    def __init__(self, up: Any) -> None:
-        self.up = up
-
-    def call(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            resp = self.up.call(tool, args or {})
-        except Exception as exc:  # noqa: BLE001
-            return {"error": type(exc).__name__ + ": " + str(exc)}
-        if isinstance(resp, dict) and "error" in resp:
-            err = resp["error"]
-            msg = err.get("message", "error") if isinstance(err, dict) else str(err)
-            return {"error": msg}
-        result = resp.get("result") if isinstance(resp, dict) else resp
-        return {"result": result}

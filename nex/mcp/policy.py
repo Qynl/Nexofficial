@@ -5,18 +5,16 @@ instruction — the planner/agent calls ``authorize()`` BEFORE every
 external action, and a denial is a hard stop, not a suggestion.
 
 Trust model
-  * SERVER trust is the operator's explicit act of ADDING a server
-    (token-protected UI / servers.json / env). There is no other way
-    for a server to enter the capability surface, so an allow-list of
-    servers would only re-state that act; the narrowing happens at the
-    TOOL level instead.
+  * Adding a server permits discovery only; UI-added servers default to
+    UNTRUSTED. ServerManager requires exact-call approval for interactive
+    use and refuses untrusted servers in unattended runs.
   * TOOL trust is the policy's job. A connected server may expose many
     tools; Nex must not trust what it cannot classify:
       - tools whose name heuristics cannot place (UNKNOWN) require
         CONFIRMATION by default (Policy.confirm_unknown) instead of
         silently passing, and
-      - any external tool named after a process-execution primitive
-        (PROCESS_EXECUTION) ALWAYS requires confirmation, and
+      - generic shell/process/terminal tools are categorically denied,
+      - language/editor code execution always needs explicit approval, and
       - destructive / network categories require confirmation.
     Explicit server/tool allow-lists (Policy fields) tighten further.
   * ``run_command`` and friends are shell primitives and are NEVER
@@ -28,8 +26,9 @@ Trust model
 from __future__ import annotations
 
 import re
+import unicodedata
+from urllib.parse import unquote
 
-import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
@@ -46,18 +45,31 @@ from mcp.capability import (
 # server=None (an attempt to reach "Nex's own tools") is denied here.
 INTERNAL_ALLOWED: frozenset = frozenset()
 
-# Tools that are ALWAYS treated as external/unsafe (never auto-allowed).
-# NOTE: matched against the BARE tool name — a connected MCP server that
-# exposes a tool literally named `run_command` is denied too.
-ALWAYS_DENIED = frozenset({"run_command"})
+# Shell/process control is not an agent capability, even when a connected
+# server advertises it.  Language/editor tools such as execute_luau and
+# run_script remain CODE_EXECUTION (confirmation-gated); generic command,
+# terminal and process launchers are categorically refused.
+ALWAYS_DENIED = frozenset({
+    "run_command", "execute_command", "spawn_shell", "open_terminal",
+    "terminal", "shell", "bash", "zsh", "powershell", "cmd", "cmd.exe",
+    "subprocess", "popen", "exec",
+})
+PROCESS_EXECUTION = frozenset()  # compatibility name; shell forms are denied
 
-# Process-execution tool names on EXTERNAL servers. A connected engine
-# may legitimately expose console/command tools; any such tool is a
-# high-risk PROCESS capability and ALWAYS requires confirmation.
-# (run_command itself is Nex's internal shell and is always DENIED above
-# — the two rules are deliberately separate so the policy has one
-# unambiguous statement of truth per name.)
-PROCESS_EXECUTION = frozenset({"execute_command", "exec"})
+
+def _forbidden_tool_name(tool: str) -> bool:
+    raw = (tool or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    if raw in ALWAYS_DENIED or normalized in ALWAYS_DENIED:
+        return True
+    toks = set(tokenize(raw))
+    if toks & {"terminal", "shell", "bash", "zsh", "powershell", "pwsh",
+               "subprocess", "popen", "pty"}:
+        return True
+    # command/process becomes forbidden only beside an execution verb;
+    # list_commands and inspect_process remain ordinary metadata tools.
+    return bool(toks & {"command", "commands", "cmd", "process"} and
+                toks & {"run", "execute", "exec", "spawn", "start", "open"})
 
 
 # THE BOUNDARY IS NOT CONFIGURABLE. There is no flag, env var, or runtime
@@ -136,11 +148,14 @@ _SENSITIVE_PATHS = (
     ("/dev/", "device files"),
     ("/var/lib/", "system state"),
     (".ssh/", "SSH keys"),
+    (".ssh\\", "SSH keys (Windows path form)"),
     ("id_rsa", "SSH private key"),
     ("id_ed25519", "SSH private key"),
     ("authorized_keys", "SSH access control"),
     (".aws/", "cloud credentials"),
+    (".aws\\", "cloud credentials (Windows path form)"),
     (".gnupg/", "PGP keys"),
+    (".gnupg\\", "PGP keys (Windows path form)"),
     (".netrc", "stored credentials"),
     (".bashrc", "shell profile"),
     (".zshrc", "shell profile"),
@@ -161,66 +176,44 @@ _PATH_KEYS = ("path", "file", "filepath", "filename", "dir", "directory",
               "folder", "target", "destination", "dest", "source", "output",
               "input", "asset_path", "script_path", "project_path")
 
-_MAX_SCAN = 64 * 1024
+# Confirmation UI can show this entire bounded payload for meaningful human
+# review; larger calls fail closed instead of hiding a dangerous suffix.
+_MAX_SCAN = 16 * 1024
 
 
-def _flatten(args: Any, prefix: str = "", out: Optional[list] = None) -> list:
-    """(key, string-value) pairs from arbitrarily nested arguments."""
-    if out is None:
-        out = []
-    if isinstance(args, dict):
-        for k, v in args.items():
-            _flatten(v, ("%s.%s" % (prefix, k)).strip("."), out)
-    elif isinstance(args, (list, tuple)):
-        for i, v in enumerate(args):
-            _flatten(v, "%s[%d]" % (prefix, i), out)
-    elif isinstance(args, str):
-        out.append((prefix, args))
-    return out
+def _flatten(args: Any) -> list:
+    """Bounded ``(key, string-value)`` pairs from nested JSON arguments.
 
-
-def scan_file_payload(path: str, workspace_root: str = "") -> Optional[str]:
-    """Scan a file the caller is about to EXECUTE. None = clean.
-
-    Closes the laundering hole: writing the payload into a file and then
-    running `run_python(file=...)` would slip past an argument scan, so
-    the referenced file is read (bounded) and checked with the same
-    marker rules. Files outside the project are refused outright.
+    Model-generated JSON is normally acyclic, but callers are Python code;
+    depth/node limits make the policy total even for hostile in-process data.
+    A synthetic ``__scan_error__`` pair makes overflow fail closed.
     """
-    if not path:
-        return None
-    raw = str(path)
-    root = os.path.realpath(workspace_root or os.getcwd())
-    target = raw if os.path.isabs(raw) else os.path.join(root, raw)
-    real = os.path.realpath(target)
-    if not (real == root or real.startswith(root + os.sep)):
-        return ("escape payload: %r is outside the project directory — "
-                "Nex only executes code it built here" % raw)
-    try:
-        with open(real, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read(_MAX_SCAN)
-    except OSError:
-        return None          # not a readable file: nothing to launder
-    low = text.lower()
-    for marker, why in _ESCAPE_MARKERS:
-        if marker in low:
-            return ("escape payload: the file %r contains %r (%s) — code "
-                    "that reaches the operating system is never part of "
-                    "building a game" % (raw, marker, why))
-    return None
-
-
-def code_file_argument(args: Any) -> str:
-    """The file path a call is about to execute, if it names one."""
-    for key, val in _flatten(args or {}):
-        leaf = key.split(".")[-1].lower()
-        if leaf not in _PATH_KEYS and leaf not in ("script", "code_file",
-                                                   "script_file"):
-            continue
-        if val and not val.strip().startswith(("{", "(", "local ", "import ",
-                                               "def ", "class ", "//", "#")):
-            return val.strip()
-    return ""
+    out = []
+    stack = [("", args, 0)]
+    seen = set()
+    nodes = 0
+    while stack:
+        prefix, value, depth = stack.pop()
+        nodes += 1
+        if nodes > 10000 or depth > 40:
+            out.append(("__scan_error__", "argument structure is too complex"))
+            break
+        if isinstance(value, (dict, list, tuple)):
+            ident = id(value)
+            if ident in seen:
+                out.append(("__scan_error__", "argument structure is cyclic"))
+                break
+            seen.add(ident)
+        if isinstance(value, dict):
+            for k, child in reversed(list(value.items())):
+                stack.append((("%s.%s" % (prefix, k)).strip("."),
+                              child, depth + 1))
+        elif isinstance(value, (list, tuple)):
+            for i in range(len(value) - 1, -1, -1):
+                stack.append(("%s[%d]" % (prefix, i), value[i], depth + 1))
+        elif isinstance(value, str):
+            out.append((prefix, value))
+    return out
 
 
 def scan_arguments(tool: str, args: Any,
@@ -236,34 +229,51 @@ def scan_arguments(tool: str, args: Any,
     if not pairs:
         return None
     budget = _MAX_SCAN
-    code_like = bool(capability and capability.category == CODE_EXECUTION)         or (tool or "").lower() in PROCESS_EXECUTION
+    code_like = bool(capability and capability.category == CODE_EXECUTION) \
+        or (tool or "").lower() in PROCESS_EXECUTION
     for key, val in pairs:
-        if budget <= 0:
-            break
-        text = val[:budget]
-        budget -= len(text)
-        low = text.lower()
+        if key == "__scan_error__":
+            return "escape payload: arguments could not be safely inspected (%s)" % val
+        if len(val) > budget:
+            return ("escape payload: arguments exceed the %d-character "
+                    "inspection limit; refusing rather than scanning only a prefix"
+                    % _MAX_SCAN)
+        budget -= len(val)
+        text = unicodedata.normalize("NFKC", val).replace("\x00", "")
+        # Decode common URL-encoded traversal/secret forms twice.  This does
+        # not attempt to execute or interpret content; it merely prevents
+        # encoding from bypassing deterministic substring rules.
+        decoded = text
+        for _ in range(2):
+            newer = unquote(decoded)
+            if newer == decoded:
+                break
+            decoded = newer
+        low = decoded.lower()
+        compact = re.sub(r"\s+", " ", low)
         if code_like:
             for marker, why in _ESCAPE_MARKERS:
-                if marker in low:
+                if marker in compact:
                     return ("escape payload: argument '%s' contains %r "
                             "(%s) — code that reaches the operating system "
                             "is never part of the task"
                             % (key or "?", marker, why))
         for marker, why in _SENSITIVE_PATHS:
-            if marker in low:
+            if marker in compact:
                 return ("escape payload: argument '%s' touches %r (%s) — "
                         "outside the project, not an AI capability"
                         % (key or "?", marker, why))
         for pattern, what in _CREDENTIAL_SHAPES:
-            if pattern.search(text):
+            if pattern.search(decoded):
                 return ("escape payload: argument '%s' carries a %s — "
                         "secrets are never the agent's to pass along"
                         % (key or "?", what))
-        if key.split(".")[-1].lower() in _PATH_KEYS and ("../" in text
-                                                         or "..\\" in text):
+        key_parts = {p.lower() for p in re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
+                                                    key)}
+        if key_parts.intersection(_PATH_KEYS) and \
+                ("../" in compact or "..\\" in compact):
             return ("escape payload: argument '%s' leaves the project "
-                    "directory (%r)" % (key or "?", text[:60]))
+                    "directory (%r)" % (key or "?", decoded[:60]))
     return None
 
 
@@ -282,9 +292,10 @@ class Policy:
     # design (operators can still pin exact tools via tool_allowlist).
     confirm_unknown: bool = True
     # --- the TRUSTED SERVER REGISTRY (strict mode) -------------------------
-    # CONNECTED != TRUSTED. When strict_servers is enabled (the deployed
-    # server enables it; see server._build_policy), an external tool call
-    # is allowed only if its server is in `trusted_servers`. The registry
+    # CONNECTED != TRUSTED. ServerManager enforces per-server interactive
+    # trust. ``strict_servers`` is an additional embedding/lockdown mode:
+    # an external tool call is allowed only if its server is in
+    # `trusted_servers`. The registry
     # is built by the composition root from the built-in catalog + the
     # operator's NEX_TRUSTED_SERVERS — never by the model. strict_servers
     # with trusted_servers=None fails CLOSED (nothing external passes):
@@ -292,8 +303,9 @@ class Policy:
     strict_servers: bool = False
     trusted_servers: Optional[Set[str]] = None
     # --- CODE EXECUTION standing approval (operator act) -------------------
-    # Code that runs on an engine (execute_luau, run_python, run_script, a
-    # terminal) executes with the ENGINE's privileges. Nex therefore asks
+    # Code that runs on an engine (execute_luau, run_python, run_script)
+    # executes with the ENGINE's privileges. Generic terminals are denied;
+    # language execution therefore asks
     # before running it — and in an autonomous run "asking" means stopping
     # (see agent/loop.py). An operator who has read that risk may pre-
     # approve specific servers here (NEX_ALLOW_CODE_EXECUTION=a,b) or a
@@ -355,21 +367,14 @@ def authorize(server: Optional[str], tool: str,
 
     # 1) Always-denied tools (shell, etc.) — bare tool name, so an
     # external server exposing a tool named `run_command` is denied too.
-    if tool in ALWAYS_DENIED:
+    if _forbidden_tool_name(tool):
         return Decision(False, False,
-                        "tool '%s' is never authorized" % tool, cat)
+                        "shell/process tool '%s' is never authorized"
+                        % tool, cat)
 
-    # 1b) Process-execution tool names on an EXTERNAL server: high-risk
-    # PROCESS capability. Never silently allowed: it needs the operator's
-    # standing approval (tool pin or NEX_ALLOW_CODE_EXECUTION) — and its
-    # ARGUMENTS are scanned below either way, so an approval can never
-    # turn into "run this shell command" for free.
-    # (Internal tools with these names fall through to the boundary below
-    # and are denied.)
-
-    # 2) Internal Nex runtime tool — ONLY the MCP introspection set.
-    # Everything else internal (filesystem/shell/host tools) is not an AI
-    # capability, regardless of flags.
+    # 2) Internal Nex runtime tool — there is no model-visible set.
+    # Filesystem/shell/host infrastructure is not an AI capability,
+    # regardless of flags.
     if server is None or server == "__internal__":
         if tool in INTERNAL_ALLOWED:
             return Decision(True, False,
@@ -444,7 +449,11 @@ def authorize(server: Optional[str], tool: str,
     # are permitted (subject to confirmation). Non-MCP external paths are
     # already blocked because they have no server. So we just continue.
     requires_confirm = (
-        cap.destructive
+        # A registry pin can explicitly escalate even a normally-safe
+        # category. Baseline UNKNOWN confirmation remains controlled by
+        # confirm_unknown below.
+        (cap.requires_confirmation and "+registry" in cap.source)
+        or cap.destructive
         or cat in pol.require_confirm_categories
         # Untrusted-by-default: an unclassifiable external tool is not
         # "safe, nobody looked"; it gets a human confirmation.

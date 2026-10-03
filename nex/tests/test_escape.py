@@ -191,6 +191,25 @@ class ConfigAttackTests(unittest.TestCase):
                                 for p in problems),
                "remote URL must demand explicit confirmation: %r" % problems)
 
+    def test_metadata_ssrf_is_never_confirmable(self):
+        for url in ("http://169.254.169.254/latest/meta-data/",
+                    "http://[fe80::1]/mcp",
+                    "http://metadata.google.internal/mcp"):
+            problems = validate_server_entry(
+                {"name": "meta", "url": url}, allow_remote=True)
+            expect(any("metadata" in p.lower() or "link-local" in p.lower()
+                       for p in problems),
+                   "metadata target must remain blocked: %r -> %r"
+                   % (url, problems))
+
+    def test_url_credentials_are_not_persisted(self):
+        for url in ("https://user:secret@example.com/mcp",
+                    "https://example.com/mcp?token=secret"):
+            problems = validate_server_entry(
+                {"name": "remote", "url": url}, allow_remote=True)
+            expect(problems, "credential-bearing URL must be rejected: %r"
+                   % url)
+
     def test_mcp_only_is_structural(self):
         expect(MCP_ONLY is True, "MCP_ONLY must be hardcoded True")
 

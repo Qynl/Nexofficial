@@ -52,9 +52,12 @@ c = cap.classify_capability("fetch_url")
 _expect(c.category == cap.NETWORK, "fetch_url classified NETWORK")
 _expect(c.network is True, "fetch_url network=True")
 
-# Unknown verb -> unknown category, CONSERVATIVELY requires confirmation.
-# (Name must avoid every heuristic hint — "widget" contains "get" and
-# would classify READ.)
+# Unknown verbs stay UNKNOWN. Matching is token-aware: an incidental
+# substring such as the "get" inside "widget" must never downgrade a novel
+# tool to READ.
+c = cap.classify_capability("widget")
+_expect(c.category == cap.UNKNOWN,
+        "incidental keyword substring does not bypass UNKNOWN")
 c = cap.classify_capability("zorken_quibble")
 _expect(c.category == cap.UNKNOWN, "unknown tool -> UNKNOWN category")
 _expect(c.requires_confirmation is True,
@@ -182,16 +185,13 @@ _expect(d.allowed is False,
 d = policy_mod.authorize(None, "exec")
 _expect(d.allowed is False, "internal 'exec' denied by the boundary")
 
-# External process-execution names: allowed but ALWAYS confirmation.
-d = policy_mod.authorize("engine", "exec")
-_expect(d.allowed is True and d.requires_confirmation is True,
-        "external 'exec' allowed only with confirmation")
-# Round 3 unified the label: a process tool IS code execution, so it now
-# reports the real category instead of a parallel pseudo-category. One
-# vocabulary means one place to reason about the risk.
-_expect(d.category == "code_execution",
-        "external 'exec' categorized code_execution (unified with the "
-        "capability model, not a separate PROCESS label)")
+# Generic shell/process tools are not a capability at all, even over MCP.
+# Engine-language tools remain available behind the code-execution gate.
+for _shell_name in ("exec", "execute-command", "spawn_shell",
+                    "open_terminal", "run_console_command"):
+    d = policy_mod.authorize("engine", _shell_name)
+    _expect(d.allowed is False,
+            "external shell/process tool refused: %s" % _shell_name)
 
 # Escape payloads are refused outright — never offered for approval.
 from mcp.capability import CODE_EXECUTION  # noqa: E402
@@ -220,6 +220,14 @@ d = policy_mod.authorize("studio", "create_script", None,
 _expect(d.allowed is False and "escape payload" in d.reason,
         "sensitive path refused on a plain create tool: %s"
         % d.reason[:60])
+d = policy_mod.authorize("studio", "read_file", None,
+                         args={"path": "%252e%252e%252fetc%252fpasswd"})
+_expect(d.allowed is False,
+        "double-encoded path traversal is refused")
+d = policy_mod.authorize("studio", "create_script", None,
+                         args={"text": "x" * (17 * 1024)})
+_expect(d.allowed is False,
+        "oversized uninspectable arguments fail closed")
 
 # Unclassifiable external tools: untrusted by default -> confirmation,
 # unless the operator explicitly relaxes it (confirm_unknown=False).

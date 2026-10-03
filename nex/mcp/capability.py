@@ -327,8 +327,24 @@ def _category_from_annotations(ann: Dict[str, Any], name_l: str) -> str:
 
 
 def _has_hint(name_l: str, cat: str) -> bool:
-    for h in _CAT_HINTS[cat]:
-        if h in name_l:
+    """Token-aware name matching (never arbitrary substring matching).
+
+    The old ``hint in name`` rule classified names such as ``widget`` as
+    READ because they contain ``get``.  A malicious/novel tool could exploit
+    that accidental substring to avoid UNKNOWN confirmation.  Exact token
+    sequences keep normal snake/kebab MCP names working and fail closed for
+    ambiguous names.
+    """
+    parts = tokenize(name_l)
+    if not parts:
+        return False
+    for hint in _CAT_HINTS[cat]:
+        wanted = tokenize(hint)
+        if not wanted:
+            continue
+        width = len(wanted)
+        if any(parts[i:i + width] == wanted
+               for i in range(0, len(parts) - width + 1)):
             return True
     return False
 

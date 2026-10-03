@@ -104,6 +104,17 @@ if "mcp.transport" in loop_src:
     failures.append("agent/loop.py must reach servers only through the "
                     "manager, not the transport")
 
+# The live registry is shown to the planner.  It must remain metadata-only:
+# retaining a client or exposing call() here would be a second route around
+# manager.call() -> policy -> audit.
+registry_tree = ast.parse(open(os.path.join(NEX, "mcp", "registry.py"),
+                               encoding="utf-8").read())
+for node in ast.walk(registry_tree):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+            and node.name == "call":
+        failures.append("mcp/registry.py exposes call() — the registry must "
+                        "be metadata-only")
+
 # ── 3. no Minecraft anywhere ─────────────────────────────────────────────
 
 MINECRAFT_WORDS = ("minecraft", "Minecraft", "MINECRAFT")
@@ -155,6 +166,7 @@ print("ok   - mcp/* imports nothing from agent/server (pure core)")
 print("ok   - agent/* free of server imports")
 print("ok   - no local tool surface (tools/mc/minecraft/stdio gone)")
 print("ok   - agent/loop acts only through the manager")
+print("ok   - capability registry is metadata-only (no call bypass)")
 print("ok   - no Minecraft references in the codebase")
 print("ok   - subprocess confined to mcp/transport.py (stdio transport)")
 print("ok   - MCP_ONLY is structural, not configurable")

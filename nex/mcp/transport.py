@@ -48,7 +48,71 @@ class UpstreamError(RuntimeError):
 # stdio framing (LSP-style Content-Length, plus NDJSON tolerance on read)
 # ---------------------------------------------------------------------------
 
-_MAX_FRAME_BYTES = 32 * 1024 * 1024      # 32 MiB per frame
+_MAX_FRAME_BYTES = 8 * 1024 * 1024       # bounded untrusted MCP frame
+_MAX_HTTP_BYTES = 8 * 1024 * 1024        # bounded untrusted HTTP response
+_MAX_HEADER_BYTES = 16 * 1024
+_MAX_SESSION_ID_CHARS = 1024
+_MAX_TOOLS = 5000
+_MAX_LIST_PAGES = 50
+
+
+def _origin(url: str) -> Tuple[str, str, int]:
+    p = urlparse(url)
+    scheme = (p.scheme or "").lower()
+    host = (p.hostname or "").lower().rstrip(".")
+    try:
+        port = p.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        port = -1
+    return scheme, host, port
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never let a configured MCP endpoint redirect calls/session IDs away."""
+    max_redirections = 3
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(req.full_url) != _origin(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url, code,
+                "refused cross-origin MCP redirect to %s" % newurl,
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HTTP_OPENER = urllib.request.build_opener(_SameOriginRedirectHandler())
+
+
+def _read_bounded(stream: Any, limit: int = _MAX_HTTP_BYTES) -> bytes:
+    body = stream.read(limit + 1)
+    if len(body) > limit:
+        raise UpstreamError("MCP response exceeds %d bytes" % limit)
+    return body
+
+
+def _stdio_environment() -> Dict[str, str]:
+    """Minimal child environment; provider/Nex tokens are not inherited.
+
+    A stdio server is operator-selected local code, but silently handing it
+    every API key in Nex's environment is unnecessary ambient authority.
+    Operators can explicitly pass required variable *names* with
+    NEX_STDIO_ENV_ALLOW (for example ``GITHUB_TOKEN``).
+    """
+    import os
+    safe = {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
+        "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+    }
+    out = {k: v for k, v in os.environ.items() if k.upper() in safe}
+    allow = {n.strip() for n in os.environ.get(
+        "NEX_STDIO_ENV_ALLOW", "").split(",") if n.strip()}
+    # Nex's own browser auth credential can never be delegated to a child.
+    allow.discard("NEX_AUTH_TOKEN")
+    for name in allow:
+        if name in os.environ:
+            out[name] = os.environ[name]
+    return out
 
 
 class StdioDecoder:
@@ -60,8 +124,23 @@ class StdioDecoder:
         self._expected_len: Optional[int] = None
 
     def feed(self, chunk: bytes) -> List[bytes]:
-        """Append bytes; return any complete bodies ready to parse."""
+        """Append bytes; return complete bodies, failing closed on overflow."""
         self._buf += chunk
+        if self._expected_len is None:
+            stripped = self._buf.lstrip()
+            is_header = stripped.lower().startswith(b"content-length:")
+            cap = _MAX_HEADER_BYTES if is_header else _MAX_FRAME_BYTES
+            cr_end = self._buf.find(b"\r\n\r\n")
+            lf_end = self._buf.find(b"\n\n")
+            ends = [i for i in (cr_end, lf_end) if i >= 0]
+            header_end = min(ends) if ends else -1
+            if is_header and header_end > _MAX_HEADER_BYTES:
+                raise ValueError("stdio header exceeds %d bytes"
+                                 % _MAX_HEADER_BYTES)
+            if len(self._buf) > cap and (not is_header or header_end < 0):
+                raise ValueError("unterminated stdio frame exceeds %d bytes" % cap)
+        elif len(self._buf) > _MAX_FRAME_BYTES:
+            raise ValueError("stdio frame exceeds %d bytes" % _MAX_FRAME_BYTES)
         out: List[bytes] = []
         while True:
             if self._expected_len is None:
@@ -110,9 +189,9 @@ class StdioDecoder:
                     self._buf = (self._buf[hdr_end + 4:]
                                  if idx_cr >= 0 else self._buf[hdr_end + 2:])
                     continue
-                if clen > _MAX_FRAME_BYTES:
+                if clen is not None and (clen < 0 or clen > _MAX_FRAME_BYTES):
                     raise ValueError(
-                        "frame too large: %d bytes (max %d)"
+                        "invalid frame length: %d bytes (max %d)"
                         % (clen, _MAX_FRAME_BYTES))
                 self._expected_len = clen
                 self._buf = self._buf[body_offset:]
@@ -239,13 +318,18 @@ class Upstream:
             method="POST", headers=hdr,
         )
         try:
-            with urllib.request.urlopen(
+            with _HTTP_OPENER.open(
                 req, timeout=timeout or self.call_timeout,
             ) as resp:
+                raw = _read_bounded(resp)
                 return (resp.status, dict(resp.headers),
-                        resp.read().decode("utf-8", "replace"))
+                        raw.decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "replace") if e.fp else ""
+            try:
+                body = (_read_bounded(e).decode("utf-8", "replace")
+                        if e.fp else "")
+            except UpstreamError:
+                body = "<oversized error response>"
             return (e.code, dict(e.headers or {}), body)
         except urllib.error.URLError as e:
             raise UpstreamError(
@@ -257,6 +341,7 @@ class Upstream:
 
     def _ensure_stdio_proc(self) -> None:
         """Lazy-spawn the stdio MCP child process."""
+        import os
         import subprocess
         if self._stdio_proc is not None and self._stdio_proc.poll() is None:
             return
@@ -271,6 +356,9 @@ class Upstream:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
+                close_fds=True,
+                env=_stdio_environment(),
+                start_new_session=(os.name == "posix"),
             )
         except FileNotFoundError as exc:
             raise UpstreamError("stdio command not found: " + str(exc))
@@ -283,18 +371,46 @@ class Upstream:
         ).start()
 
     def _drain_stderr(self, stream) -> None:
-        """Forward the child's stderr to ours so its debug output never
-        goes unobserved. Prefixed with the server name."""
+        """Forward bounded child diagnostics, prefixed with the server name."""
         import sys
         try:
-            for line in iter(stream.readline, b""):
-                if not line:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
                     return
-                sys.stderr.write("[mcp:%s] " % self.name
-                                 + line.decode("utf-8", "replace"))
+                text = chunk.decode("utf-8", "replace")
+                sys.stderr.write("[mcp:%s] " % self.name + text)
                 sys.stderr.flush()
         except (BrokenPipeError, OSError):
             pass
+
+    @staticmethod
+    def _terminate_stdio_proc(proc: Any) -> None:
+        import os
+        import signal
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:  # noqa: BLE001 - best-effort process reaping
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except Exception:  # noqa: BLE001
+                pass
+        for stream in (getattr(proc, "stdin", None),
+                       getattr(proc, "stdout", None),
+                       getattr(proc, "stderr", None)):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
 
     def _post_stdio(self, payload: Dict[str, Any],
                     headers: Optional[Dict[str, str]],
@@ -322,10 +438,7 @@ class Upstream:
                 proc.stdin.write(frame)
                 proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                self._terminate_stdio_proc(proc)
                 self._stdio_proc = None
                 raise UpstreamError("stdio write failed: " + repr(exc))
             decoder = StdioDecoder()
@@ -365,15 +478,15 @@ class Upstream:
                                 msg.get("id") == payload.get("id"):
                             return (200, {},
                                     body_bytes.decode("utf-8", "replace"))
-            except UpstreamError:
+            except (UpstreamError, ValueError) as exc:
                 # The child still holds the unanswered request; a late
-                # reply would poison the NEXT call, so recycle it.
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                # reply would poison the NEXT call, so recycle its process
+                # group. Decoder failures are transport failures too.
+                self._terminate_stdio_proc(proc)
                 self._stdio_proc = None
-                raise
+                if isinstance(exc, UpstreamError):
+                    raise
+                raise UpstreamError("invalid stdio frame: %s" % exc) from exc
             finally:
                 try:
                     os.set_blocking(fd, True)
@@ -399,10 +512,7 @@ class Upstream:
                     proc.stdin.write(frame)
                     proc.stdin.flush()
                 except (BrokenPipeError, OSError) as exc:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
+                    self._terminate_stdio_proc(proc)
                     self._stdio_proc = None
                     raise UpstreamError("stdio write failed: " + repr(exc))
             return
@@ -436,41 +546,52 @@ class Upstream:
             }
             self._on_failure("HTTP " + str(status))
             return err
-        ctype = headers.get("Content-Type", "").lower()
+        lower_headers = {str(k).lower(): str(v) for k, v in headers.items()}
+        ctype = lower_headers.get("content-type", "").lower()
+        candidates: List[Any] = []
         if "text/event-stream" in ctype:
-            data_lines = []
-            for line in body.splitlines():
-                if line.startswith("data:"):
-                    data_lines.append(line[len("data:"):].strip())
-            text = "\n".join(data_lines).strip()
-            if not text:
-                self._on_failure("empty SSE reply")
-                return {"jsonrpc": "2.0",
-                        "error": {"code": -32002,
-                                  "message": "server returned empty SSE"},
-                        "id": payload["id"]}
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError as exc:
-                self._on_failure("invalid SSE JSON: " + str(exc))
-                return {"jsonrpc": "2.0",
-                        "error": {"code": -32002,
-                                  "message": "server returned invalid JSON"},
-                        "id": payload["id"]}
+            # Each SSE event has its own data block.  Joining every data line
+            # in the response together corrupts valid multi-event replies.
+            data_lines: List[str] = []
+            for line in body.splitlines() + [""]:
+                if line == "":
+                    if data_lines:
+                        text = "\n".join(data_lines).strip()
+                        try:
+                            candidates.append(json.loads(text))
+                        except json.JSONDecodeError:
+                            pass
+                        data_lines = []
+                elif line.startswith("data:"):
+                    data_lines.append(line[len("data:"):].lstrip())
         else:
             try:
-                parsed = json.loads(body)
+                candidates.append(json.loads(body))
             except json.JSONDecodeError as exc:
                 self._on_failure("invalid JSON: " + str(exc))
-                return {"jsonrpc": "2.0",
-                        "error": {"code": -32002,
-                                  "message": "server returned invalid JSON"},
-                        "id": payload["id"]}
-        sid = headers.get("Mcp-Session-Id") or headers.get("mcp-session-id")
+                raise UpstreamError("server returned invalid JSON") from exc
+
+        parsed = next((m for m in candidates
+                       if isinstance(m, dict)
+                       and m.get("id") == payload["id"]), None)
+        if parsed is None:
+            why = ("SSE contained no matching JSON-RPC response"
+                   if "text/event-stream" in ctype
+                   else "invalid JSON-RPC response envelope or id")
+            self._on_failure(why)
+            raise UpstreamError(why)
+        if parsed.get("jsonrpc") not in (None, "2.0") or not \
+                ("result" in parsed or "error" in parsed):
+            self._on_failure("invalid JSON-RPC response envelope")
+            raise UpstreamError("invalid JSON-RPC response envelope")
+
+        sid = lower_headers.get("mcp-session-id")
         if sid:
+            if len(sid) > _MAX_SESSION_ID_CHARS or "\r" in sid or "\n" in sid:
+                self._on_failure("invalid MCP session id")
+                raise UpstreamError("server returned an invalid MCP session id")
             self._session_id = sid
-        if "result" in parsed or "error" in parsed:
-            self._on_success()
+        self._on_success()
         return parsed
 
     def _on_success(self) -> None:
@@ -531,8 +652,12 @@ class Upstream:
             raise UpstreamError(
                 "initialize failed: " + json.dumps(resp["error"]))
         result = resp.get("result", {})
-        self._server_info = result.get("serverInfo", {})
-        self._protocol_version = result.get("protocolVersion")
+        if not isinstance(result, dict):
+            raise UpstreamError("initialize returned a non-object result")
+        info = result.get("serverInfo", {})
+        self._server_info = info if isinstance(info, dict) else {}
+        version = result.get("protocolVersion")
+        self._protocol_version = str(version)[:80] if version is not None else None
         try:
             self._notify("notifications/initialized")
         except UpstreamError:
@@ -560,21 +685,64 @@ class Upstream:
                     proc.stdin.close()
                 except (OSError, AttributeError):
                     pass
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                self._terminate_stdio_proc(proc)
 
     # ---------- tools/list / tools/call --------------------------------------
 
     def _fetch_tools(self) -> List[Dict[str, Any]]:
         if not self._initialized:
             self.connect()
-        resp = self._rpc("tools/list")
-        if "error" in resp:
-            raise UpstreamError(
-                "tools/list failed: " + json.dumps(resp["error"]))
-        return list(resp.get("result", {}).get("tools", []))
+        out: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        seen_cursors = set()
+        seen_names = set()
+        for _page in range(_MAX_LIST_PAGES):
+            params = {"cursor": cursor} if cursor else None
+            resp = self._rpc("tools/list", params)
+            if "error" in resp:
+                raise UpstreamError(
+                    "tools/list failed: " + json.dumps(resp["error"]))
+            result = resp.get("result", {})
+            if not isinstance(result, dict):
+                raise UpstreamError("tools/list returned a non-object result")
+            tools = result.get("tools", [])
+            if not isinstance(tools, list):
+                raise UpstreamError("tools/list returned a non-array tools field")
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                name = tool.get("name")
+                if not isinstance(name, str) or not name or len(name) > 128 \
+                        or any(ord(ch) < 33 or ord(ch) == 127 for ch in name):
+                    continue
+                if name in seen_names:
+                    raise UpstreamError("server returned duplicate tool name %r"
+                                        % name)
+                schema = tool.get("inputSchema")
+                if schema is not None and not isinstance(schema, dict):
+                    continue
+                clean = dict(tool)
+                clean["description"] = (tool.get("description")
+                                        if isinstance(tool.get("description"), str)
+                                        else "")
+                clean["annotations"] = (tool.get("annotations")
+                                        if isinstance(tool.get("annotations"), dict)
+                                        else {})
+                clean["inputSchema"] = schema or {}
+                out.append(clean)
+                seen_names.add(name)
+                if len(out) > _MAX_TOOLS:
+                    raise UpstreamError("server exposes more than %d tools"
+                                        % _MAX_TOOLS)
+            nxt = result.get("nextCursor")
+            if not isinstance(nxt, str) or not nxt:
+                return out
+            if len(nxt) > 2048 or nxt in seen_cursors:
+                raise UpstreamError("invalid/repeated tools/list cursor")
+            seen_cursors.add(nxt)
+            cursor = nxt
+        raise UpstreamError("tools/list exceeded %d pagination pages"
+                            % _MAX_LIST_PAGES)
 
     def tools(self) -> List[Dict[str, Any]]:
         """Cached tool list, refreshed every `_tools_cache_ttl_s`."""
@@ -610,11 +778,28 @@ class Upstream:
             self._latency_ms = round((time.monotonic() - t0) * 1000, 1)
             if "error" in resp:
                 err = resp["error"]
-                self._last_error = err.get("message", "unknown")
+                err = err if isinstance(err, dict) else {"message": str(err)}
+                message = str(err.get("message", "unknown"))[:1000]
+                self._last_error = message
                 self._health = "degraded"
                 raise UpstreamError(
-                    "tool error: " + err.get("message", "unknown")
+                    "tool error: " + message
                     + " (code " + str(err.get("code", -1)) + ")")
+            result = resp.get("result")
+            # MCP tool-level failures use result.isError rather than the
+            # JSON-RPC error member.  Treating these as success would make
+            # the agent falsely report failed work as completed.
+            if isinstance(result, dict) and result.get("isError") is True:
+                detail = "MCP tool reported an error"
+                content = result.get("content")
+                if isinstance(content, list):
+                    texts = [str(x.get("text", "")) for x in content
+                             if isinstance(x, dict) and x.get("text")]
+                    if texts:
+                        detail += ": " + " ".join(texts)[:900]
+                self._last_error = detail
+                self._health = "degraded"
+                raise UpstreamError(detail)
             self._record_success()
             return resp
 

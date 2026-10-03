@@ -136,6 +136,7 @@ function handleEvent(ev) {
     case 'run.tool': if (forActive) runview.onRunTool(ev); break;
     case 'run.progress': if (forActive) runview.onRunProgress(ev); break;
     case 'run.eval': if (forActive) runview.onRunEval(ev); break;
+    case 'run.quality': if (forActive) runview.onRunQuality(ev); break;
     case 'run.waiting':
       if (forActive) runview.onRunWaiting(ev);
       break;

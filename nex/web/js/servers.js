@@ -337,12 +337,12 @@ function addServerDialog() {
       <div class="switch-row">
         <div class="sw-text">
           <div class="sw-title">Trust this server</div>
-          <div class="sw-sub">Trusted servers may serve autonomous tool calls
-          (still policy-gated per tool). Untrusted servers require approval
-          and are refused in autonomous runs.</div>
+          <div class="sw-sub">Off by default. Trusted servers may serve
+          autonomous tool calls (still policy-gated per tool). Leave this off
+          until you have reviewed the server and its tools.</div>
         </div>
         <label class="switch">
-          <input type="checkbox" name="trusted" checked>
+          <input type="checkbox" name="trusted">
           <span class="knob"></span>
         </label>
       </div>

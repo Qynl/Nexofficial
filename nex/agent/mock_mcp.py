@@ -96,5 +96,5 @@ def server_view(name: str, mock: MockMCPServer,
             description=t.get("description", ""), schema=t.get("inputSchema", {}) or {},
             capability=cap, annotations=t.get("annotations", {}) or {},
         ))
-    return ServerView(name=name, client=mock, tools=tools, protocol=protocol,
+    return ServerView(name=name, tools=tools, protocol=protocol,
                       health="ok")
