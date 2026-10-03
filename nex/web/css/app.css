@@ -1713,8 +1713,64 @@ body.user-scrolled #scroller { scroll-behavior: auto; }
   animation: msg-in var(--d2) ease;
 }
 .prov-head { display: flex; align-items: center; gap: 10px; }
+.prov-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .prov-name { font-weight: 650; font-size: 14px; flex: 1; }
+.prov-kind { font: 11px var(--font-mono); color: var(--fg-faint); }
 .prov-form { margin-top: 12px; }
+.prov-telemetry {
+  margin-top: 9px;
+  color: var(--fg-faint);
+  font: 10.5px/1.55 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.prov-note {
+  margin-top: 5px;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+}
+.role-routing {
+  margin-bottom: 16px;
+  padding: 15px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-lg);
+  background: linear-gradient(145deg, var(--accent-dim), var(--surface));
+}
+.role-routing-title {
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.role-route {
+  display: grid;
+  grid-template-columns: minmax(120px, .85fr) repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.role-route strong, .role-route small { display: block; }
+.role-route small {
+  margin-top: 3px;
+  color: var(--fg-faint);
+  font: 10px/1.35 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.role-route select, .role-route input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--fg);
+  font: 11px var(--font-mono);
+}
+.role-route-save { margin-top: 11px; padding: 7px 14px; }
+@media (max-width: 720px) {
+  .role-route { grid-template-columns: 1fr; margin-top: 14px; }
+}
 .prov-roles {
   display: flex;
   gap: 6px;

@@ -314,6 +314,17 @@ class APITests(unittest.TestCase):
         for p in body.get("providers", []):
             expect("key_masked" in p or not p.get("configured"),
                    "provider %r must expose a masked key at most" % p)
+            expect("structured_outputs" in p,
+                   "provider JSON-mode capability must reach settings UI")
+            state = p.get("state") or {}
+            expect("total_prompt_tokens" in state and "last_purpose" in state,
+                   "provider flight telemetry must reach settings UI")
+        expect("chat" in (body.get("roles") or {}) and
+               "agent" in (body.get("roles") or {}),
+               "both model-routing roles must reach settings UI")
+        expect(any(item.get("provider") == "nim"
+                   for item in body.get("catalog", [])),
+               "curated NIM starting points must reach settings UI")
 
     def test_provider_patch_rejected_for_bad_shape(self):
         s, body = self.req("POST", "/api/providers",

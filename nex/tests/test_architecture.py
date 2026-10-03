@@ -16,6 +16,7 @@ level (AST, not runtime imports):
 """
 import ast
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -156,6 +157,18 @@ providers_src = open(os.path.join(NEX, "agent", "providers.py"),
 if 'ROLE_CHAT = "chat"' not in providers_src \
         or 'ROLE_AGENT = "agent"' not in providers_src:
     failures.append("agent/providers.py: roles must be chat/agent")
+
+# Provider/model/endpoint text is persisted operator data and can also come
+# from remote model catalogs. It must never be interpolated into HTML.
+settings_src = open(os.path.join(NEX, "web", "js", "settings.js"),
+                    encoding="utf-8").read()
+html_templates = re.findall(r"\.innerHTML\s*=\s*`[^`]*`", settings_src,
+                            flags=re.DOTALL)
+for unsafe in ("${p.name}", "${p.kind}", "${p.base_url}", "${p.model}",
+               "${p.key_masked}", "${err.message}"):
+    if any(unsafe in template for template in html_templates):
+        failures.append("web/js/settings.js interpolates untrusted provider "
+                        "data into HTML: %s" % unsafe)
 
 if failures:
     for f in failures:

@@ -39,6 +39,7 @@ from agent.events import (
     STATUS_COMPLETED, STATUS_PARTIAL, STATUS_FAILED, STATUS_BLOCKED,
     STATUS_CANCELLED, emit,
 )
+from agent.llm import call as call_llm
 from agent.model_planner import model_driven_planner, validate_plan_deep
 from agent.planner import plan as skeleton_plan
 from agent.prompts import EVALUATOR_SYSTEM, SUMMARIZER_SYSTEM
@@ -786,7 +787,7 @@ class AgentRun:
             {"role": "user", "content": "\n".join(parts)},
         ]
         try:
-            reply = self.llm(messages)
+            reply = call_llm(self.llm, messages, "evaluation")
         except Exception:  # noqa: BLE001
             return None
         obj = extract_json_with_key(reply, "done")
@@ -1148,12 +1149,12 @@ class AgentRun:
     def _summarize(self, report: Dict[str, Any]) -> str:
         if self.llm is not None:
             try:
-                reply = self.llm([
+                reply = call_llm(self.llm, [
                     {"role": "system", "content": SUMMARIZER_SYSTEM},
                     {"role": "user", "content":
                      "Goal: %s\n\nReport:\n%s" % (
                          self.goal, _jsonish(report))},
-                ])
+                ], "summary")
                 if reply and isinstance(reply, str) and len(reply.strip()) > 10:
                     return reply.strip()
             except Exception:  # noqa: BLE001

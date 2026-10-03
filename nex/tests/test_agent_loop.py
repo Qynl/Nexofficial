@@ -195,6 +195,26 @@ class PlanningTests(unittest.TestCase):
         # fallback: deterministic planner still handles the direct request
         self.assertEqual(report["status"], "completed")
 
+    def test_provider_receives_exact_agent_job_purpose(self):
+        purposes = []
+
+        def llm(messages, purpose=""):
+            purposes.append(purpose)
+            if purpose == "planning":
+                return ('{"steps":['
+                        '{"name":"say","tool":"echo.echo",'
+                        '"args":{"text":"hello"}},'
+                        '{"name":"again","tool":"echo.echo",'
+                        '"args":{"text":"again"},"depends_on":["say"]}]}')
+            if purpose == "evaluation":
+                return '{"done":false,"adjust":"none","reason":"continue"}'
+            return "The echo completed successfully."
+        llm.supports_purpose = True
+
+        report = AgentRun("t4p", "echo hello", self.mgr, llm=llm).run()
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(purposes, ["planning", "evaluation", "summary"])
+
     def test_qualified_tool_namespace_is_never_stripped(self):
         def llm(prompt):
             return ('{"steps": [{"name": "Wrong server", '

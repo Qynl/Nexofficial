@@ -34,6 +34,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from agent.jsonreply import extract_json_with_key
+from agent.llm import call as call_llm
 from agent.prompts import DIAGNOSE_SYSTEM
 
 
@@ -145,7 +146,8 @@ def diagnose(task: Any, err: str, registry, llm
     if llm is None:
         return None
     try:
-        reply = llm(build_failure_context(task, err, registry))
+        reply = call_llm(
+            llm, build_failure_context(task, err, registry), "diagnosis")
         decision = parse_decision(reply)
         if decision is None:
             return None

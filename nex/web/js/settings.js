@@ -43,7 +43,11 @@ async function renderModelPanel() {
   try {
     view = await api.providers();
   } catch (err) {
-    panel.innerHTML = `<div class="form-err">${err.message}</div>`;
+    panel.innerHTML = '';
+    const failure = document.createElement('div');
+    failure.className = 'form-err';
+    failure.textContent = err.message;
+    panel.appendChild(failure);
     return;
   }
   panel.innerHTML = '';
@@ -56,10 +60,103 @@ async function renderModelPanel() {
     + 'fails or is rate-limited, the next one in the chain takes over '
     + 'without losing the work.';
   panel.appendChild(intro);
+  panel.appendChild(roleRouting(view));
 
   for (const p of view.providers || []) {
     panel.appendChild(providerCard(p, view));
   }
+}
+
+function roleRouting(view) {
+  const box = document.createElement('div');
+  box.className = 'role-routing';
+  const title = document.createElement('div');
+  title.className = 'role-routing-title';
+  title.textContent = 'Model flight plan';
+  box.appendChild(title);
+
+  const providerModels = new Map(
+    (view.providers || []).map((p) => [p.name, p.model || '']));
+  const names = [...providerModels.keys()];
+  for (const role of ['chat', 'agent']) {
+    const config = (view.roles || {})[role] || {};
+    const live = config.serving || config.active || config.provider || '';
+    const row = document.createElement('div');
+    row.className = 'role-route';
+
+    const identity = document.createElement('div');
+    const roleName = document.createElement('strong');
+    roleName.textContent = role === 'chat' ? 'Chat brain' : 'Agent brain';
+    const status = document.createElement('small');
+    status.textContent = live
+      ? `live: ${live} · ${config.serving_model || config.active_model || config.model || 'default model'}`
+      : 'no provider currently available';
+    identity.appendChild(roleName);
+    identity.appendChild(status);
+
+    const primary = document.createElement('select');
+    primary.dataset.role = role;
+    primary.dataset.f = 'provider';
+    for (const name of names) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      option.selected = name === config.provider;
+      primary.appendChild(option);
+    }
+
+    const model = document.createElement('input');
+    model.type = 'text';
+    model.dataset.role = role;
+    model.dataset.f = 'model';
+    model.value = config.model || '';
+    model.placeholder = 'primary model override';
+    primary.addEventListener('change', () => {
+      model.value = providerModels.get(primary.value) || '';
+    });
+
+    const fallbacks = document.createElement('input');
+    fallbacks.type = 'text';
+    fallbacks.dataset.role = role;
+    fallbacks.dataset.f = 'fallbacks';
+    const chain = (view.chains || {})[role] || [];
+    fallbacks.value = chain.filter((name) => name !== config.provider).join(', ');
+    fallbacks.placeholder = 'fallbacks, in order';
+
+    row.appendChild(identity);
+    row.appendChild(primary);
+    row.appendChild(model);
+    row.appendChild(fallbacks);
+    box.appendChild(row);
+  }
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn-approve role-route-save';
+  save.textContent = 'Save routing';
+  save.addEventListener('click', async () => {
+    const roles = {};
+    for (const role of ['chat', 'agent']) {
+      const get = (field) => box.querySelector(
+        `[data-role="${role}"][data-f="${field}"]`);
+      roles[role] = {
+        provider: get('provider').value,
+        model: get('model').value.trim(),
+        fallbacks: get('fallbacks').value.split(',')
+          .map((name) => name.trim()).filter(Boolean),
+      };
+    }
+    try {
+      const res = await api.saveProviders({ roles });
+      store.set({ provider: res.provider });
+      toast('success', 'Saved model routing');
+      renderModelPanel();
+    } catch (err) {
+      errorToast(err);
+    }
+  });
+  box.appendChild(save);
+  return box;
 }
 
 function providerCard(p, view) {
@@ -76,10 +173,18 @@ function providerCard(p, view) {
 
   const head = document.createElement('div');
   head.className = 'prov-head';
-  head.innerHTML = `
-    <span style="width:9px;height:9px;border-radius:50%;background:${tone};flex:none"></span>
-    <span class="prov-name">${p.name}</span>
-    <span style="font-family:var(--font-mono);font-size:11px;color:var(--fg-faint)">${p.kind}</span>`;
+  const dot = document.createElement('span');
+  dot.className = 'prov-dot';
+  dot.style.background = tone;
+  const name = document.createElement('span');
+  name.className = 'prov-name';
+  name.textContent = p.name;
+  const kind = document.createElement('span');
+  kind.className = 'prov-kind';
+  kind.textContent = p.kind;
+  head.appendChild(dot);
+  head.appendChild(name);
+  head.appendChild(kind);
   if (p.key_mismatch) {
     const mm = document.createElement('span');
     mm.className = 'cat-badge cat-unknown';
@@ -102,6 +207,26 @@ function providerCard(p, view) {
   }
   el.appendChild(roles);
 
+  const telemetry = document.createElement('div');
+  telemetry.className = 'prov-telemetry';
+  const facts = [
+    state.last_model ? `model ${state.last_model}` : null,
+    state.last_purpose ? `job ${state.last_purpose}` : null,
+    state.total_calls != null ? `${state.total_ok || 0}/${state.total_calls} calls ok` : null,
+    (state.total_prompt_tokens || state.total_completion_tokens)
+      ? `${(state.total_prompt_tokens || 0) + (state.total_completion_tokens || 0)} tokens`
+      : null,
+    state.budget_left != null ? `${state.budget_left} RPM left` : 'unmetered',
+  ].filter(Boolean);
+  telemetry.textContent = facts.join(' · ');
+  el.appendChild(telemetry);
+  if (p.note) {
+    const note = document.createElement('div');
+    note.className = 'prov-note';
+    note.textContent = p.note;
+    el.appendChild(note);
+  }
+
   // expandable form
   const form = document.createElement('div');
   form.className = 'prov-form';
@@ -109,10 +234,10 @@ function providerCard(p, view) {
   form.innerHTML = `
     <div class="form-row">
       <div class="field"><label>Base URL</label>
-        <input data-f="base_url" type="url" value="${p.base_url || ''}"></div>
-      <div class="field"><label>Model</label>
+        <input data-f="base_url" type="url"></div>
+      <div class="field"><label>Default model</label>
         <div style="display:flex;gap:6px">
-          <input data-f="model" type="text" value="${p.model || ''}" style="flex:1">
+          <input data-f="model" type="text" style="flex:1">
           <button type="button" class="btn-ghost" data-act="models" style="flex:none;font-size:12px">list</button>
         </div>
         <div class="form-note" data-slot="models" hidden></div>
@@ -120,25 +245,31 @@ function providerCard(p, view) {
     </div>
     <div class="form-row">
       <div class="field"><label>API key <span class="hint">— stored server-side (0600), bound to this host</span></label>
-        <input data-f="api_key" type="password" placeholder="${p.key_masked || 'not set'}" autocomplete="off"></div>
+        <input data-f="api_key" type="password" autocomplete="off"></div>
       <div class="field"><label>Rate limit <span class="hint">requests/min</span></label>
-        <input data-f="rpm" type="number" value="${p.rpm || 0}" min="0"></div>
+        <input data-f="rpm" type="number" min="0"></div>
     </div>
     <div class="switch-row">
-      <div class="sw-text">
-        <div class="sw-title">Enabled</div>
-        <div class="sw-sub">Disabled providers are skipped in every chain.</div>
-      </div>
-      <label class="switch">
-        <input data-f="enabled" type="checkbox" ${p.enabled ? 'checked' : ''}>
-        <span class="knob"></span>
-      </label>
+      <div class="sw-text"><div class="sw-title">Structured agent output</div>
+        <div class="sw-sub">Request JSON mode for plans, evaluations, diagnoses and batches.</div></div>
+      <label class="switch"><input data-f="structured_outputs" type="checkbox"><span class="knob"></span></label>
+    </div>
+    <div class="switch-row">
+      <div class="sw-text"><div class="sw-title">Enabled</div>
+        <div class="sw-sub">Disabled providers are skipped in every chain.</div></div>
+      <label class="switch"><input data-f="enabled" type="checkbox"><span class="knob"></span></label>
     </div>
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
       <button type="button" class="btn-approve" data-act="save" style="padding:7px 14px">Save</button>
       <button type="button" class="btn-ghost" data-act="test" style="font-size:12.5px">Test connection</button>
       <span data-slot="test" style="font-size:12px;color:var(--fg-faint)"></span>
     </div>`;
+  form.querySelector('[data-f="base_url"]').value = p.base_url || '';
+  form.querySelector('[data-f="model"]').value = p.model || '';
+  form.querySelector('[data-f="api_key"]').placeholder = p.key_masked || 'not set';
+  form.querySelector('[data-f="rpm"]').value = p.rpm || 0;
+  form.querySelector('[data-f="structured_outputs"]').checked = Boolean(p.structured_outputs);
+  form.querySelector('[data-f="enabled"]').checked = Boolean(p.enabled);
   el.appendChild(form);
 
   head.style.cursor = 'pointer';
@@ -149,19 +280,24 @@ function providerCard(p, view) {
     const slot = form.querySelector('[data-slot="models"]');
     slot.hidden = false;
     slot.textContent = 'fetching…';
+    const curated = (view.catalog || [])
+      .filter((item) => item.provider === p.name);
     try {
       const res = await api.providerModels(p.name);
-      const models = res.models || [];
+      const live = res.models || [];
+      const notes = new Map(curated.map((item) => [item.id, item.note || '']));
+      const models = [...new Set([...live, ...curated.map((item) => item.id)])];
       slot.innerHTML = '';
       if (!models.length) {
         slot.textContent = 'no models reported';
         return;
       }
-      for (const m of models.slice(0, 60)) {
+      for (const m of models.slice(0, 80)) {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'btn-ghost';
-        b.textContent = m;
+        b.textContent = m + (live.includes(m) ? ' · live' : ' · curated');
+        b.title = notes.get(m) || '';
         b.style.cssText = 'display:inline-block;margin:3px 4px 0 0;padding:4px 9px;font-size:11.5px;font-family:var(--font-mono)';
         b.addEventListener('click', () => {
           form.querySelector('[data-f="model"]').value = m;
@@ -169,7 +305,25 @@ function providerCard(p, view) {
         slot.appendChild(b);
       }
     } catch (err) {
-      slot.textContent = err.message;
+      slot.innerHTML = '';
+      if (!curated.length) {
+        slot.textContent = err.message;
+        return;
+      }
+      const warning = document.createElement('span');
+      warning.textContent = 'live list unavailable; showing curated starting points: ';
+      slot.appendChild(warning);
+      for (const item of curated) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn-ghost';
+        b.textContent = item.id;
+        b.title = item.note || '';
+        b.addEventListener('click', () => {
+          form.querySelector('[data-f="model"]').value = item.id;
+        });
+        slot.appendChild(b);
+      }
     }
   });
 
@@ -198,6 +352,7 @@ function providerCard(p, view) {
           base_url: get('base_url').value.trim() || null,
           model: get('model').value.trim() || null,
           rpm: parseInt(get('rpm').value, 10) || 0,
+          structured_outputs: get('structured_outputs').checked,
           enabled: get('enabled').checked,
         },
       },

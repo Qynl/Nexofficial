@@ -1,16 +1,23 @@
 <div align="center">
 
-# NEX
+# NEX // AGENT STUDIO
 
-### A personal agent with a face — and a production discipline for building games through MCP.
+### A local-first AI operator with a face, a hard MCP boundary, and a refusal to confuse activity with completion.
 
-**Plan → act → observe → evaluate → polish → prove.**<br>
-Python standard library. No frontend build. No hidden computer access.
+**PLAN → AUTHORIZE → ACT → OBSERVE → VERIFY → POLISH → PROVE**<br>
+<sub>Python standard library · zero frontend build · no hidden computer access</sub>
 
-![Python standard library](https://img.shields.io/badge/runtime-Python%20stdlib-3776AB?style=flat-square)
-![Action boundary](https://img.shields.io/badge/actions-MCP%20only-54D3B5?style=flat-square)
-![Test suites](https://img.shields.io/badge/test%20suites-11-8B7CF6?style=flat-square)
-![Shell access](https://img.shields.io/badge/model%20shell-none-20242C?style=flat-square)
+<br>
+
+![Python standard library](https://img.shields.io/badge/runtime-Python%20stdlib-3776AB?style=for-the-badge)
+![Action boundary](https://img.shields.io/badge/action%20boundary-MCP%20only-54D3B5?style=for-the-badge)
+![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-purpose--aware-76B900?style=for-the-badge)
+![Test suites](https://img.shields.io/badge/test%20suites-11-8B7CF6?style=for-the-badge)
+![Shell access](https://img.shields.io/badge/model%20shell-NONE-20242C?style=for-the-badge)
+
+<br>
+
+**Not another chatbot with a tool button. A bounded production system that has to show its work.**
 
 </div>
 
@@ -28,15 +35,73 @@ This is editorial photography, not a Nex screenshot.
 
 ---
 
-Nex is a local-first agent shell with two unusual opinions:
+## Read this first
 
-1. **an assistant should feel present**, so Nex has an expressive WebGL face instead of a loading spinner; and
-2. **an agent should earn the word “done”**, so every external action travels through a visible, policy-gated MCP call and ambitious game work ends with an evidence scorecard—not confetti over an unchecked build.
+Nex has two non-negotiable opinions:
 
-Connect an MCP server for Unreal, Unity, Godot, Roblox Studio, Blender, an internal engine, or something nobody has named yet. Nex discovers its live tools, plans only with tools that really exist, builds a dependency graph, executes it, observes results, recovers from bounded failures, and reports exactly which production dimensions were—and were not—verified.
+1. **software should feel alive** — the interface is an expressive WebGL face,
+   not a spinner taped to a form; and
+2. **an agent must earn “done”** — every external action crosses one visible,
+   policy-gated MCP boundary, and every ambitious result ends in evidence, not
+   celebratory prose.
+
+Connect Unreal, Unity, Godot, Roblox Studio, Blender, an internal engine, or
+any other MCP server. Nex discovers the live surface, plans only with tools that
+exist, validates a dependency graph, executes approved calls, carries structured
+outputs forward, inspects results, repairs bounded failures, and reports exactly
+what was proven.
 
 > [!IMPORTANT]
-> **“AAA” is a production ambition, not a magic adjective.** Nex can enforce a much better workflow: inspect first, make a vertical slice, integrate, build, playtest, inspect visuals and logs, verify criteria, profile, and run one bounded corrective pass. It cannot manufacture art direction, engine capability, licensed assets, compute, taste, or human judgment that the connected MCP surface does not provide. Nex says that out loud.
+> **“AAA” is a production ambition, not a magic adjective.** Nex can run the
+> discipline: inspect, slice, integrate, build, play, capture, review, diagnose,
+> verify, profile, and polish. It cannot hallucinate engine features, art
+> direction, licensed assets, compute, time, or taste. If the connected MCP
+> surface cannot prove the result, Nex does not claim it.
+
+### Jump to the good part
+
+| I want to… | Go here |
+| --- | --- |
+| launch Nex in under a minute | [Quick start](#quick-start) |
+| understand the “make GTA 7” behavior | [The studio program](#from-make-gta-7-to-an-actual-production-program) |
+| see why a green tool call is not enough | [Evidence gates](#the-nine-evidence-gates) |
+| understand NVIDIA NIM routing | [NIM flight deck](#nvidia-nim-flight-deck) |
+| audit the safety boundary | [Security model](#security-model) |
+| connect an engine MCP correctly | [MCP server contract](#what-a-capable-game-engine-mcp-server-should-expose) |
+| configure everything | [Configuration reference](#configuration-reference) |
+| verify the claims | [Tests](#tests) |
+
+### The 20-second architecture
+
+```text
+YOU
+ │
+ ├── talk ──> CHAT BRAIN ─────────────────────────────────────────┐
+ │                                                               │
+ └── act ───> AGENT BRAIN ─> validated task graph                │
+                              │                                  │
+                              ▼                                  │
+                       policy + approval                          │
+                              │                                  │
+                              ▼                                  │
+                   ONE MCP ACTION BOUNDARY                        │
+                              │                                  │
+                  ┌───────────┼───────────┐                      │
+                  ▼           ▼           ▼                      │
+               engine       Blender      your server             │
+                  │           │           │                      │
+                  └────────── evidence ───┘                      │
+                              │                                  │
+                              ▼                                  │
+                honest result: complete / partial / blocked <────┘
+```
+
+| What changes | What never changes |
+| --- | --- |
+| provider, model, engine, tools, project, goal | MCP is the only action path |
+| plan size and production stage | code—not prompt text—owns authority |
+| available evidence and quality score | unavailable proof never becomes “passed” |
+| NIM/GPT/local provider serving a call | failover never rewrites the build plan |
 
 ## Quick start
 
@@ -52,16 +117,29 @@ There is no `pip install`, `npm install`, bundler, migration command, or fronten
 
 - Python’s standard library for HTTP, SQLite, concurrency, and transport;
 - browser-native WebGL, Web Speech, modules, and CSS;
-- a local Ollama model or an OpenAI-compatible provider; and
+- local Ollama, NVIDIA NIM, or another OpenAI-compatible model endpoint; and
 - MCP servers for **every** real-world action.
+
+Choose a brain—or do nothing and use the local default:
+
+```bash
+# Local-only
+export OLLAMA_MODEL=gpt-oss:20b
+
+# NVIDIA NIM as the agent brain (chat can remain local)
+export NVIDIA_API_KEY=nvapi-your-key
+export NEX_AGENT_PROVIDER=nim
+export NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
+```
 
 Then:
 
-1. Open **Capabilities → Add server**.
-2. Connect an HTTP MCP endpoint or a local stdio MCP command.
-3. Review the discovered tools and classifications.
-4. Ask Nex to do something.
-5. Watch the run card tell the truth in real time.
+1. Open **Settings → Model** and verify the **Model flight plan**.
+2. Open **Capabilities → Add server**.
+3. Connect an HTTP MCP endpoint or a local stdio MCP command.
+4. Review the discovered tools and classifications.
+5. Ask Nex to do something.
+6. Watch the run card tell the truth in real time.
 
 ```text
 “Build a polished vertical slice for the abandoned observatory level.
@@ -427,32 +505,170 @@ The Capabilities view connects/disconnects/reconnects/removes servers, exposes l
 
 Streaming markdown, fenced code, copy/listen/regenerate/edit-and-resend actions, search, automatic titles, SQLite persistence, and browser-native speech all run without a frontend framework.
 
+### Model flight plan
+
+Settings → Model is an operations panel rather than three disconnected API-key
+forms. It edits Chat and Agent primaries, exact role models, ordered fallbacks,
+provider defaults, local RPM ceilings, and structured-output support. Live cards
+show the provider/model that really answered, last agent job, calls, tokens, and
+headroom. Dynamic provider/model text is inserted as text—not executable HTML.
+
 ## Model providers
 
-Nex separates two roles:
+Nex separates **conversation** from **operation**:
 
-- **chat** — conversational answers; and
-- **agent** — planning, evaluation, diagnosis, replanning, and final reports.
+| Role | What it does | Typical call shape |
+| --- | --- | --- |
+| **Chat brain** | talks with the operator and decides whether a request should become an autonomous run | streaming, expressive, low frequency |
+| **Agent brain** | plans, evaluates, diagnoses, replans, and writes the evidence report | non-streaming, structured, repeated |
 
-Each role has an explicit provider/fallback chain. Supported shapes include local Ollama, NVIDIA NIM, and arbitrary OpenAI-compatible endpoints. Client-side pacing, backoff, provider parking after authentication failures, and live UI status make failover visible rather than mysterious.
+Each role owns an explicit primary provider, exact model, and ordered fallback
+chain. Local Ollama, NVIDIA NIM, OpenAI, and custom OpenAI-compatible endpoints
+can be mixed. The **Model flight plan** in Settings shows both routes, the model
+actually serving now, recent job purpose, token counts, success counts, and
+remaining local RPM headroom.
 
-Provider keys remain server-side in environment variables or `~/.nex/providers.json` (`0600`). A stored key is bound to the host for which it was configured; changing the endpoint prevents the key from being sent. Browser APIs return only masked values.
+A model produces text. It never receives an OS handle, shell, filesystem, or
+MCP transport. Provider failover can change the brain serving a request; it
+cannot bypass policy or invent another action path.
 
-Copy the example if you prefer configuration as code:
+## NVIDIA NIM flight deck
 
-```bash
-cp nex/.env.example nex/.env
+NIM is not treated as “some URL that probably speaks OpenAI.” Nex gives it an
+operational contract designed for long autonomous runs.
+
+```mermaid
+graph LR
+    J[Agent job] --> T{trusted purpose tag}
+    T -->|planning| P[temperature 0.1 + JSON mode]
+    T -->|evaluation| E[temperature 0.0 + JSON mode]
+    T -->|diagnosis| D[temperature 0.0 + JSON mode]
+    T -->|summary| S[normal text response]
+    P --> N[NVIDIA NIM]
+    E --> N
+    D --> N
+    S --> N
+    N -->|answer| V[finish reason + shape checks]
+    N -->|429 / timeout / 5xx / bad output| F[exact fallback chain]
+    V --> U[usage + model telemetry]
+    F --> U
 ```
+
+### What Nex now does for NIM
+
+**1. It sends the model you selected.**  The role-level model override is the
+model placed in the real request body—not merely a label in Settings. If NIM
+falls back to GPT or Ollama, that provider receives its own model ID. A NIM
+model name is never accidentally sent to a different backend.
+
+**2. It identifies the job without reading tea leaves.**  The agent loop passes
+trusted purpose tags: `planning`, `evaluation`, `diagnosis`, and `summary`.
+Those tags come from code, not user prompt text. They drive deterministic
+sampling and appear in the flight telemetry.
+
+**3. It asks for machine output as machine output.**  NIM and GPT default to
+OpenAI-compatible `response_format: {"type":"json_object"}` for plans,
+evaluations, diagnoses, and batches. The returned JSON is still parsed and
+validated locally; JSON mode improves syntax, not authority. It can be disabled
+per provider for an older or incompatible endpoint.
+
+**4. It refuses truncated “success.”**  A completion ending with
+`finish_reason=length`, content filtering, or another incomplete reason is a
+bad response. A half-plan cannot become half of an executable graph. Nex parks
+that attempt and continues through the configured fallback chain.
+
+**5. It never promotes hidden reasoning to an answer.**  If a reasoning model
+returns `reasoning`/`reasoning_content` but no final `content`, Nex reports a bad
+response. Private scratch text is neither a plan nor evidence.
+
+**6. It accounts for the flight.**  Provider state records request counts,
+success/failure counts, the actual response model, job purpose, finish reason,
+and aggregate prompt/completion token counts. It stores none of the prompt or
+answer text in telemetry.
+
+**7. It protects scarce calls before a 429.**  `NEX_NIM_RPM=40` is Nex’s
+configurable local safety ceiling—not a promise about NVIDIA’s quota. A sliding
+60-second window, minimum spacing, and a 25% headroom reserve keep an agent run
+from spending every available request. Hosted NIM limits can vary by account,
+model, endpoint, and load.
+
+**8. It obeys real recovery signals.**  `Retry-After` works as either seconds or
+an HTTP date. A full local window waits briefly when useful, otherwise hands the
+same messages to the next provider. When cooldown expires, NIM automatically
+returns to service. Authentication failures stay parked until configuration
+changes instead of hammering a rejected key.
+
+**9. It fails over the hands—not the plan.**  The exact message list is handed
+to the next provider. Completed MCP actions are not replayed, task IDs are not
+regenerated, and the UI emits `provider.fallback` / `provider.recovered` events
+so the operator can see the handoff.
+
+**10. It treats the endpoint as a credential boundary.**  Keys remain on the
+server, are stored `0600`, and are bound to the host for which they were entered.
+Changing the base URL makes the key go dark until it is re-entered. Redirects
+may not cross hosts. Metadata/link-local targets, URL credentials, oversized
+responses, oversized stream lines, and unbounded streams are rejected.
+
+NVIDIA documents hosted and self-hosted NIM chat through the OpenAI-compatible
+`/v1/chat/completions` endpoint and supports model discovery at `/v1/models`.
+Structured-output support is model/runtime dependent, which is why Nex exposes
+the toggle and still validates every result. See NVIDIA’s
+[LLM API reference](https://docs.nvidia.com/nim/large-language-models/2.0.3/reference/api-reference.html),
+[structured JSON guidance](https://docs.nvidia.com/nim/large-language-models/2.0.10/get-started/advanced/get-started-nemotron-3.5-lightning.html),
+and the live [NVIDIA API Catalog](https://build.nvidia.com/explore/discover).
+The live model list in Settings is authoritative; the curated list is only a
+starting point because catalog availability changes.
+
+### Recommended routes
+
+#### Private workstation
 
 ```dotenv
 NEX_CHAT_PROVIDER=local
 NEX_CHAT_MODEL=gpt-oss:20b
 NEX_AGENT_PROVIDER=local
 NEX_AGENT_MODEL=gpt-oss:20b
+```
 
-# Example HTTP and stdio MCP servers:
+#### Local chat + NIM production agent
+
+```dotenv
+NVIDIA_API_KEY=nvapi-your-key
+NEX_CHAT_PROVIDER=local
+NEX_CHAT_MODEL=gpt-oss:20b
+NEX_AGENT_PROVIDER=nim
+NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
+NEX_AGENT_FALLBACKS=local
+NEX_NIM_RPM=40
+```
+
+#### Cloud planning + NIM agent + local last resort
+
+```dotenv
+OPENAI_API_KEY=your-openai-key
+NVIDIA_API_KEY=nvapi-your-key
+NEX_CHAT_PROVIDER=gpt
+NEX_CHAT_FALLBACKS=nim,local
+NEX_AGENT_PROVIDER=nim
+NEX_AGENT_FALLBACKS=gpt,local
+```
+
+Copy the complete example if you prefer configuration as code:
+
+```bash
+cp nex/.env.example nex/.env
+```
+
+```dotenv
+# Example HTTP and stdio MCP servers
 NEX_SERVERS=engine=http://127.0.0.1:9876/mcp,assets:uvx my-asset-mcp
 ```
+
+> [!TIP]
+> Start with the default Nemotron Super route for stronger planning. Try
+> `nvidia/nemotron-3.5-lightning-30b-a3b` when low latency and sustained agent
+> throughput matter more. Always press **list** in Settings first: a model ID
+> that exists in a README is not proof that your endpoint currently serves it.
 
 ## Configuration reference
 
@@ -467,7 +683,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_CHAT_FALLBACKS` / `NEX_AGENT_FALLBACKS` | configured chain | Comma-separated role failovers |
 | `NVIDIA_API_KEY` | empty | NVIDIA NIM credential |
 | `OPENAI_API_KEY` | empty | OpenAI-compatible credential |
-| `NEX_PROVIDER_HOSTS` | built-in hosts | Additional exact provider host allowlist |
+| `NEX_PROVIDER_HOSTS` | empty | Optional strict exact-host allowlist for model endpoints |
 | `NEX_SERVERS` | empty | Startup MCP server definitions |
 | `NEX_HTTP_ALLOW` | loopback only | Pre-approved remote MCP hosts |
 | `NEX_STDIO_ALLOW` | any reviewed command | Pin allowed stdio executables |
@@ -510,7 +726,7 @@ Eleven suites run in isolated processes because several intentionally configure 
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
-| `test_providers` | Provider routing, role separation, failover, pacing, key/host binding |
+| `test_providers` | Exact role-model dispatch, NIM JSON mode, purpose temperatures, usage telemetry, truncation rejection, failover, pacing, and key/host binding |
 
 Useful development checks:
 
@@ -541,8 +757,9 @@ Nexofficial/
     │   ├── task_graph.py           dependencies, state, failure propagation
     │   ├── context.py              bounded observations and failures
     │   ├── diagnose.py             one-shot failure repair decisions
+    │   ├── llm.py                  trusted purpose tags for provider calls
     │   ├── prompts.py              scoped model roles and hard boundary language
-    │   ├── providers.py            role chains, pacing, fallback, key binding
+    │   ├── providers.py            NIM JSON mode, exact models, pacing, telemetry, fallback
     │   ├── events.py               public execution-state vocabulary
     │   ├── jsonreply.py            bounded JSON extraction
     │   └── mock_mcp.py             deterministic in-process MCP for tests
@@ -558,7 +775,7 @@ Nexofficial/
     │   ├── index.html              accessible application shell
     │   ├── css/app.css             complete visual system
     │   └── js/                     face, chat, runs, capabilities, settings
-    └── tests/                       ten isolated suites + HTTP echo MCP
+    └── tests/                       eleven isolated suites + HTTP echo MCP
 ```
 
 ## Honest limits

@@ -267,9 +267,10 @@ def _history_messages(cid: str,
 
 
 def _agent_llm() -> Optional[Callable]:
-    def llm(messages: List[Dict[str, str]]) -> str:
+    def llm(messages: List[Dict[str, str]], purpose: str = "agent") -> str:
         return ROUTER.chat(_providers.ROLE_AGENT, messages,
-                           purpose="agent")
+                           purpose=purpose)
+    llm.supports_purpose = True  # type: ignore[attr-defined]
     return llm
 
 
@@ -1026,7 +1027,9 @@ def _provider_view() -> Dict[str, Any]:
                 "model": spec.model,
                 "rpm": spec.rpm,
                 "enabled": spec.enabled,
+                "structured_outputs": spec.structured_outputs,
                 "configured": spec.configured,
+                "note": spec.note,
                 "key_masked": _providers.mask_key(spec.raw_key),
                 "key_host": spec.key_host,
                 "key_mismatch": spec.key_mismatch,
@@ -1037,7 +1040,10 @@ def _provider_view() -> Dict[str, Any]:
         ],
         "roles": st.get("roles", {}),
         "chains": st.get("chains", {}),
-        "role_models": st.get("role_models", {}),
+        "role_models": {
+            role: ROUTER.role_model(role) for role in _providers.ROLES
+        },
+        "catalog": list(_providers.CATALOG),
     }
 
 

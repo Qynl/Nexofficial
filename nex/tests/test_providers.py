@@ -19,8 +19,8 @@ Concretely verified here:
   3. FAILOVER — every documented failure (429 / timeout / 5xx / auth /
      bad request) hands the SAME call to the next provider and emits an
      event that says the plan continues.
-  4. BUDGET — the ~40 RPM ceiling is enforced client-side (NVIDIA
-     publishes no usage API), with cooldown and automatic recovery.
+  4. BUDGET — the operator-configured RPM safety ceiling is enforced
+     client-side, with cooldown and automatic recovery.
   5. BATCHING — N independent jobs cost ONE provider call (that is the
      whole point of a rate-limited agent), with a safe per-job split
      when the batch answer is unusable.
@@ -35,8 +35,10 @@ import os
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 from email.message import Message
+from email.utils import formatdate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NEX = os.path.dirname(HERE)
@@ -296,6 +298,40 @@ finally:
         else:
             os.environ[k] = v
 
+# The role's model setting must control the real request, not just the UI label.
+h_role = FakeHTTP()
+h_role.push("integrate.api.nvidia.com", {
+    "model": "moonshotai/kimi-k3",
+    "choices": [{"message": {"content": '{"plan":{"steps":[]}}'},
+                 "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 123, "completion_tokens": 17},
+})
+r_role = mk_router(h_role, rpm=40)
+r_role.set_role("agent", "nim", model="moonshotai/kimi-k3")
+r_role.chat("agent", MESSAGES, purpose="planning")
+role_body = h_role.calls[-1][1]
+_expect(role_body["model"] == "moonshotai/kimi-k3",
+        "the selected role model is the model actually sent to NIM")
+_expect(role_body.get("response_format") == {"type": "json_object"},
+        "NIM planning uses structured JSON mode")
+_expect(role_body.get("temperature") == 0.1,
+        "planning gets a deterministic purpose-specific temperature")
+role_state = r_role.states["nim"].to_dict()
+_expect(role_state["total_prompt_tokens"] == 123
+        and role_state["total_completion_tokens"] == 17,
+        "NIM token usage is tracked without storing prompts or answers")
+_expect(role_state["last_model"] == "moonshotai/kimi-k3"
+        and role_state["last_purpose"] == "planning",
+        "provider telemetry names the actual model and agent job")
+
+h_plain = FakeHTTP()
+h_plain.push("integrate.api.nvidia.com", "plain compatible answer")
+r_plain = mk_router(h_plain, rpm=40)
+r_plain.set_spec("nim", structured_outputs=False)
+r_plain.chat("agent", MESSAGES, purpose="planning")
+_expect("response_format" not in h_plain.calls[-1][1],
+        "JSON mode can be disabled for an incompatible NIM/runtime")
+
 # ===========================================================================
 # 3. FAILOVER: 429 / timeout / 5xx / auth -> next provider, same plan
 # ===========================================================================
@@ -314,6 +350,8 @@ _expect(text.startswith("corrected args"), "429 spills over: the agent call answ
 _expect(len(http.calls) == 2, "exactly two provider calls (NIM then GPT)")
 _expect(http.calls[0][1]["messages"] == http.calls[1][1]["messages"],
         "the fallback sends the SAME messages — the plan is untouched")
+_expect(http.calls[1][1]["model"] == "gpt-5.1",
+        "the fallback uses its own model, never the NIM role override")
 fallbacks = bus.of("provider.fallback")
 _expect(len(fallbacks) == 1, "one provider.fallback event")
 _expect(fallbacks[0]["from"] == "nim" and fallbacks[0]["to"] == "gpt",
@@ -322,9 +360,12 @@ _expect(fallbacks[0]["plan_continues"] is True,
         "the event states that the plan continues (no re-plan)")
 _expect(r.states["nim"].status == providers.ST_RATE_LIMITED,
         "NIM is marked rate_limited")
-_expect(r.states["nim"].cooldown_s if False else
-        r.states["nim"].to_dict()["cooldown_s"] > 0,
+_expect(r.states["nim"].to_dict()["cooldown_s"] > 0,
         "NIM got a cooldown from the Retry-After header")
+http_date_wait = providers._retry_after_seconds(
+    formatdate(time.time() + 30, usegmt=True))
+_expect(http_date_wait is not None and 20 <= http_date_wait <= 31,
+        "Retry-After also accepts an RFC HTTP date")
 _expect(r.status()["agent"]["fallback"] is True,
         "the status view marks the agent as running on a fallback")
 _expect(r.status()["agent"]["serving"] == "gpt",
@@ -703,6 +744,17 @@ try:
     _expect(False, "if EVERY provider only returns reasoning, the router raises")
 except providers.AllProvidersFailed:
     _expect(True, "if EVERY provider only returns reasoning, the router raises")
+
+h_cut = FakeHTTP()
+h_cut.push("integrate.api.nvidia.com", {"choices": [{
+    "message": {"content": '{"plan":'}, "finish_reason": "length"}]})
+h_cut.push("api.openai.com", "complete fallback answer")
+r_cut = mk_router(h_cut)
+_expect(r_cut.chat("agent", MESSAGES, purpose="planning") ==
+        "complete fallback answer",
+        "a max-token-truncated NIM plan is rejected and safely failed over")
+_expect(r_cut.states["nim"].last_error_kind == providers.ERR_PARSE,
+        "truncation is classified as a bad response, never successful work")
 
 # --- 🟠 SETTINGS CHANGE MUST NOT RESET THE RATE BUDGET -------------------
 h_res = FakeHTTP()

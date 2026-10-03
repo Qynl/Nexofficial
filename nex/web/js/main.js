@@ -168,6 +168,8 @@ function handleEvent(ev) {
 
     // providers
     case 'provider.status':
+    case 'provider.call':
+    case 'provider.fallback':
     case 'provider.paced':
     case 'provider.trouble':
     case 'provider.recovered':
@@ -290,6 +292,12 @@ function onProviderEvent(ev) {
   } else if (ev.type === 'provider.trouble' && ev.provider) {
     toast('warn', `${ev.provider} had trouble`,
           (ev.error || '').slice(0, 120));
+  } else if (ev.type === 'provider.fallback') {
+    toast('info', `${ev.role || 'model'} switched providers`,
+          `${ev.from || '?'} → ${ev.to || '?'} · ${ev.model || 'default model'}`);
+  } else if (ev.type === 'provider.recovered') {
+    toast('success', `${ev.provider || 'provider'} recovered`,
+          `${ev.role || 'model'} is back on ${ev.model || 'its primary model'}`);
   }
 }
 

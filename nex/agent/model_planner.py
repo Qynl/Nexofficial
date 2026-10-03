@@ -34,6 +34,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.jsonreply import extract_json_with_key
+from agent.llm import call as call_llm
 from agent.prompts import PLANNER_SYSTEM, BOUNDARY
 from agent.task_graph import Task, TaskGraph
 
@@ -383,7 +384,7 @@ def model_driven_planner(goal: str, registry,
         {"role": "user", "content": user_msg},
     ]
     try:
-        reply = llm(messages)
+        reply = call_llm(llm, messages, "planning")
     except Exception:  # noqa: BLE001
         return TaskGraph(), None
     if not reply or not isinstance(reply, str):

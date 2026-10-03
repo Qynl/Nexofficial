@@ -21,10 +21,10 @@ Roles are separate on purpose:
   * AGENT  (default: NVIDIA NIM) is called during the build loop —
     failure diagnosis, repair decisions — and nothing else.
 
-Why a router instead of one model call: NIM's free tier is ~40 requests per
-minute with *undocumented, per-model* limits and no usage endpoint (NVIDIA
-removed credits and never published a quota API). So the budget has to live
-client-side and the failover has to be explicit:
+Why a router instead of one model call: hosted NIM limits can vary by model,
+endpoint, account and current service load. Nex therefore ships a configurable
+40-RPM LOCAL safety ceiling rather than pretending that number is NVIDIA's
+contract. Budgeting lives client-side and failover is explicit:
 
     NIM 429 / timeout / 5xx / RPM exhausted
         -> the SAME call is retried on the fallback provider (GPT, then local)
@@ -55,6 +55,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,38 @@ ERR_CONFIG = "config_error"
 FAILOVER_KINDS = (ERR_RATE_LIMIT, ERR_TIMEOUT, ERR_SERVER, ERR_AUTH,
                   ERR_NETWORK, ERR_PARSE, ERR_BAD_REQUEST)
 
+# Machine-consumed agent jobs benefit from deterministic JSON. These purpose
+# names are attached by the loop (not guessed from user text) and are visible
+# in provider telemetry. Providers may opt out when a model lacks JSON mode.
+STRUCTURED_PURPOSES = frozenset({
+    "planning", "evaluation", "diagnosis", "batch",
+})
+_PURPOSE_TEMPERATURES = {
+    "planning": 0.1,
+    "evaluation": 0.0,
+    "diagnosis": 0.0,
+    "summary": 0.2,
+}
+_MAX_PROVIDER_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_PROVIDER_STREAM_BYTES = 16 * 1024 * 1024
+_MAX_PROVIDER_STREAM_LINE_BYTES = 1024 * 1024
+
+
+def _structured_purpose(purpose: str) -> bool:
+    return purpose in STRUCTURED_PURPOSES or purpose.startswith("batch-")
+
+
+def _safe_usage(value: Any) -> Dict[str, int]:
+    """Keep only bounded numeric counters from untrusted provider metadata."""
+    raw = value if isinstance(value, dict) else {}
+    out: Dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens",
+                "reasoning_tokens"):
+        if key in raw:
+            out[key] = max(0, min(_as_int(raw.get(key), 0), 10 ** 9))
+    return out
+
+
 NEX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".nex",
                                      "providers.json")
@@ -125,6 +158,7 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "rpm": 0,             # local: no quota
         "timeout": 120.0,
         "cooldown_s": 5.0,
+        "structured_outputs": False,
         "note": "Private, free, no quota — the fallback that always works.",
     },
     "nim": {
@@ -133,10 +167,11 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "base_url": "https://integrate.api.nvidia.com/v1",
         "model": "nvidia/nemotron-3-super-120b-a12b",
         "api_key_env": "NVIDIA_API_KEY",
-        "rpm": 40,            # community baseline for the free tier
+        "rpm": 40,            # Nex safety default; not a promised NIM quota
         "timeout": 240.0,
         "cooldown_s": 20.0,
-        "note": "Agent. ~40 RPM, limits are per-model and unpublished.",
+        "structured_outputs": True,
+        "note": "Agent. Purpose-aware JSON mode, pacing, and automatic failover.",
     },
     "gpt": {
         "label": "GPT (OpenAI-compatible)",
@@ -147,17 +182,21 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "rpm": 0,
         "timeout": 240.0,
         "cooldown_s": 15.0,
+        "structured_outputs": True,
         "note": "Chat. Takes over as agent when NIM is rate-limited.",
     },
 }
 
-# Curated NIM picks (as of 2026-09; the live list in the settings page is
-# authoritative). role hint = which role the model is a good fit for.
+# Curated NIM starting points (reviewed 2026-10; the live /v1/models list in
+# Settings is authoritative). role hint = which job the model may fit.
 CATALOG: List[Dict[str, Any]] = [
     # --- NVIDIA-native (best throughput on NIM, strong tool calling) -------
     {"provider": "nim", "id": "nvidia/nemotron-3-super-120b-a12b",
      "role": "agent", "label": "Nemotron 3 Super 120B",
-     "note": "Agentic workhorse: 1M context, strong SWE-bench, tool calling."},
+     "note": "Agentic workhorse: 1M context, planning and tool calling."},
+    {"provider": "nim", "id": "nvidia/nemotron-3.5-lightning-30b-a3b",
+     "role": "agent", "label": "Nemotron 3.5 Lightning 30B",
+     "note": "Fast 3B-active long-running-agent model with 1M context."},
     {"provider": "nim", "id": "nvidia/nemotron-3-ultra-550b-a55b",
      "role": "chat", "label": "Nemotron 3 Ultra 550B",
      "note": "Frontier reasoning/coding, slower — good for planning."},
@@ -168,9 +207,9 @@ CATALOG: List[Dict[str, Any]] = [
      "role": "agent", "label": "Nemotron 3 Nano Omni 30B",
      "note": "Cheap small model — good for batched, mechanical steps."},
     # --- Third-party on NIM ------------------------------------------------
-    {"provider": "nim", "id": "moonshotai/kimi-k2.6",
-     "role": "agent", "label": "Kimi K2.6",
-     "note": "Long-horizon agentic coding, 1M+ context."},
+    {"provider": "nim", "id": "moonshotai/kimi-k3",
+     "role": "agent", "label": "Kimi K3",
+     "note": "Long-horizon multimodal coding and agentic tool use, 1M context."},
     {"provider": "nim", "id": "zhipuai/glm-5.1",
      "role": "agent", "label": "GLM-5.1",
      "note": "Function calling + long-context coding."},
@@ -195,6 +234,9 @@ CATALOG: List[Dict[str, Any]] = [
     {"provider": "nim", "id": "meta/llama-4-maverick-17b-128e-instruct",
      "role": "agent", "label": "Llama 4 Maverick",
      "note": "Popular general purpose model."},
+    {"provider": "nim", "id": "google/gemma-4-31b-it",
+     "role": "agent", "label": "Gemma 4 31B",
+     "note": "Dense coding/reasoning model with structured-output support."},
     # --- Chat side ------------------------------------------------------
     {"provider": "gpt", "id": "gpt-5.1", "role": "chat",
      "label": "GPT-5.1", "note": "Flagship coding/agentic chat."},
@@ -494,7 +536,10 @@ def _http_post_json(url: str, body: Dict[str, Any],
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
     with _OPENER.open(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", "replace")
+        payload = resp.read(_MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(payload) > _MAX_PROVIDER_RESPONSE_BYTES:
+            raise OSError("provider response exceeded the 8 MiB safety limit")
+        raw = payload.decode("utf-8", "replace")
         resp_headers = {k.lower(): v for k, v in (resp.headers or {}).items()}
         try:
             return resp.status, json.loads(raw), resp_headers
@@ -506,7 +551,10 @@ def _http_get_json(url: str, headers: Optional[Dict[str, str]] = None,
                    timeout: float = 30.0) -> Tuple[int, Dict[str, Any]]:
     req = urllib.request.Request(url, headers=headers or {}, method="GET")
     with _OPENER.open(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", "replace")
+        payload = resp.read(_MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(payload) > _MAX_PROVIDER_RESPONSE_BYTES:
+            raise OSError("provider response exceeded the 8 MiB safety limit")
+        raw = payload.decode("utf-8", "replace")
         try:
             return resp.status, json.loads(raw)
         except json.JSONDecodeError:
@@ -540,13 +588,27 @@ class AllProvidersFailed(RuntimeError):
         super().__init__("no provider could serve role '%s' (%s)" % (role, detail))
 
 
+def _retry_after_seconds(value: Any) -> Optional[float]:
+    """Parse Retry-After seconds or an RFC 7231 HTTP date."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(raw)
+            return max(0.0, dt.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
 def _classify_http_error(exc: urllib.error.HTTPError) -> ProviderError:
     status = getattr(exc, "code", 0) or 0
     retry_after = None
     try:
         ra = exc.headers.get("Retry-After") if exc.headers else None
-        if ra:
-            retry_after = _as_float(ra, 0.0) or None
+        retry_after = _retry_after_seconds(ra)
     except Exception:  # noqa: BLE001
         retry_after = None
     body = ""
@@ -580,7 +642,8 @@ class ProviderSpec:
               # pacing: how much of the RPM window is held back for
               # interactive/manual calls, how close two requests may sit,
               # and how long a single call may WAIT instead of spending quota.
-              "reserve", "min_interval_s", "max_chill_s")
+              "reserve", "min_interval_s", "max_chill_s",
+              "structured_outputs")
 
     def __init__(self, name: str, **kw: Any) -> None:
         base = dict(DEFAULT_PROVIDERS.get(name, {}))
@@ -610,6 +673,7 @@ class ProviderSpec:
         self.reserve = min(0.9, max(0.0, _as_float(base.get("reserve"), 0.25)))
         self.min_interval_s = max(0.0, _as_float(base.get("min_interval_s"), 1.0))
         self.max_chill_s = max(0.0, _as_float(base.get("max_chill_s"), 8.0))
+        self.structured_outputs = bool(base.get("structured_outputs", False))
         self.enabled = bool(base.get("enabled", True))
         self.note = str(base.get("note") or "")
 
@@ -706,6 +770,7 @@ class ProviderSpec:
             "rpm": self.rpm, "timeout": self.timeout,
             "cooldown_s": self.cooldown_s, "enabled": self.enabled,
             "reserve": self.reserve, "min_interval_s": self.min_interval_s,
+            "structured_outputs": self.structured_outputs,
             "configured": self.configured, "note": self.note,
         }
 
@@ -728,6 +793,13 @@ class ProviderState:
         self.total_calls = 0
         self.total_ok = 0
         self.total_failed = 0
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
+        self.last_model = ""
+        self.last_purpose = ""
+        self.last_finish_reason = ""
         self.rate_limited = 0
         self.auth_failures = 0
         self.batch_splits = 0
@@ -863,6 +935,24 @@ class ProviderState:
         self.last_error = "no API key configured"
         self.last_error_kind = ERR_AUTH
 
+    def record_response(self, obj: Dict[str, Any], model: str,
+                        purpose: str) -> None:
+        """Keep bounded operational telemetry; never store prompt/output text."""
+        usage = _safe_usage(obj.get("usage") if isinstance(obj, dict) else {})
+        prompt = usage.get("prompt_tokens", 0)
+        completion = usage.get("completion_tokens", 0)
+        choices = obj.get("choices") if isinstance(obj, dict) else []
+        choice = choices[0] if isinstance(choices, list) and choices \
+            and isinstance(choices[0], dict) else {}
+        self.last_prompt_tokens = prompt
+        self.last_completion_tokens = completion
+        self.total_prompt_tokens += prompt
+        self.total_completion_tokens += completion
+        self.last_model = str(obj.get("model") or model or "")[:200] \
+            if isinstance(obj, dict) else str(model or "")[:200]
+        self.last_purpose = str(purpose or "")[:80]
+        self.last_finish_reason = str(choice.get("finish_reason") or "")[:80]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,
@@ -878,6 +968,13 @@ class ProviderState:
             "total_calls": self.total_calls,
             "total_ok": self.total_ok,
             "total_failed": self.total_failed,
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "last_prompt_tokens": self.last_prompt_tokens,
+            "last_completion_tokens": self.last_completion_tokens,
+            "last_model": self.last_model,
+            "last_purpose": self.last_purpose,
+            "last_finish_reason": self.last_finish_reason,
             "rate_limited": self.rate_limited,
             "auth_failures": self.auth_failures,
             "batch_splits": self.batch_splits,
@@ -1005,6 +1102,21 @@ class Router:
         spec = self.specs.get(str(entry.get("provider") or ""))
         return spec.model if spec else ""
 
+    def model_for(self, role: str, provider: str) -> str:
+        """Exact model to send for one provider attempt.
+
+        A role override applies to its selected primary only. Fallbacks always
+        use their own provider model; sending a NIM model id to Ollama/OpenAI
+        (or silently ignoring the role override) is both broken and misleading.
+        """
+        entry = self.roles.get(role) or {}
+        if provider == str(entry.get("provider") or ""):
+            model = str(entry.get("model") or "").strip()
+            if model:
+                return model
+        spec = self.specs.get(provider)
+        return spec.model if spec else ""
+
     def fallbacks(self, role: str) -> List[str]:
         entry = self.roles.get(role) or {}
         listed = entry.get("fallbacks")
@@ -1103,7 +1215,8 @@ class Router:
             })
 
     def _emit_serving(self, name: str, spec: ProviderSpec, role: str,
-                      purpose: str, primary: str, chain: List[str]) -> None:
+                      purpose: str, primary: str, chain: List[str],
+                      model: str, usage: Optional[Dict[str, Any]] = None) -> None:
         """A provider (not necessarily the primary) answered."""
         previous = self._last_served.get(role, "")
         switched = previous not in (None, "", name)
@@ -1111,15 +1224,17 @@ class Router:
         if name != primary:
             # The plan does NOT change — only the hands.
             self._emit({"type": "provider.fallback", "role": role,
-                        "from": primary, "to": name,
+                        "from": primary, "to": name, "model": model,
                         "error_kind": (self.states[primary].last_error_kind
                                        if primary in self.states else ""),
-                        "purpose": purpose, "plan_continues": True,
+                        "purpose": purpose, "usage": dict(usage or {}),
+                        "plan_continues": True,
                         "roles": self.role_snapshot()})
             return
         self._emit({"type": "provider.call", "role": role,
-                    "provider": name, "model": self.role_model(role),
-                    "purpose": purpose, "recovered": switched,
+                    "provider": name, "model": model,
+                    "purpose": purpose, "usage": dict(usage or {}),
+                    "recovered": switched,
                     "roles": self.role_snapshot()})
         if switched:
             # A rate limit is temporary by definition. When the window has
@@ -1127,7 +1242,7 @@ class Router:
             # saying out loud.
             self._emit({"type": "provider.recovered", "role": role,
                         "provider": name,
-                        "model": self.role_model(role),
+                        "model": model,
                         "was": previous,
                         "detail": "%s is available again — %s is the "
                                   "agent again"
@@ -1151,11 +1266,17 @@ class Router:
         req = urllib.request.Request(url, data=data, headers=hdrs,
                                      method="POST")
         with _OPENER.open(req, timeout=timeout) as resp:
+            total = 0
             for raw in resp:
+                total += len(raw)
+                if len(raw) > _MAX_PROVIDER_STREAM_LINE_BYTES:
+                    raise OSError("provider stream line exceeded 1 MiB")
+                if total > _MAX_PROVIDER_STREAM_BYTES:
+                    raise OSError("provider stream exceeded 16 MiB")
                 yield raw.decode("utf-8", errors="replace")
 
     def _stream_call(self, spec: ProviderSpec,
-                     messages: List[Dict[str, str]],
+                     messages: List[Dict[str, str]], model: str,
                      temperature: Optional[float] = None):
         """Stream one provider call. Raises ProviderError before the first
         token if the provider cannot serve it at all."""
@@ -1172,11 +1293,11 @@ class Router:
             headers["Authorization"] = "Bearer " + spec.key
         temp = spec.temperature if temperature is None else temperature
         if spec.kind == KIND_OLLAMA:
-            body: Dict[str, Any] = {"model": spec.model, "messages": messages,
+            body: Dict[str, Any] = {"model": model, "messages": messages,
                                     "stream": True,
                                     "options": {"temperature": temp}}
         else:
-            body = {"model": spec.model, "messages": messages,
+            body = {"model": model, "messages": messages,
                     "stream": True, "temperature": temp}
             mt = spec.max_tokens
             if mt:
@@ -1216,7 +1337,13 @@ class Router:
                 chunk = delta.get("content")
                 if chunk:
                     yield chunk
-                if choices[0].get("finish_reason"):
+                finish = str(choices[0].get("finish_reason") or "")
+                if finish:
+                    if finish not in ("stop", "tool_calls"):
+                        raise ProviderError(
+                            ERR_PARSE,
+                            "model=%s ended the stream with finish_reason=%s"
+                            % (model or "?", finish))
                     return
         except urllib.error.HTTPError as exc:
             raise _classify_http_error(exc) from None
@@ -1272,8 +1399,10 @@ class Router:
             state.last_call_ts = time.time()
             state.last_call_clock = self._clock()
             first: Optional[str] = None
+            selected_model = self.model_for(role, name)
             try:
-                stream = self._stream_call(spec, messages, temperature)
+                stream = self._stream_call(
+                    spec, messages, selected_model, temperature)
                 for token in stream:
                     first = token
                     break
@@ -1303,7 +1432,9 @@ class Router:
                 continue
             state.mark_ok()
             state.total_ok += 1
-            self._emit_serving(name, spec, role, purpose, primary, chain)
+            state.record_response({}, selected_model, purpose)
+            self._emit_serving(name, spec, role, purpose, primary, chain,
+                               selected_model)
             yield first
             try:
                 for token in stream:
@@ -1324,9 +1455,11 @@ class Router:
         raise AllProvidersFailed(role, attempts)
 
     def _call(self, spec: ProviderSpec, messages: List[Dict[str, str]],
+              model: str, purpose: str,
               temperature: Optional[float] = None,
               max_tokens: Optional[int] = None,
-              timeout: Optional[float] = None) -> str:
+              timeout: Optional[float] = None
+              ) -> Tuple[str, Dict[str, Any]]:
         """One provider call. Raises ProviderError (never returns garbage)."""
         # Belt and braces: the URL was validated when it was configured, and
         # it is validated again here, because this is the line that attaches
@@ -1341,15 +1474,20 @@ class Router:
         headers: Dict[str, str] = {}
         if spec.key:
             headers["Authorization"] = "Bearer " + spec.key
-        temp = spec.temperature if temperature is None else temperature
+        if temperature is None:
+            temp = _PURPOSE_TEMPERATURES.get(purpose, spec.temperature)
+        else:
+            temp = temperature
         if spec.kind == KIND_OLLAMA:
             body: Dict[str, Any] = {
-                "model": spec.model, "messages": messages, "stream": False,
+                "model": model, "messages": messages, "stream": False,
                 "options": {"temperature": temp},
             }
         else:
-            body = {"model": spec.model, "messages": messages,
+            body = {"model": model, "messages": messages,
                     "stream": False, "temperature": temp}
+            if spec.structured_outputs and _structured_purpose(purpose):
+                body["response_format"] = {"type": "json_object"}
             mt = max_tokens or spec.max_tokens
             if mt:
                 body["max_tokens"] = mt
@@ -1364,11 +1502,11 @@ class Router:
             raise ProviderError(kind, "unreachable: %r" % (exc,)) from None
         if not isinstance(obj, dict):
             raise ProviderError(ERR_PARSE, "provider returned non-JSON body")
-        text = _extract_text(obj, spec.kind, spec.model)
+        text = _extract_text(obj, spec.kind, model)
         if not text:
             raise ProviderError(ERR_PARSE, "empty completion from provider "
-                                           "(model=%s)" % (spec.model or "?"))
-        return text
+                                           "(model=%s)" % (model or "?"))
+        return text, obj
 
     # -- public API -------------------------------------------------------
     # -- pacing: spend the rate budget on purpose, not by accident --------
@@ -1396,9 +1534,9 @@ class Router:
               spec: ProviderSpec, state: ProviderState, purpose: str) -> str:
         """Decide whether this provider may spend a request right now.
 
-        The NIM free tier is ~40 requests/minute with unpublished per-model
-        limits, and going over is not recoverable — a 429 is a wasted request.
-        So a limit is not a goal to reach, it is a ceiling to stay under:
+        Hosted NIM limits vary; ``spec.rpm`` is Nex's operator-configured local
+        safety ceiling, not a claim about NVIDIA's current quota. A 429 still
+        wastes a request, so a limit is a ceiling to stay under:
 
           * a RESERVE (25% by default) is held back, so a build never eats
             the entire allowance of the minute;
@@ -1485,8 +1623,11 @@ class Router:
             state.total_calls += 1
             state.last_call_ts = time.time()
             state.last_call_clock = self._clock()
+            selected_model = self.model_for(role, name)
             try:
-                text = self._call(spec, messages, temperature, max_tokens, timeout)
+                text, response = self._call(
+                    spec, messages, selected_model, purpose,
+                    temperature, max_tokens, timeout)
             except ProviderError as exc:
                 state.mark_error(exc.kind, str(exc), exc.retry_after)
                 attempts.append({"provider": name, "error": exc.kind,
@@ -1496,7 +1637,11 @@ class Router:
                 continue
             state.mark_ok()
             state.total_ok += 1
-            self._emit_serving(name, spec, role, purpose, primary, chain)
+            state.record_response(response, selected_model, purpose)
+            usage = _safe_usage(
+                response.get("usage") if isinstance(response, dict) else {})
+            self._emit_serving(name, spec, role, purpose, primary, chain,
+                               selected_model, usage)
             return text
         raise AllProvidersFailed(role, attempts)
 
@@ -1592,10 +1737,11 @@ class Router:
 
     def callable_for(self, role: str
                      ) -> Callable[[List[Dict[str, str]]], str]:
-        """`llm(messages) -> str` bound to a role (what the agent loop takes)."""
-        def _call(messages: List[Dict[str, str]]) -> str:
-            return self.chat(role, messages)
-        return _call
+        """Purpose-aware callable compatible with the agent loop."""
+        def _bound(messages: List[Dict[str, str]], purpose: str = "agent") -> str:
+            return self.chat(role, messages, purpose=purpose)
+        _bound.supports_purpose = True  # type: ignore[attr-defined]
+        return _bound
 
     def available(self, role: str) -> bool:
         for name in self.chain(role):
@@ -1665,21 +1811,13 @@ class Router:
             # Which MODEL is actually answering matters as much as which
             # provider: after a failover the role's configured model name is
             # no longer the truth (NIM's model name is not what GPT runs).
-            def _model_for(name: str) -> str:
-                if not name:
-                    return ""
-                if name == provider:
-                    return self.role_model(role)
-                spec = self.specs.get(name)
-                return spec.model if spec else ""
-
             out[role] = {
                 "provider": provider,
                 "model": self.role_model(role),
                 "active": active or "",
-                "active_model": _model_for(active or ""),
+                "active_model": self.model_for(role, active or ""),
                 "serving": serving or "",
-                "serving_model": _model_for(serving or ""),
+                "serving_model": self.model_for(role, serving or ""),
                 "fallback": bool(serving and serving != provider),
             }
         return out
@@ -1855,9 +1993,16 @@ def _extract_text(obj: Dict[str, Any], kind: str, model: str = "") -> str:
         msg = obj.get("message") or {}
         return str(msg.get("content") or "").strip()
     choices = obj.get("choices") or []
-    if not choices:
+    if not choices or not isinstance(choices[0], dict):
         return ""
-    msg = choices[0].get("message") or {}
+    choice = choices[0]
+    finish = str(choice.get("finish_reason") or "")
+    if finish and finish not in ("stop", "tool_calls"):
+        raise ProviderError(
+            ERR_PARSE,
+            "model=%s returned an incomplete answer (finish_reason=%s)"
+            % (model or "?", finish))
+    msg = choice.get("message") or {}
     text = str(msg.get("content") or "").strip()
     if text:
         return text
