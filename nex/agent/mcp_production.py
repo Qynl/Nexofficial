@@ -16,6 +16,7 @@ from agent.quality import GATE_ORDER, gate_catalog, tool_gates
 from mcp.capability import (
     BUILD, CODE_EXECUTION, CREATE, MODIFY, NETWORK, READ, TEST,
 )
+from mcp.policy import is_dispatcher_tool
 
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9_.:/-]{1,160}\Z")
 _SHIP_TERMS = (
@@ -487,6 +488,17 @@ def contract_health(registry: Any) -> Dict[str, Any]:
     for view in getattr(registry, "servers", []) or []:
         resource_count += len(getattr(view, "resource_items", []) or [])
         prompt_count += len(getattr(view, "prompt_items", []) or [])
+
+    # A server in "tool search" mode (Unreal MCP's default) advertises a
+    # generic dispatcher instead of its real tools. Nex still authorizes
+    # each dispatched action individually, but it cannot classify evidence
+    # gates, detect engine readiness, or plan deterministically against
+    # tools it has never been shown.
+    hidden: List[str] = []
+    for tool in safe:
+        if is_dispatcher_tool(getattr(tool, "name", ""),
+                              getattr(tool, "schema", None)):
+            hidden.append(tool.full_name)
     total = len(safe)
     input_pct = round(100 * input_typed / total) if total else 0
     output_pct = round(100 * output_typed / total) if total else 0
@@ -501,6 +513,14 @@ def contract_health(registry: Any) -> Dict[str, Any]:
         "annotation_coverage": round(100 * annotated / total) if total else 0,
         "context_resources": resource_count,
         "server_prompts": prompt_count,
+        "tool_dispatchers": hidden[:6],
+        "dispatcher_advice": (
+            "%s hides its real tools behind a generic dispatcher. Nex "
+            "authorizes each dispatched action on its own name, but it "
+            "cannot classify quality gates or plan deterministically "
+            "against tools it cannot see. In Unreal: Editor Preferences "
+            "> Model Context Protocol > turn OFF 'Enable Tool Search'."
+            % ", ".join(hidden[:3]) if hidden else ""),
         "weak_contracts": weak[:12],
         "note": ("Schema health measures how precisely Nex can plan arguments "
                  "and reuse results; it is not an engine-quality score."),

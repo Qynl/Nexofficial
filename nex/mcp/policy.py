@@ -34,7 +34,8 @@ from typing import Any, Dict, Optional, Set
 
 from mcp.capability import (
     READ, CREATE, MODIFY, BUILD, TEST, CODE_EXECUTION, DESTRUCTIVE, NETWORK,
-    UNKNOWN, ToolCapability, apply_capability_registry, tokenize,
+    UNKNOWN, ToolCapability, apply_capability_registry, capability_for_tool,
+    max_capability, tokenize,
 )
 
 
@@ -326,14 +327,74 @@ class Decision:
     requires_confirmation: bool
     reason: str
     category: str = UNKNOWN
+    # When the call went through a generic dispatcher (Unreal MCP's
+    # `call_tool`), this is the tool actually being invoked. Approvals must
+    # bind to it, never to the dispatcher.
+    effective_tool: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "allowed": self.allowed,
             "requires_confirmation": self.requires_confirmation,
             "reason": self.reason,
             "category": self.category,
         }
+        if self.effective_tool:
+            out["effective_tool"] = self.effective_tool
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Generic tool dispatchers
+#
+# Unreal Engine 5.8's official MCP plugin defaults to "Enable Tool Search",
+# where tools/list returns three meta-tools — list_toolsets,
+# describe_toolset, and call_tool — instead of the real schemas. Every real
+# action then arrives as call_tool{name: "...", arguments: {...}}.
+#
+# A dispatcher is a capability-confusion hazard: classifying the wrapper
+# tells you nothing about the wrapped action, the shell denylist never sees
+# the real name, and one "always allow" on the wrapper would silently cover
+# every tool the server can reach. Nex therefore looks THROUGH a dispatcher
+# and decides on the inner tool.
+# ---------------------------------------------------------------------------
+_DISPATCHER_NAMES = frozenset({
+    "call_tool", "calltool", "invoke_tool", "run_tool", "execute_tool",
+    "dispatch_tool", "tool_call", "use_tool",
+})
+# Argument keys that may carry the inner tool's name.
+_DISPATCH_NAME_KEYS = ("name", "tool", "tool_name", "toolname", "method")
+
+
+def is_dispatcher_tool(tool: str, schema: Any = None) -> bool:
+    """Does this tool invoke ANOTHER tool named in its arguments?"""
+    normalized = re.sub(r"[^a-z0-9]+", "_", (tool or "").strip().lower())
+    if normalized.strip("_") in _DISPATCHER_NAMES:
+        return True
+    if not isinstance(schema, dict):
+        return False
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return False
+    keys = {str(k).lower() for k in props}
+    names_a_tool = bool(keys & set(_DISPATCH_NAME_KEYS))
+    carries_args = bool(keys & {"arguments", "args", "params",
+                                "parameters", "input"})
+    return names_a_tool and carries_args
+
+
+def dispatched_tool_name(args: Any) -> Optional[str]:
+    """The inner tool name carried by a dispatcher call, if any."""
+    if not isinstance(args, dict):
+        return None
+    for key in _DISPATCH_NAME_KEYS:
+        for actual in args:
+            if str(actual).lower() != key:
+                continue
+            value = args[actual]
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 # Module-global policy (allow-lists only — the boundary is not in here).
@@ -352,7 +413,8 @@ def set_policy(p: Policy) -> None:
 def authorize(server: Optional[str], tool: str,
               capability: Optional[ToolCapability] = None,
               policy: Optional[Policy] = None,
-              args: Any = None) -> Decision:
+              args: Any = None,
+              schema: Any = None) -> Decision:
     """Authorize a single tool call. Returns a Decision.
 
     `server` is None for Nex-internal tools, or the upstream name for an
@@ -360,13 +422,52 @@ def authorize(server: Optional[str], tool: str,
     the call's arguments: they are scanned for escape payloads (OS
     primitives, credentials, paths leaving the project) — the content half
     of the boundary. Passing no args keeps the old name-only behavior.
+
+    A generic dispatcher (Unreal MCP's `call_tool`) is resolved to the tool
+    it actually invokes BEFORE any other rule runs, so the denylist, the
+    classification and the approval all bind to the real action.
     """
+    if is_dispatcher_tool(tool, schema):
+        cap = capability or ToolCapability()
+        inner = dispatched_tool_name(args)
+        if inner is None:
+            return Decision(
+                False, False,
+                "dispatcher '%s' was called without naming the tool it "
+                "invokes — Nex will not authorize an unidentified action"
+                % tool, cap.category)
+        if is_dispatcher_tool(inner):
+            return Decision(False, False,
+                            "dispatcher '%s' may not invoke another "
+                            "dispatcher ('%s')" % (tool, inner),
+                            cap.category)
+        inner_cap = capability_for_tool({"name": inner})
+        # A wrapper classified UNKNOWN carries no information — it is
+        # unknown *because* it is a wrapper. Once the real tool is known,
+        # that classification governs. Any other wrapper category is
+        # merged severity-max so it can still escalate, never soften.
+        effective_cap = (inner_cap if cap.category == UNKNOWN
+                         else max_capability(cap, inner_cap))
+        decision = authorize(server, inner, effective_cap, policy,
+                             args=(args or {}).get("arguments")
+                             if isinstance(args, dict) else None)
+        reason = decision.reason
+        if decision.allowed:
+            reason = "%s (dispatched through %s)" % (reason, tool)
+        else:
+            reason = "%s%s" % (reason, "" if "dispatcher" in reason
+                               else " (via dispatcher %s)" % tool)
+        return Decision(decision.allowed, decision.requires_confirmation,
+                        reason, decision.category, effective_tool=inner)
+
     pol = policy or _CURRENT
     cap = capability or ToolCapability()
     cat = cap.category
 
     # 1) Always-denied tools (shell, etc.) — bare tool name, so an
     # external server exposing a tool named `run_command` is denied too.
+    # Checked AFTER dispatcher resolution so call_tool{run_command} is
+    # denied exactly like a direct run_command.
     if _forbidden_tool_name(tool):
         return Decision(False, False,
                         "shell/process tool '%s' is never authorized"

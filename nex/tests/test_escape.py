@@ -324,6 +324,121 @@ class NoSecondPathTests(unittest.TestCase):
                "unexpected transport importers: %r" % files)
 
 
+class ToolDispatcherTests(unittest.TestCase):
+    """Unreal MCP's official `call_tool` must not become a boundary hole.
+
+    UE 5.8 ships with "Enable Tool Search" ON by default, so tools/list
+    returns list_toolsets / describe_toolset / call_tool and every real
+    action arrives wrapped. Classifying the wrapper would make the shell
+    denylist blind and let one approval cover every tool behind it.
+    """
+
+    DISPATCHER = {
+        "name": "call_tool",
+        "description": "Invoke a tool by name with arguments.",
+        "inputSchema": {"type": "object", "required": ["name"],
+                        "properties": {"name": {"type": "string"},
+                                       "arguments": {"type": "object"}}},
+    }
+
+    def _decide(self, inner, inner_args=None):
+        from mcp.capability import capability_for_tool
+        from mcp.policy import authorize
+        cap = capability_for_tool(self.DISPATCHER)
+        args = {"name": inner, "arguments": inner_args or {}}
+        return authorize("unreal", "call_tool", cap, args=args,
+                         schema=self.DISPATCHER["inputSchema"])
+
+    def test_shell_tools_cannot_be_smuggled_through_the_dispatcher(self):
+        for name in ("run_command", "spawn_shell", "execute_command",
+                     "open_terminal", "bash"):
+            d = self._decide(name)
+            expect(not d.allowed,
+                   "dispatcher must not reach shell tool %r" % name)
+            expect(d.effective_tool == name,
+                   "denial must name the real tool, got %r"
+                   % d.effective_tool)
+
+    def test_dispatched_calls_are_classified_by_the_inner_tool(self):
+        cases = {"delete_actor": "destructive", "spawn_actor": "create",
+                 "get_output_log": "read", "publish_level": "network",
+                 "execute_python": "code_execution"}
+        for inner, expected in cases.items():
+            d = self._decide(inner)
+            expect(d.category == expected,
+                   "call_tool{%s} should classify as %s, got %s"
+                   % (inner, expected, d.category))
+            expect(d.effective_tool == inner,
+                   "decision must expose the dispatched tool name")
+
+    def test_dispatcher_without_a_named_tool_is_refused(self):
+        from mcp.capability import capability_for_tool
+        from mcp.policy import authorize
+        cap = capability_for_tool(self.DISPATCHER)
+        d = authorize("unreal", "call_tool", cap, args={"arguments": {}},
+                      schema=self.DISPATCHER["inputSchema"])
+        expect(not d.allowed, "an unidentified dispatched action must deny")
+
+    def test_dispatcher_cannot_nest(self):
+        d = self._decide("call_tool")
+        expect(not d.allowed, "a dispatcher must not invoke a dispatcher")
+
+    def test_payload_scan_reaches_nested_arguments(self):
+        d = self._decide("run_python", {"code": "os.system('rm -rf /')"})
+        expect(not d.allowed,
+               "escape payload inside dispatched arguments must deny")
+
+    def test_approval_binds_to_the_dispatched_tool_not_the_wrapper(self):
+        from mcp.manager import ServerManager
+        home = tempfile.mkdtemp(prefix="nex-dispatch-")
+        old = os.environ.get("NEX_HOME")
+        os.environ["NEX_HOME"] = home
+        try:
+            dispatcher = self.DISPATCHER
+
+            class FakeUp:
+                name = "unreal"
+
+                def status(self):
+                    return {"tools_count": 1}
+
+                def tools(self):
+                    return [dispatcher]
+
+                def call(self, tool, args):
+                    return {"content": [{"type": "text", "text": "ok"}]}
+
+            m = ServerManager()
+            m._live["unreal"] = FakeUp()
+            m._config = [{"name": "unreal", "transport": "http",
+                          "url": "http://127.0.0.1:8000/mcp",
+                          "enabled": True, "trusted": True}]
+
+            def call(inner):
+                return m.call("unreal", "call_tool",
+                              {"name": inner, "arguments": {}})
+
+            expect("needs_confirmation" in call("delete_actor"),
+                   "destructive dispatched call must ask first")
+            m.approve_tool("unreal", "delete_actor")
+            expect("result" in call("delete_actor"),
+                   "approving the real tool must let it through")
+            expect("needs_confirmation" in call("publish_level"),
+                   "approval must not leak to a different dispatched tool")
+            # The decisive case: approving the WRAPPER grants nothing.
+            m.approve_tool("unreal", "call_tool")
+            expect("needs_confirmation" in call("publish_level"),
+                   "approving the dispatcher must not approve everything")
+            expect("refused" in call("run_command"),
+                   "denylist still applies after any approval")
+        finally:
+            if old is None:
+                os.environ.pop("NEX_HOME", None)
+            else:
+                os.environ["NEX_HOME"] = old
+            shutil.rmtree(home, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
     if _FAILED:

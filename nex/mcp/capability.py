@@ -328,6 +328,28 @@ def _more_dangerous(a: str, b: str) -> str:
     return a if order.get(a, 9) >= order.get(b, 9) else b
 
 
+def max_capability(a: ToolCapability, b: ToolCapability) -> ToolCapability:
+    """Severity-max merge of two classifications of the same call.
+
+    Used when one call has two identities — a generic dispatcher wrapping
+    a real tool. Neither identity may soften the other: the result takes
+    the worse category and the union of every dangerous flag.
+    """
+    cat = _more_dangerous(a.category, b.category)
+    return ToolCapability(
+        category=cat,
+        read_only=bool(a.read_only and b.read_only),
+        reversible=bool(a.reversible and b.reversible),
+        destructive=bool(a.destructive or b.destructive),
+        network=bool(a.network or b.network),
+        requires_confirmation=bool(a.requires_confirmation
+                                   or b.requires_confirmation
+                                   or _needs_confirm(cat)),
+        source=a.source if a.source == b.source else "merged",
+        notes=("; ".join(n for n in (a.notes, b.notes) if n))[:400],
+    )
+
+
 def _category_from_annotations(ann: Dict[str, Any], name_l: str) -> str:
     if ann.get("destructiveHint"):
         return DESTRUCTIVE

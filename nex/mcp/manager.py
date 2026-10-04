@@ -839,7 +839,12 @@ class ServerManager:
         # fresh immutable copy here avoids stale trust after a UI toggle.
         if pol.strict_servers:
             pol = replace(pol, trusted_servers=self.trusted_servers())
-        decision = authorize(server, tool, cap, policy=pol, args=args)
+        decision = authorize(server, tool, cap, policy=pol, args=args,
+                             schema=tool_def.get("inputSchema"))
+        # A generic dispatcher (Unreal MCP `call_tool`) performs a DIFFERENT
+        # action per call. Consent must name that action, or one standing
+        # approval of the wrapper would silently cover every tool behind it.
+        approval_tool = decision.effective_tool or tool
         if not decision.allowed:
             self.audit.record("refuse", server=server, tool=tool, args=args,
                               ok=False, detail=decision.reason,
@@ -865,12 +870,18 @@ class ServerManager:
             if public_decision.get("category") == "unknown":
                 public_decision["category"] = "untrusted_server"
 
-        standing = self.is_tool_approved(server, tool)
+        if decision.effective_tool:
+            public_decision["dispatched_tool"] = decision.effective_tool
+            reason = ("%s — approval binds to '%s', not to the '%s' wrapper"
+                      % (reason, decision.effective_tool, tool))
+
+        standing = self.is_tool_approved(server, approval_tool)
         approved_once = False
         if needs_confirmation and not standing:
             # A one-shot grant is consumed only after policy + schema checks
             # pass, and only for the exact canonical arguments approved.
-            approved_once = self._consume_once_approval(server, tool, args)
+            approved_once = self._consume_once_approval(
+                server, approval_tool, args)
             if not approved_once:
                 self.audit.record(
                     "confirm_required", server=server, tool=tool, args=args,

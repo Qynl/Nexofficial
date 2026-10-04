@@ -119,6 +119,58 @@ YOU
 | available evidence and quality score | unavailable proof never becomes “passed” |
 | NIM/GPT/local provider serving a call | failover never rewrites the build plan |
 
+## Connecting the first-party engine MCP servers
+
+Both target engines now ship MCP support from the engine maker itself — no
+community bridge required.
+
+### Unreal Engine 5.8 — Epic's `ModelContextProtocol` plugin
+
+Enable **Unreal MCP** (plus **AllToolsets**) in *Edit > Plugins*, then switch on
+*Edit > Editor Preferences > General > Model Context Protocol > **Auto Start
+Server***. The server binds to `http://127.0.0.1:8000/mcp`. Add it in Nex under
+Capabilities as an HTTP server pointing at that URL.
+
+> **Turn OFF “Enable Tool Search.”** It defaults to **on**, and in that mode
+> `tools/list` returns only three meta-tools — `list_toolsets`,
+> `describe_toolset`, `call_tool` — instead of the real schemas. Nex stays safe
+> either way (see below), but with the real tools hidden it cannot classify
+> quality gates, detect engine readiness, or plan deterministically. Nex reports
+> this as `dispatcher_advice` in server health.
+
+Epic ships this as **Experimental**: APIs and data formats may change, there is
+**no authentication layer**, and it is localhost-only by design. Tool calls also
+execute **serially on the game thread**, so clients must not issue overlapping
+calls — Nex already executes one MCP call at a time per server.
+
+### Roblox Studio — the built-in MCP server
+
+Modern Studio has an MCP server **built in**; enable it from Assistant's MCP
+settings. (The older open-source `Roblox/studio-rust-mcp-server` still works but
+is no longer the recommended path.) Roblox's own guidance is the short version of
+this entire README: **only connect clients you trust.**
+
+### How Nex handles a generic tool dispatcher
+
+A wrapper like `call_tool` performs a *different action on every call*. Treating
+it as one tool would be a capability-confusion hole: the shell denylist would
+inspect the wrapper and never see `run_command`, and a single “always allow”
+would silently cover every tool behind it. So `mcp/policy.py` resolves the
+dispatcher **before any other rule runs**:
+
+| Call | Verdict |
+| --- | --- |
+| `call_tool{name: "run_command"}` | **denied** — denylist matches the inner name |
+| `call_tool{name: "delete_actor"}` | `destructive` → confirmation |
+| `call_tool{name: "spawn_actor"}` | `create` → proceeds |
+| `call_tool{name: "get_output_log"}` | `read` → proceeds |
+| `call_tool` with no inner name | **denied** — Nex will not authorize an unidentified action |
+| `call_tool{name: "call_tool"}` | **denied** — dispatchers may not nest |
+
+Approvals bind to the **dispatched** tool, never to the wrapper: approving
+`call_tool` itself grants nothing. Escape-payload scanning reaches into the
+nested `arguments` object too.
+
 ## Two editors. Two contracts. One honest boundary.
 
 “Game engine support” often means a model was told which brand name to repeat.
@@ -1136,7 +1188,7 @@ Thirteen suites run in isolated processes because several intentionally configur
 | `test_reversal` | Inverse-tool discovery, structured identity resolution, LIFO compensation order, honest coverage reporting, and refusal to guess when no inverse or identifier exists |
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
-| `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
+| `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route, generic tool dispatchers (Unreal `call_tool`) |
 | `test_providers` | Exact role-model dispatch, NIM JSON mode, purpose temperatures, usage telemetry, truncation rejection, failover, pacing, and key/host binding |
 
 Useful development checks:
@@ -1218,7 +1270,7 @@ invent arguments it cannot honestly supply.
 - **Nex orchestrates capabilities; it does not contain an engine.** It now reads project state through MCP resources, but if the server cannot manipulate navmeshes, animate characters, capture a viewport, or profile a build, Nex cannot synthesize those powers. Reading about a lightmap is not baking one.
 - **The quality score is evidence coverage, not a review score.** `100/100` means all required tool-backed checks ran successfully. It does not mean the art is beautiful, the combat is fun, the story is good, accessibility is complete, or customers will buy it.
 - **Autonomous is not the same as unattended.** The pre-flight manifest tells you where the run will stop; it does not remove the stops. Risky tools still wait for a person unless the operator explicitly grants a standing approval.
-- **MCP servers are third-party code.** Nex controls what it sends and how it interprets responses, but a malicious server can lie about what happened. Cross-server corroboration raises the cost of a lie — a second, independent witness now has to agree — but it only works when you actually connect a second server, and colluding servers defeat it. Keep servers untrusted until reviewed. A local stdio server still runs with the OS permissions of the user who launched Nex; the minimal environment prevents accidental token inheritance, not all OS-level access.
+- **MCP servers run with your permissions — first-party ones included.** Epic's and Roblox's servers are first-party and trustworthy, but they are also *powerful*: both expose arbitrary code execution inside the editor (`run_code`, `execute_python`), and Epic ships theirs as experimental with no authentication layer. Nex controls what it sends and how it interprets responses, but a server can still be wrong about what happened. Cross-server corroboration raises the cost of a lie — a second, independent witness now has to agree — but it only works when you actually connect a second server, and colluding servers defeat it. Keep servers untrusted until reviewed. A local stdio server still runs with the OS permissions of the user who launched Nex; the minimal environment prevents accidental token inheritance, not all OS-level access.
 - **Resource content is data, never instruction.** Project context is bounded, redacted, and explicitly fenced as untrusted — which blunts prompt injection, but no fence is proof against a model that decides to be creative.
 - **Reverting is compensation, not a rollback.** MCP has no transaction and no savepoint. Nex can call `delete_level` to compensate a `create_level` it can identify — it cannot un-cook a build, un-publish a release, or restore something a destructive tool deleted. Coverage is reported as a fraction every time, because a partial reversal that presents itself as a clean undo is worse than none: the operator stops looking. **Version-control your project; that is the real undo.**
 - **The deterministic planner is structural, not semantic.** It can now build a real production loop, because causal evidence ordering is deterministic. It still cannot invent arguments: a step whose schema demands values only judgment can supply is reported, not guessed. Confidence theater was never invited to this party.
