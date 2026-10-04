@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.registry import ServerView, ToolView
 from mcp.capability import capability_for_tool
+from mcp.schema import tool_contract_fingerprint
 
 
 class MockMCPServer:
@@ -96,7 +97,9 @@ def server_view(name: str, mock: MockMCPServer,
             description=t.get("description", ""),
             schema=t.get("inputSchema", {}) or {},
             output_schema=t.get("outputSchema", {}) or {},
-            capability=cap, annotations=t.get("annotations", {}) or {},
+            capability=cap,
+            contract_fingerprint=tool_contract_fingerprint(t),
+            annotations=t.get("annotations", {}) or {},
         ))
     return ServerView(name=name, tools=tools, protocol=protocol,
                       health="ok")

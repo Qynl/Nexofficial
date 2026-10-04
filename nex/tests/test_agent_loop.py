@@ -35,6 +35,7 @@ from agent.workload import planning_purpose                     # noqa: E402
 from mcp.registry import CapabilityRegistry                    # noqa: E402
 from mcp.capability import capability_for_tool                 # noqa: E402
 from mcp.policy import authorize                               # noqa: E402
+from mcp.schema import tool_contract_fingerprint               # noqa: E402
 
 
 def mk_registry(*mocks):
@@ -74,6 +75,11 @@ class FakeManager:
         tool_def = next((t for t in mock.tools() if t["name"] == tool), None)
         if tool_def is None:
             return {"error": "server '%s' has no tool '%s'" % (server, tool)}
+        expected = str((audit_context or {}).get("contract_fingerprint") or "")
+        if expected and expected != tool_contract_fingerprint(tool_def):
+            return {"error": "tool contract changed after planning; refusing "
+                             "stale arguments and requiring a fresh plan",
+                    "contract_changed": True}
         cap = capability_for_tool(tool_def)
         decision = authorize(server, tool, cap, args=args)
         if not decision.allowed:

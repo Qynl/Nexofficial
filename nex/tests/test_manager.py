@@ -105,6 +105,17 @@ class ManagerTests(unittest.TestCase):
         text = out["result"]["content"][0]["text"]
         self.assertEqual(text, "hi")
 
+    def test_stale_planned_contract_is_refused_before_call(self):
+        view = self.mgr.registry().by_name("echo.echo")
+        self.assertTrue(view.contract_fingerprint)
+        out = self.mgr.call(
+            "echo", "echo", {"text": "must-not-run"},
+            audit_context={"contract_fingerprint": "0" * 64})
+        self.assertTrue(out.get("contract_changed"), out)
+        self.assertIn("fresh plan", out.get("error", ""))
+        self.assertEqual(self.mgr.audit_entries(1)[0]["kind"],
+                         "contract_changed")
+
     def test_mcp_is_error_result_never_becomes_success(self):
         up = self.mgr.upstream("echo")
         original = up.call

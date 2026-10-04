@@ -96,12 +96,10 @@ def _contains_any(text: str, terms: Sequence[str]) -> bool:
 def tool_gates(tool: Any) -> Set[str]:
     """Map a live ToolView to gates supported by its own metadata.
 
-    Names dominate because descriptions are untrusted prose and can contain
-    prompt injection.  Descriptions are only a secondary lexical signal;
-    they never grant execution and the manager still authorizes every call.
+    Names and deterministic capability categories are the only signals.
+    Descriptions are untrusted prose: they never grant an evidence role.
     """
     name = str(getattr(tool, "name", "") or "").lower()
-    desc = str(getattr(tool, "description", "") or "").lower()[:500]
     cap = getattr(tool, "capability", None)
     category = getattr(cap, "category", None)
     gates: Set[str] = set()
@@ -170,17 +168,6 @@ def tool_gates(tool: Any) -> Set[str]:
                    "state", "tree", "hierarchy", "scene", "project",
                    "asset", "actor", "node", "component", "blueprint")):
         gates.add("inspection")
-
-    # Descriptions can disambiguate intentionally generic engine APIs, but
-    # require a matching category so prose alone cannot claim a quality gate.
-    if category == READ and not gates.intersection({
-            "inspection", "visual", "visual_review", "diagnostics",
-            "performance"}):
-        if _contains_any(desc, ("inspect project", "inspect scene",
-                                "project state", "scene hierarchy")):
-            gates.add("inspection")
-    if category == TEST and "playtest" in desc:
-        gates.add("playtest")
 
     return gates
 
@@ -297,6 +284,41 @@ def result_declares_failure(value: Any, depth: int = 0) -> bool:
     return False
 
 
+def result_has_evidence(value: Any, depth: int = 0) -> bool:
+    """Whether a successful MCP call returned inspectable evidence.
+
+    JSON-RPC success with ``null`` or an empty envelope proves only that the
+    transport answered. It cannot prove a build, playtest, screenshot review,
+    diagnostic pass, verification, or profile.
+    """
+    if depth > 8 or value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (bool, int, float)):
+        return True
+    if isinstance(value, list):
+        return any(result_has_evidence(item, depth + 1)
+                   for item in value[:100])
+    if isinstance(value, dict):
+        content = value.get("content")
+        if isinstance(content, list):
+            return any(result_has_evidence(item, depth + 1)
+                       for item in content[:100])
+        # A structured verdict is evidence even with no further payload.
+        verdict_keys = {"ok", "success", "succeeded", "passed", "valid",
+                        "compiled", "built", "status", "result", "value"}
+        if any(str(key).lower() in verdict_keys for key in value):
+            return True
+        meaningful = [item for key, item in value.items()
+                      if str(key).lower() not in {
+                          "iserror", "jsonrpc", "id", "type", "mimetype",
+                          "annotations", "_meta"}]
+        return any(result_has_evidence(item, depth + 1)
+                   for item in meaningful[:100])
+    return bool(value)
+
+
 def assess(profile: QualityProfile, registry: Any,
            tasks: Iterable[Any]) -> Dict[str, Any]:
     """Build the public scorecard from successful, positive tool evidence."""
@@ -317,14 +339,28 @@ def assess(profile: QualityProfile, registry: Any,
                 registry.by_name(name)
         if tv is None:
             continue
-        if result_declares_failure(getattr(task, "result", None)):
+        result = getattr(task, "result", None)
+        if result_declares_failure(result):
             rejected.append({
                 "step": str(getattr(task, "name", "") or name)[:120],
                 "tool": tv.full_name,
                 "reason": "tool result contains an explicit negative verdict",
             })
             continue
+        has_payload = result_has_evidence(result)
+        rejected_empty = False
         for gate in tool_gates(tv):
+            # Implementation success is the authorized mutation itself. Every
+            # evidence gate must return something inspectable, not null/empty.
+            if gate != "implementation" and not has_payload:
+                if not rejected_empty:
+                    rejected.append({
+                        "step": str(getattr(task, "name", "") or name)[:120],
+                        "tool": tv.full_name,
+                        "reason": "tool succeeded but returned no evidence payload",
+                    })
+                    rejected_empty = True
+                continue
             key = (gate, server, name, str(getattr(task, "id", "")))
             if key in seen:
                 continue
@@ -332,6 +368,7 @@ def assess(profile: QualityProfile, registry: Any,
             evidence[gate].append({
                 "step": str(getattr(task, "name", "") or name)[:120],
                 "tool": tv.full_name,
+                "strength": "action" if gate == "implementation" else "payload",
             })
 
     gates: List[Dict[str, Any]] = []

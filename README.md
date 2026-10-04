@@ -14,7 +14,7 @@
 ![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.8-0E1128?style=for-the-badge&logo=unrealengine)
 ![Roblox Studio](https://img.shields.io/badge/Roblox-Studio-E2231A?style=for-the-badge&logo=roblox)
 ![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-hard%20work-76B900?style=for-the-badge)
-![Test suites](https://img.shields.io/badge/test%20suites-12-8B7CF6?style=for-the-badge)
+![Test suites](https://img.shields.io/badge/test%20suites-13-8B7CF6?style=for-the-badge)
 ![Shell access](https://img.shields.io/badge/model%20shell-NONE-20242C?style=for-the-badge)
 
 <br>
@@ -78,6 +78,7 @@ repairs bounded failures, and reports exactly what was proven.
 | see the Roblox contract | [Roblox Studio](#roblox-studio--luau-authority-multi-client-proof) |
 | understand the “make GTA 7” behavior | [The studio program](#from-make-gta-7-to-an-actual-production-program) |
 | see why a green tool call is not enough | [Evidence gates](#the-nine-evidence-gates) |
+| understand the production-grade MCP core | [MCP production intelligence](#mcp-production-intelligence) |
 | understand NVIDIA NIM routing | [NIM flight deck](#nvidia-nim-flight-deck) |
 | audit the safety boundary | [Security model](#security-model) |
 | connect an engine MCP correctly | [MCP server contract](#what-a-capable-game-engine-mcp-server-should-expose) |
@@ -476,6 +477,13 @@ Structured negative verdicts such as `{"playable": false}`, `{"valid": false}`,
 non-empty `errors`, or a failed `status` are rejected as positive evidence even
 when transport succeeded.
 
+An **empty** success is rejected too. For every gate except implementation, the
+call must return an inspectable payload: `null`, `{}`, and empty content no
+longer turn a gate green, because a reply with nothing in it cannot prove a
+build, a play session, a screenshot review, a log inspection, a test, or a
+profile. Implementation is the deliberate exception—an authorized mutation is
+itself the action—and downstream gates still have to prove it worked.
+
 Unavailable does **not** quietly become passed. If a plan omitted an available gate, Nex can make **one bounded corrective plan** by default. Completed implementation history is preserved, task IDs are safely namespaced, and the corrective prompt explicitly says not to redo successful work. No infinite “just one more polish pass” spiral at 3 a.m.
 
 ```json
@@ -535,6 +543,120 @@ get_performance_metrics / profiler_capture / benchmark
 ```
 
 Prefer narrow, schema-rich engine actions over a generic `run_command`. Nex categorically denies shell/process tools anyway. Purpose-built calls produce better plans, safer approvals, stronger audit records, and more honest quality evidence.
+
+## MCP production intelligence
+
+The MCP boundary is not merely where actions happen; it is the production
+substrate. If this layer gives the planner 100 vaguely named mutation tools and
+hides the one profiler, Nex will produce more content and less truth. The MCP
+production layer in `agent/mcp_production.py` addresses that failure mode before
+execution.
+
+### 1. Balanced capability portfolios
+
+Ordinary lexical ranking overweights words from the goal. A request containing
+“city,” “vehicle,” and “combat” can fill the entire prompt with authoring tools
+while omitting PIE, multi-client play, screenshots, logs, tests, or profiling.
+Production catalog selection reserves bounded space for:
+
+```text
+inspection → implementation → build → runtime → capture → visual review
+                                  └──── diagnostics / verification / profiling
+```
+
+It also reserves exact tools from the active Unreal or Roblox profile and a
+small representative set from each capability category. Remaining space is
+filled by goal relevance. This keeps large MCP catalogs useful without dumping
+every tool into model context.
+
+### 2. Schemas are planning contracts
+
+Nex now renders substantially more of each live JSON Schema:
+
+- required fields;
+- nested object fields and array item types;
+- enum and const choices;
+- defaults;
+- numeric and string limits;
+- whether extra arguments are forbidden; and
+- declared output fields for `$step.field` dataflow.
+
+A tool with a typed input contract is easier to call correctly. A tool with a
+typed output contract is easier to compose with the next tool. The Capabilities
+screen therefore shows **MCP contract quality** separately from engine feature
+coverage. A low schema score does not mean the server is malicious or unusable;
+it means plans and result reuse have to guess more than they should.
+
+### 3. Dependency order is proof order
+
+A JSON list is not execution order; `depends_on` is. Before a production plan
+runs, deterministic code audits the causal chain:
+
+- authoring descends from project inspection when both are planned;
+- builds descend from the authoring they are supposed to contain, and no
+  authoring step is left out of every build and runtime check (incremental
+  author → build → author → build cycles stay legal);
+- runtime sessions descend from the build or implementation under test;
+- captures and diagnostics descend from that runtime;
+- visual review descends from a real capture;
+- verification and profiling descend from the relevant runtime; and
+- publishing descends from verification or, at minimum, a real build.
+
+If the model merely lists those steps independently, Nex spends at most **one
+bounded repair round** asking for corrected dependencies. If the repair is still
+invalid, the plan is blocked rather than executing unrelated evidence and later
+calling it proof. Warnings also identify steps with no concrete `expect` field.
+
+### 4. Tool contracts are pinned at plan time
+
+Every planned task carries a SHA-256 fingerprint of the callable MCP contract:
+tool name, input schema, output schema, and annotations. Immediately before the
+call, the manager fingerprints the live definition again. If a server changes
+its schema after planning, Nex refuses the stale arguments and requires a fresh
+plan. This closes a subtle time-of-check/time-of-use gap without trusting the
+server's prose description.
+
+Descriptions are useful hints, but they are untrusted and never grant a quality
+gate or engine-readiness capability. Unsafe/control-bearing tool identifiers are
+omitted from model catalogs entirely.
+
+### 5. Transport success is not production evidence
+
+`tools/call` returning successfully proves only that JSON-RPC completed. For
+build, playtest, capture, visual review, diagnostics, verification, and profile
+gates, Nex now requires a non-empty inspectable payload. `null`, `{}`, and empty
+content no longer turn a quality gate green. Structured negative results such as
+`passed: false`, `compiled: false`, or populated `errors` remain rejected even
+when the transport itself succeeded.
+
+Implementation is the one deliberate exception: an authorized mutation call is
+itself action evidence, although later build/runtime/observation gates still have
+to prove that the mutation worked.
+
+### 6. Bounded MCP observations preserve the useful part
+
+Editor and cook logs put setup at the top and the decisive error at the bottom.
+Nex keeps both head and tail when an observation exceeds its context budget
+instead of silently deleting the tail. Binary image/audio bodies are represented
+by MIME type and size rather than copied into a model prompt; the full task result
+remains available for explicit `$step` dataflow.
+
+Credential-shaped text and sensitive structured fields are redacted before MCP
+output enters provider context or UI previews. MCP images, resources, logs,
+schemas, and results remain untrusted data—never instructions.
+
+### What an excellent engine MCP server should do
+
+| Contract property | Why Nex benefits |
+| --- | --- |
+| narrow semantic tool names | safer classification, better planning, fewer ambiguous approvals |
+| `type: object` input schemas with required fields | fewer malformed editor operations |
+| enums and limits for modes/platforms/counts | less guessing around PIE, clients, targets, and quality settings |
+| declared output schemas with stable IDs/paths | reliable `$step.field` composition across tasks |
+| separate build, run, capture, diagnose, test, profile, and publish tools | independent evidence instead of one unverifiable “do everything” call |
+| structured `ok`/`passed`/`errors`/metrics | machine-verifiable outcomes rather than celebratory strings |
+| idempotent read tools and narrow mutations | safe recovery without duplicating assets or publishes |
+| explicit network/publish verbs | approvals bind to the action the operator actually understands |
 
 ## The autonomous loop
 
@@ -736,6 +858,8 @@ This is execution state, not exposed chain-of-thought. Nex shows what it is doin
 ### Capabilities
 
 The Capabilities view connects/disconnects/reconnects/removes servers, exposes live health and latency, lists discovered input/output contracts, shows classification, and makes server trust explicit. It also calculates **Game-production MCP readiness** before a run, with chips for every evidence gate and production discipline plus explicit hard blockers.
+
+Alongside it, **MCP contract quality** reports how precisely Nex can plan against your servers: typed-input coverage, declared-output coverage, and annotation coverage. Each engine card also shows the schema health of the specific tools matched to that profile. A server can be fully featured and still score poorly here—that simply means plans must guess more and results compose less reliably.
 
 ### Conversation
 
@@ -969,7 +1093,7 @@ cd nex
 python3 tests/run_all.py
 ```
 
-Twelve suites run in isolated processes because several intentionally configure different state homes and policies:
+Thirteen suites run in isolated processes because several intentionally configure different state homes and policies:
 
 | Suite | What it proves |
 | --- | --- |
@@ -981,6 +1105,7 @@ Twelve suites run in isolated processes because several intentionally configure 
 | `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
 | `test_engine_profiles` | Unreal 5.8 / Roblox detection, readiness, description distrust, planning contracts, events, and report metadata |
+| `test_mcp_production` | Balanced capability portfolios, schema-signature fidelity, causal plan auditing with one bounded repair, contract pinning, empty-success rejection, structured dataflow, and context redaction |
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
@@ -1011,6 +1136,7 @@ Nexofficial/
     │   ├── engines.py              Unreal 5.8 + Roblox contracts/readiness
     │   ├── production.py           eight-stage studio program + MCP readiness
     │   ├── quality.py              production contracts, gates, scorecards
+    │   ├── mcp_production.py       balanced catalogs, schema signatures, plan audit
     │   ├── model_planner.py        model plan + deterministic live validation
     │   ├── planner.py              conservative no-model fallback
     │   ├── task_graph.py           dependencies, state, failure propagation
@@ -1034,7 +1160,7 @@ Nexofficial/
     │   ├── index.html              accessible application shell
     │   ├── css/app.css             complete visual system
     │   └── js/                     face, chat, runs, capabilities, settings
-    └── tests/                       twelve isolated suites + HTTP echo MCP
+    └── tests/                       thirteen isolated suites + HTTP echo MCP
 ```
 
 ## Honest limits

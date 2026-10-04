@@ -31,6 +31,7 @@ class Task:
     tool: Optional[str] = None      # tool name (bare; server carries namespace)
     args: Dict[str, Any] = field(default_factory=dict)
     deps: List[str] = field(default_factory=list)
+    contract_fingerprint: str = ""       # callable schema pinned at plan time
     status: str = PENDING
     attempts: int = 0
     max_attempts: int = 3
@@ -49,6 +50,7 @@ class Task:
         return {
             "id": self.id, "name": self.name, "status": self.status,
             "server": self.server, "tool": self.tool,
+            "contract_pinned": bool(self.contract_fingerprint),
             "why": self.why, "expect": self.expect, "phase": self.phase,
             "error": self.error, "notes": self.notes,
         }

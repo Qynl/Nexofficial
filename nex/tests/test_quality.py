@@ -95,7 +95,8 @@ class CatalogAndScoreTests(unittest.TestCase):
         for i, spec in enumerate(GAME_TOOLS):
             tasks.append(Task(
                 id="s%d" % i, name=spec["name"], server="engine",
-                tool=spec["name"], status=SUCCESS))
+                tool=spec["name"], status=SUCCESS,
+                result={"ok": True, "artifact": spec["name"]}))
         scorecard = assess(self.profile, self.registry, tasks)
         self.assertTrue(scorecard["passed"])
         self.assertEqual(scorecard["score"], 100)

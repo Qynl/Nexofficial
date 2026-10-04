@@ -10,12 +10,29 @@ The MCP server remains authoritative and may perform stricter validation.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, List
 
 MAX_ARGUMENT_BYTES = 256 * 1024
 MAX_SCHEMA_DEPTH = 24
 MAX_ERRORS = 12
+
+
+def tool_contract_fingerprint(tool: Dict[str, Any]) -> str:
+    """Stable digest of the callable MCP contract, excluding description prose."""
+    contract = {
+        "name": tool.get("name"),
+        "inputSchema": tool.get("inputSchema") or {},
+        "outputSchema": tool.get("outputSchema") or {},
+        "annotations": tool.get("annotations") or {},
+    }
+    try:
+        raw = json.dumps(contract, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        raw = repr(contract)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
 def _json_size(value: Any) -> int:

@@ -136,45 +136,108 @@ def _arg_fix(task: Task, error: str,
     return args
 
 
-def _result_value(result: Any, key: Optional[str]) -> Any:
-    """Resolve a `$step` / `$step.key` reference from a tool result.
-
-    MCP results are envelopes; the useful payload is usually the text
-    content (often itself JSON). We dig for `key` at every level we can
-    honestly find it, and fall back to a regex scan of the text.
-    """
-    if result is None:
-        return None
-    parsed = result
-    if isinstance(parsed, dict) and isinstance(parsed.get("content"), list):
-        texts = [str(c.get("text", "")) for c in parsed["content"]
-                 if isinstance(c, dict) and c.get("type") == "text"]
-        joined = "\n".join(t for t in texts if t)
-        try:
-            import json as _json
-            parsed = _json.loads(joined)
-        except (ValueError, TypeError):
-            parsed = joined if joined else result
-    if key is None:
-        return parsed
-    # Walk dicts by dotted path.
-    node = parsed
+def _dotted_path(node: Any, key: str) -> Any:
     for part in key.split("."):
         if isinstance(node, dict) and part in node:
             node = node[part]
+        elif isinstance(node, list) and part.isdigit() \
+                and int(part) < len(node):
+            node = node[int(part)]
         else:
-            node = None
-            break
-    if node is not None:
-        return node
-    # Regex fallback over the textual form.
+            return None
+    return node
+
+
+_AMBIGUOUS = object()
+
+
+def _unique_key_value(node: Any, key: str) -> Any:
+    """Bounded search for ONE unambiguous occurrence of a leaf key.
+
+    Engine MCP servers wrap payloads inconsistently (``data``, ``result``,
+    ``asset``...). A single unambiguous match is honest dataflow; several
+    conflicting matches are not, so those resolve to nothing rather than
+    silently choosing one.
+    """
+    found: List[Any] = []
+    stack: List[Tuple[Any, int]] = [(node, 0)]
+    visited = 0
+    while stack and visited < 4000 and len(found) < 4:
+        current, depth = stack.pop()
+        visited += 1
+        if depth > 8:
+            continue
+        if isinstance(current, dict):
+            if key in current:
+                found.append(current[key])
+            for value in list(current.values())[:200]:
+                if isinstance(value, (dict, list)):
+                    stack.append((value, depth + 1))
+        elif isinstance(current, list):
+            for value in current[:200]:
+                if isinstance(value, (dict, list)):
+                    stack.append((value, depth + 1))
+    if not found:
+        return None
+    if len({repr(item) for item in found}) != 1:
+        return _AMBIGUOUS
+    return found[0]
+
+
+def _result_value(result: Any, key: Optional[str]) -> Any:
+    """Resolve a `$step` / `$step.key` reference from a tool result.
+
+    Resolution order follows MCP itself, strongest contract first:
+
+      1. ``structuredContent`` — the schema-backed machine-readable payload;
+      2. JSON parsed from the text content blocks;
+      3. the raw envelope.
+
+    Each candidate is tried with an exact dotted path, then one unambiguous
+    nested-key match. A loose textual scan is the final fallback, used only
+    when nothing structured matched.
+    """
+    if result is None:
+        return None
+    import json as _json
+
+    structured = None
+    parsed = result
+    if isinstance(result, dict):
+        if isinstance(result.get("structuredContent"), (dict, list)):
+            structured = result["structuredContent"]
+        if isinstance(result.get("content"), list):
+            texts = [str(c.get("text", "")) for c in result["content"]
+                     if isinstance(c, dict) and c.get("type") == "text"]
+            joined = "\n".join(t for t in texts if t)
+            try:
+                parsed = _json.loads(joined)
+            except (ValueError, TypeError):
+                parsed = joined if joined else result
+    if key is None:
+        return structured if structured is not None else parsed
+
+    candidates = [c for c in (structured, parsed, result) if c is not None]
+    for candidate in candidates:
+        node = _dotted_path(candidate, key)
+        if node is not None:
+            return node
+    leaf = key.split(".")[-1]
+    for candidate in candidates:
+        node = _unique_key_value(candidate, leaf)
+        if node is _AMBIGUOUS:
+            # Several conflicting values: guessing one would be dishonest
+            # dataflow, and a text scan would guess too.
+            return None
+        if node is not None:
+            return node
+    # Textual fallback: only when nothing structured answered.
     try:
-        import json as _json
         text = parsed if isinstance(parsed, str) else _json.dumps(
             parsed, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         text = str(parsed)
-    m = re.search(r'"?%s"?\s*[:=]\s*"?([^",\}\]\n]+)' % re.escape(key), text)
+    m = re.search(r'"?%s"?\s*[:=]\s*"?([^",\}\]\n]+)' % re.escape(leaf), text)
     return m.group(1).strip() if m else None
 
 
@@ -406,7 +469,10 @@ class AgentRun:
             purpose=self._plan_purpose(reg),
             note=self._eval_note,
             quality_brief=self._planning_brief(reg),
-            id_prefix=("p0_" if self._program_active else ""))
+            id_prefix=("p0_" if self._program_active else ""),
+            production_contract=(self._quality_profile.active
+                                 or self._program_active
+                                 or bool(self._engine_targets)))
         # Fall back only when no usable model-plan document existed. An
         # explicitly empty or wholly invalid model plan is an honest block,
         # not permission to substitute an unrelated keyword-matched action.
@@ -556,9 +622,13 @@ class AgentRun:
                    server=task.server, phase="called",
                    args=_public_args(args))
 
+        call_context = {
+            "run": self.run_id,
+            "step": task.id,
+            "contract_fingerprint": task.contract_fingerprint,
+        }
         outcome = self.manager.call(
-            task.server, task.tool, args,
-            audit_context={"run": self.run_id, "step": task.id})
+            task.server, task.tool, args, audit_context=call_context)
 
         # --- user approval --------------------------------------------------
         if "needs_confirmation" in outcome:
@@ -574,8 +644,7 @@ class AgentRun:
                 self._emit("run.step", step=task.to_public())
                 return
             outcome = self.manager.call(
-                task.server, task.tool, args,
-                audit_context={"run": self.run_id, "step": task.id})
+                task.server, task.tool, args, audit_context=call_context)
             if "needs_confirmation" in outcome:
                 # Fail closed if a buggy/custom manager did not consume the
                 # exact approval. Never reinterpret another prompt as success.
@@ -688,7 +757,11 @@ class AgentRun:
             return None
         outcome = self.manager.call(
             task.server, task.tool, args,
-            audit_context={"run": self.run_id, "step": task.id})
+            audit_context={
+                "run": self.run_id,
+                "step": task.id,
+                "contract_fingerprint": task.contract_fingerprint,
+            })
         if "result" in outcome:
             self.graph.mark_success(task.id, outcome["result"])
             self.context.observe(task.name, task.tool or "?",
@@ -980,7 +1053,8 @@ class AgentRun:
                   + (summary or "(no reusable outputs)")),
             quality_brief=self._planning_brief(reg),
             completed_refs=completed_refs,
-            id_prefix="p%d_" % self._program_stage)
+            id_prefix="p%d_" % self._program_stage,
+            production_contract=True)
         if graph is None or not graph.all():
             self.context.failures.append(
                 "could not make an executable plan for production stage '%s'"
@@ -991,7 +1065,8 @@ class AgentRun:
         for t in completed:
             new_graph.add(Task(
                 id=t.id, name=t.name, slug=t.slug, server=t.server,
-                tool=t.tool, args=t.args, deps=[], status=SUCCESS,
+                tool=t.tool, args=t.args, deps=[],
+                contract_fingerprint=t.contract_fingerprint, status=SUCCESS,
                 result=t.result, expect=t.expect, why=t.why,
                 phase=t.phase))
         for t in graph.all():
@@ -1081,7 +1156,10 @@ class AgentRun:
             feedback=feedback,
             quality_brief=self._planning_brief(reg),
             completed_refs=completed_refs,
-            id_prefix="r%d_" % self._replans)
+            id_prefix="r%d_" % self._replans,
+            production_contract=(self._quality_profile.active
+                                 or self._program_active
+                                 or bool(self._engine_targets)))
         if graph is None or not graph.all():
             return False
         # Keep completed history; adopt the new pending steps.
@@ -1089,8 +1167,10 @@ class AgentRun:
         for t in completed:
             t2 = Task(id=t.id, name=t.name, slug=t.slug,
                       server=t.server, tool=t.tool,
-                      args=t.args, deps=[], status=SUCCESS,
-                      result=t.result, expect=t.expect, why=t.why,
+                      args=t.args, deps=[],
+                      contract_fingerprint=t.contract_fingerprint,
+                      status=SUCCESS, result=t.result,
+                      expect=t.expect, why=t.why,
                       phase=t.phase)
             new_graph.add(t2)
         # The replan planner has already namespaced new task ids while leaving
@@ -1199,6 +1279,7 @@ class AgentRun:
             "evaluation_interval_steps": self.eval_every_steps,
             "quality_passes": self._quality_passes,
             "quality": quality,
+            "mcp_production_review": plan_meta.get("production_review") or {},
             "engine_targets": list(self._engine_targets),
             "production_program": program,
             "duration_s": round(time.time() - self.started_at, 1),
@@ -1261,6 +1342,9 @@ class AgentRun:
             "steps": [t.to_public() for t in self.graph.all()],
             "waiting": (self._approval is not None),
             "quality": self._quality_scorecard(),
+            "mcp_production_review": dict(
+                (getattr(self.graph, "plan_meta", {}) or {}).get(
+                    "production_review") or {}),
             "engine_targets": list(self._engine_targets),
             "production_program": (
                 self._program_public() if self._program_active else

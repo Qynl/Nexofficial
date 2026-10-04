@@ -17,21 +17,67 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.mcp_production import redact_untrusted_text
+
 DEFAULT_RESULT_BUDGET = 1600     # chars per stored observation
 DEFAULT_KEEP_RECENT = 6          # full observations kept for prompts
 DEFAULT_PREVIEW_BUDGET = 280     # chars for the UI/event preview
 
+_SENSITIVE_KEYS = {
+    "api_key", "apikey", "access_token", "refresh_token", "password",
+    "secret", "authorization", "private_key", "credential", "credentials",
+}
+_BINARY_KEYS = {"data", "blob", "bytes", "base64", "image_data", "audio_data"}
+
+
+def _context_safe_value(value: Any, depth: int = 0) -> Any:
+    """Bound structured output before serialization into model context."""
+    if depth > 12:
+        return "[depth limit]"
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in list(value.items())[:256]:
+            low = str(key).lower().replace("-", "_")
+            if low in _SENSITIVE_KEYS:
+                out[str(key)[:100]] = "[REDACTED]"
+            elif low in _BINARY_KEYS and isinstance(item, (str, bytes)):
+                out[str(key)[:100]] = "[binary payload: %d bytes]" % len(item)
+            else:
+                out[str(key)[:100]] = _context_safe_value(item, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_context_safe_value(item, depth + 1) for item in value[:256]]
+    if isinstance(value, bytes):
+        return "[binary payload: %d bytes]" % len(value)
+    return value
+
 
 def truncate_text(text: str, budget: int = DEFAULT_RESULT_BUDGET) -> Tuple[str, bool]:
-    """Clip `text` to `budget` chars, cutting at a line boundary when
-    possible. Returns (text, truncated)."""
+    """Redact and clip untrusted output while preserving both head and tail.
+
+    Build and editor logs commonly put the summary at the top and the actual
+    failure at the bottom. Head-only clipping hid exactly the evidence needed
+    for repair. Credential-shaped values are removed before any model sees the
+    observation.
+    """
+    text = redact_untrusted_text(text)
     if len(text) <= budget:
         return text, False
-    cut = text[:budget]
-    nl = cut.rfind("\n", 0, min(len(cut), budget // 2))
-    if nl > budget // 3:
-        cut = cut[:nl]
-    return cut + "\n… (+%d chars truncated)" % (len(text) - len(cut)), True
+    marker_budget = 56
+    usable = max(80, budget - marker_budget)
+    head_size = max(48, round(usable * 0.66))
+    tail_size = max(32, usable - head_size)
+    head = text[:head_size]
+    tail = text[-tail_size:]
+    head_line = head.rfind("\n")
+    if head_line > head_size // 2:
+        head = head[:head_line]
+    tail_line = tail.find("\n")
+    if 0 <= tail_line < tail_size // 2:
+        tail = tail[tail_line + 1:]
+    omitted = max(0, len(text) - len(head) - len(tail))
+    return (head + "\n… (+%d chars omitted; tail preserved) …\n" % omitted
+            + tail), True
 
 
 def result_to_text(result: Any, budget: int = DEFAULT_RESULT_BUDGET) -> Tuple[str, bool]:
@@ -50,11 +96,35 @@ def result_to_text(result: Any, budget: int = DEFAULT_RESULT_BUDGET) -> Tuple[st
         content = result.get("content")
         if isinstance(content, list):
             parts: List[str] = []
-            for c in content:
+            for c in content[:100]:
                 if isinstance(c, dict) and c.get("type") == "text":
                     parts.append(str(c.get("text", "")))
+                elif isinstance(c, dict) and c.get("type") == "image":
+                    data = c.get("data")
+                    size = len(data) if isinstance(data, str) else 0
+                    parts.append("[image mime=%s encoded_bytes=%d]" %
+                                 (str(c.get("mimeType") or "unknown")[:80],
+                                  size))
+                elif isinstance(c, dict) and c.get("type") == "audio":
+                    data = c.get("data")
+                    size = len(data) if isinstance(data, str) else 0
+                    parts.append("[audio mime=%s encoded_bytes=%d]" %
+                                 (str(c.get("mimeType") or "unknown")[:80],
+                                  size))
+                elif isinstance(c, dict) and c.get("type") == "resource":
+                    resource = c.get("resource") or {}
+                    if isinstance(resource, dict):
+                        uri = str(resource.get("uri") or "")[:240]
+                        text = resource.get("text")
+                        parts.append("[resource %s]%s" %
+                                     (uri, "\n" + str(text)
+                                      if text is not None else ""))
+                    else:
+                        parts.append("[resource content]")
                 elif isinstance(c, dict):
-                    parts.append(json.dumps(c, ensure_ascii=False)[:400])
+                    # Never pour opaque image/blob payloads into model context.
+                    safe = _context_safe_value(c)
+                    parts.append(json.dumps(safe, ensure_ascii=False)[:400])
                 else:
                     parts.append(str(c))
             if parts:
@@ -68,11 +138,13 @@ def result_to_text(result: Any, budget: int = DEFAULT_RESULT_BUDGET) -> Tuple[st
                 budget)
         try:
             return truncate_text(
-                json.dumps(result, ensure_ascii=False, indent=1), budget)
+                json.dumps(_context_safe_value(result),
+                           ensure_ascii=False, indent=1), budget)
         except (TypeError, ValueError):
             return truncate_text(str(result), budget)
     try:
-        return truncate_text(json.dumps(result, ensure_ascii=False), budget)
+        return truncate_text(json.dumps(_context_safe_value(result),
+                                        ensure_ascii=False), budget)
     except (TypeError, ValueError):
         return truncate_text(str(result), budget)
 

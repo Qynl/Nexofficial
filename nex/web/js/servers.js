@@ -95,6 +95,21 @@ function renderProductionReadiness(data) {
     el.appendChild(blockers);
   }
 
+  if (data.mcp_contract) {
+    const contract = document.createElement('div');
+    contract.className = 'mcp-contract-health';
+    const label = document.createElement('strong');
+    label.textContent = 'MCP contract quality';
+    const detail = document.createElement('span');
+    detail.textContent = `${Number(data.mcp_contract.score || 0)}/100 · `
+      + `inputs ${Number(data.mcp_contract.input_schema_coverage || 0)}% · `
+      + `outputs ${Number(data.mcp_contract.output_schema_coverage || 0)}%`;
+    contract.appendChild(label);
+    contract.appendChild(detail);
+    contract.title = data.mcp_contract.note || '';
+    el.appendChild(contract);
+  }
+
   const profiles = data.engines || {};
   const engineGrid = document.createElement('div');
   engineGrid.className = 'engine-readiness-grid';
@@ -120,6 +135,14 @@ function engineReadinessCard(profile) {
   head.appendChild(title);
   head.appendChild(score);
   card.appendChild(head);
+
+  if (profile.schema_health) {
+    const schemas = document.createElement('div');
+    schemas.className = 'engine-schema-health';
+    schemas.textContent = `Schema contracts ${Number(profile.schema_health.score || 0)}/100`;
+    schemas.title = 'Typed inputs and declared outputs make MCP plans and result reuse more reliable.';
+    card.appendChild(schemas);
+  }
 
   const checks = document.createElement('div');
   checks.className = 'engine-readiness-checks';

@@ -108,7 +108,7 @@ class ScopeAndReadinessTests(unittest.TestCase):
             MockMCPServer("engine", [spec])
         ]).registry()
         text = catalog_text(registry, "build game")
-        self.assertIn("returns: build_id:string, warnings:array", text)
+        self.assertIn("returns: [build_id:string] [warnings:array]", text)
 
 
 class ProgramLoopTests(unittest.TestCase):

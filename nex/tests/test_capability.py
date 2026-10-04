@@ -289,4 +289,19 @@ for _n in ("play_solo", "pie_start", "start_local_server", "start_client"):
             and _d.requires_confirmation is False,
             "%s runs a playtest with no confirmation gate" % _n)
 
+# Shipping a game to real players is consequential and often irreversible.
+# These exact engine verbs are confirmation-gated network actions, while
+# local build/cook/package work stays uninterrupted.
+for _n in ("publish_place", "deploy_game", "release_build", "submit_build",
+           "push_live", "go_live", "ship_build", "upload_build"):
+    _c = cap.capability_for_tool({"name": _n, "description": ""})
+    _expect(_c.category == cap.NETWORK and _c.requires_confirmation,
+            "%s is a confirmation-gated shipping action (got %s)"
+            % (_n, _c.category))
+for _n in ("build_game", "cook_content", "package_project",
+           "compile_blueprint"):
+    _c = cap.capability_for_tool({"name": _n, "description": ""})
+    _expect(_c.category != cap.NETWORK,
+            "%s is local build work, not shipping" % _n)
+
 print("\nAll capability/policy tests passed.")

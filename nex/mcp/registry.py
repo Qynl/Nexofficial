@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from mcp.capability import ToolCapability, capability_for_tool
+from mcp.schema import tool_contract_fingerprint
 
 
 @dataclass
@@ -25,6 +26,7 @@ class ToolView:
     schema: Dict[str, Any]
     output_schema: Dict[str, Any]
     capability: ToolCapability
+    contract_fingerprint: str = ""
     annotations: Dict[str, Any] = field(default_factory=dict)
 
     def to_summary(self) -> Dict[str, Any]:
@@ -37,6 +39,7 @@ class ToolView:
             "output_schema": self.output_schema,
             "category": self.capability.category,
             "capability": self.capability.to_dict(),
+            "contract_fingerprint": self.contract_fingerprint,
         }
 
 
@@ -168,6 +171,7 @@ class CapabilityRegistry:
                     schema=t.get("inputSchema", {}) or {},
                     output_schema=t.get("outputSchema", {}) or {},
                     capability=cap,
+                    contract_fingerprint=tool_contract_fingerprint(t),
                     annotations=t.get("annotations", {}) or {},
                 ))
             views.append(ServerView(name=s.name, tools=tools))
@@ -202,6 +206,7 @@ class CapabilityRegistry:
                     schema=t.get("inputSchema", {}) or {},
                     output_schema=t.get("outputSchema", {}) or {},
                     capability=cap,
+                    contract_fingerprint=tool_contract_fingerprint(t),
                     annotations=t.get("annotations", {}) or {},
                 ))
             st = up.status() if hasattr(up, "status") else {}

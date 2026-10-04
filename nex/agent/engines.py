@@ -258,11 +258,33 @@ def profile_readiness(registry: Any, profile_id: str) -> Dict[str, Any]:
     missing = [item.id for item in target.requirements if not checks[item.id]]
     score = round(100 * sum(1 for value in checks.values() if value)
                   / len(checks)) if checks else 0
+    matched_names = {name for names in evidence.values() for name in names}
+    matched_tools = [tool for tool in tools
+                     if _safe_full_name(tool) in matched_names]
+    input_typed = sum(
+        1 for tool in matched_tools
+        if isinstance(getattr(tool, "schema", None), dict)
+        and getattr(tool, "schema").get("type") == "object")
+    output_typed = sum(
+        1 for tool in matched_tools
+        if isinstance(getattr(tool, "output_schema", None), dict)
+        and bool(getattr(tool, "output_schema")))
+    contract_total = len(matched_tools)
+    schema_health = {
+        "score": round(100 * (input_typed + output_typed)
+                       / (2 * contract_total)) if contract_total else 0,
+        "matched_tools": contract_total,
+        "input_schema_coverage": round(100 * input_typed / contract_total)
+        if contract_total else 0,
+        "output_schema_coverage": round(100 * output_typed / contract_total)
+        if contract_total else 0,
+    }
     return {
         **target.public(),
         "score": score,
         "ready": not blockers and score >= 70,
         "servers": sorted(str(name) for name in engine_servers if name),
+        "schema_health": schema_health,
         "checks": checks,
         "evidence": evidence,
         "missing": missing,

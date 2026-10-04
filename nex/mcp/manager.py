@@ -46,7 +46,9 @@ from mcp.audit import AuditLog
 from mcp.registry import CapabilityRegistry
 from mcp.capability import capability_for_tool, apply_capability_registry
 from mcp.policy import authorize, current_policy
-from mcp.schema import validate_arguments, validate_tool_output
+from mcp.schema import (
+    tool_contract_fingerprint, validate_arguments, validate_tool_output,
+)
 from mcp.transport import Upstream, UpstreamError
 
 # Statuses a server can be in.
@@ -604,6 +606,7 @@ class ServerManager:
                 if isinstance(t.get("inputSchema"), dict) else {},
                 "output_schema": t.get("outputSchema", {})
                 if isinstance(t.get("outputSchema"), dict) else {},
+                "contract_fingerprint": tool_contract_fingerprint(t),
             })
         return out
 
@@ -716,6 +719,19 @@ class ServerManager:
                          if isinstance(t, dict) and t.get("name") == tool), None)
         if tool_def is None:
             return {"error": "server '%s' has no tool '%s'" % (server, tool)}
+
+        expected_contract = str(
+            (audit_context or {}).get("contract_fingerprint") or "")
+        live_contract = tool_contract_fingerprint(tool_def)
+        if expected_contract and expected_contract != live_contract:
+            detail = ("tool contract changed after planning; refusing stale "
+                      "arguments and requiring a fresh plan")
+            self.audit.record("contract_changed", server=server, tool=tool,
+                              args=args, ok=False, detail=detail,
+                              context=audit_context)
+            return {"error": detail, "contract_changed": True,
+                    "expected_contract": expected_contract[:12],
+                    "live_contract": live_contract[:12]}
 
         cap = capability_for_tool(tool_def)
         pol = current_policy()

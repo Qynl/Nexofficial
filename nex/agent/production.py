@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Set
 
 from agent.engines import all_engine_readiness
+from agent.mcp_production import contract_health
 from agent.quality import (
-    gate_catalog, is_game_production_goal, result_declares_failure, tool_gates,
+    gate_catalog, is_game_production_goal, result_declares_failure,
+    result_has_evidence, tool_gates,
 )
 from mcp.capability import BUILD, CODE_EXECUTION, CREATE, MODIFY, READ, TEST
 
@@ -259,6 +261,7 @@ def readiness(registry: Any) -> Dict[str, Any]:
         "missing": missing,
         "blockers": blockers,
         "engines": all_engine_readiness(registry),
+        "mcp_contract": contract_health(registry),
         "focus": ["unreal_5_8", "roblox_studio"],
         "note": (
             "Readiness measures MCP capability breadth, not team size, content "
@@ -292,6 +295,14 @@ def stage_evidence(stage: ProductionStage, registry: Any,
         claims = ({"gate:" + gate for gate in tool_gates(tv)} |
                   {"discipline:" + discipline
                    for discipline in tool_disciplines(tv)})
+        if (not result_has_evidence(getattr(task, "result", None))
+                and "gate:implementation" not in claims):
+            rejected.append({
+                "step": str(getattr(task, "name", "") or name),
+                "tool": tv.full_name,
+                "reason": "successful call returned no evidence payload",
+            })
+            continue
         matched = False
         for requirement in stage.requirements:
             if requirement in claims:

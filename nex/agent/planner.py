@@ -94,6 +94,7 @@ def plan(goal: str, registry: CapabilityRegistry) -> TaskGraph:
         server=best.server,
         tool=best.name,
         args=args,
+        contract_fingerprint=getattr(best, "contract_fingerprint", ""),
         expect="the tool's result answers the request",
         why="direct match for the request (planned without a model)",
     ))

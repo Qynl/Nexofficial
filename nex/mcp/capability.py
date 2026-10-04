@@ -113,7 +113,13 @@ _CAT_HINTS: Dict[str, tuple] = {
                   "purge", "wipe", "kill", "terminate", "clear", "uninstall"),
     NETWORK: ("fetch_url", "http_request", "http_get", "httpget", "upload",
               "publish", "share", "send", "post", "fetch_remote",
-              "curl", "wget", "webhook"),
+              "curl", "wget", "webhook",
+              # Shipping a game to real players is consequential and often
+              # irreversible. These exact engine verbs are confirmation-gated
+              # instead of passing as ordinary build work.
+              "deploy_build", "deploy_game", "deploy_place",
+              "release_build", "release_game", "submit_build",
+              "ship_build", "push_live", "promote_release", "go_live"),
 }
 
 
