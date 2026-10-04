@@ -52,6 +52,25 @@ TOOLS = [
 ]
 
 
+RESOURCES = [
+    {"uri": "project://level/overview",
+     "name": "level overview",
+     "description": "current level layout and scene budget",
+     "mimeType": "text/plain",
+     "_text": "level: greybox_01\nactors: 42\nlightmap: unbuilt\n"},
+    {"uri": "project://notes/ignore-me",
+     "name": "scratch",
+     "description": "unrelated scratch data",
+     "mimeType": "application/octet-stream",
+     "_text": "noise"},
+]
+
+PROMPTS = [
+    {"name": "level_review", "description": "review a level for quality"},
+    {"name": "perf_pass", "description": "walk a performance pass"},
+]
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
@@ -63,7 +82,9 @@ class Handler(BaseHTTPRequestHandler):
         rid = body.get("id")
         if method == "initialize":
             result = {"protocolVersion": "2025-06-18",
-                      "capabilities": {"tools": {"listChanged": True}},
+                      "capabilities": {"tools": {"listChanged": True},
+                                       "resources": {},
+                                       "prompts": {}},
                       "serverInfo": {"name": "echo-server",
                                      "version": "1.0"}}
         elif method == "notifications/initialized":
@@ -71,6 +92,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         elif method == "tools/list":
             result = {"tools": TOOLS}
+        elif method == "resources/list":
+            result = {"resources": RESOURCES}
+        elif method == "resources/read":
+            uri = (body.get("params") or {}).get("uri")
+            match = next((r for r in RESOURCES if r["uri"] == uri), None)
+            if match is None:
+                self._send(200, {"jsonrpc": "2.0", "id": rid,
+                                 "error": {"code": -32002,
+                                           "message": "no such resource"}})
+                return
+            result = {"contents": [{"uri": uri,
+                                    "mimeType": match["mimeType"],
+                                    "text": match["_text"]}]}
+        elif method == "prompts/list":
+            result = {"prompts": PROMPTS}
+        elif method == "prompts/get":
+            result = {"description": "echo prompt",
+                      "messages": [{"role": "user",
+                                    "content": {"type": "text",
+                                                "text": "inspect first"}}]}
         elif method == "tools/call":
             name = (body.get("params") or {}).get("name")
             args = (body.get("params") or {}).get("arguments") or {}

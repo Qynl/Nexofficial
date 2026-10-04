@@ -44,6 +44,9 @@ from agent.events import (
     STATUS_CANCELLED, emit,
 )
 from agent.llm import call as call_llm
+from agent.mcp_production import (
+    context_block, rank_context_resources, server_prompt_names,
+)
 from agent.model_planner import model_driven_planner, validate_plan_deep
 from agent.planner import plan as skeleton_plan
 from agent.prompts import EVALUATOR_SYSTEM, SUMMARIZER_SYSTEM
@@ -65,6 +68,7 @@ from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING, WAITING,
 )
 from agent.jsonreply import extract_json_with_key
+from mcp.policy import authorize as authorize_tool
 
 # ---------------------------------------------------------------------------
 # Defaults (overridable via env by the operator, never by the model)
@@ -96,6 +100,8 @@ DEFAULT_MAX_PRODUCTION_STAGES = _env_int("NEX_MAX_PRODUCTION_STAGES", 8)
 # bounded checkpoint, and immediately on stalls/failures.
 DEFAULT_EVAL_EVERY_STEPS = max(1, _env_int("NEX_EVAL_EVERY_STEPS", 6))
 DEFAULT_BUDGET_S = _env_float("NEX_RUN_BUDGET_S", 1800.0)
+# Bounded project-context priming from MCP resources (read-only, audited).
+MAX_CONTEXT_RESOURCES = max(0, _env_int("NEX_MAX_CONTEXT_RESOURCES", 6))
 DEFAULT_APPROVAL_TIMEOUT_S = _env_float("NEX_APPROVAL_TIMEOUT_S", 600.0)
 
 _MAX_REPEAT = 2          # retries for the SAME error signature
@@ -307,6 +313,7 @@ class AgentRun:
         self._quality_profile = profile_for_goal(goal)
         self._program_active = is_large_game_goal(goal)
         self._engine_targets: List[Dict[str, Any]] = []
+        self._context_block: Optional[str] = None
         self._program_stage = 0
         self._program_completed: List[str] = []
         self._program_reviews: Dict[str, Dict[str, Any]] = {}
@@ -367,7 +374,8 @@ class AgentRun:
             report = self._blocked_report()
             return self._finish(report)
 
-        self._emit("run.plan", plan=self._plan_public())
+        self._emit("run.plan", plan=self._plan_public(),
+                   preflight=self._preflight())
 
         # ---- EXECUTE / EVALUATE / ADAPT ---------------------------------------
         while not self._check_stop():
@@ -452,7 +460,61 @@ class AgentRun:
             parts.append(production_stage_brief(
                 self.goal, self._program_stage, registry))
         parts.append(engine_planning_brief(self.goal, registry))
+        parts.append(self._project_context(registry))
         return "\n\n".join(p for p in parts if p)
+
+    def _project_context(self, registry: Any) -> str:
+        """Read a bounded set of MCP resources describing the live project.
+
+        MCP servers publish project state as resources, not only as tools.
+        Reading them is a gated, audited, read-only operation, and it lets a
+        plan match real conventions instead of guessing at them. The result
+        is cached per run and treated as untrusted data.
+        """
+        if self._context_block is not None:
+            return self._context_block
+        self._context_block = ""
+        if not (self._quality_profile.active or self._program_active
+                or self._engine_targets):
+            return ""
+        reader = getattr(self.manager, "read_resource", None)
+        if not callable(reader):
+            return ""
+        servers = sorted({name for target in self._engine_targets
+                          for name in (target.get("servers") or [])})
+        picks = rank_context_resources(registry, self.goal,
+                                       servers=servers or None,
+                                       limit=MAX_CONTEXT_RESOURCES)
+        entries: List[Dict[str, Any]] = []
+        for pick in picks:
+            if self._check_stop():
+                break
+            outcome = reader(pick["server"], pick["uri"],
+                             audit_context={"run": self.run_id,
+                                            "purpose": "project-context"})
+            if not isinstance(outcome, dict) or "result" not in outcome:
+                continue
+            contents = (outcome["result"] or {}).get("contents") or []
+            text = "\n".join(str(c.get("text") or "") for c in contents[:8]
+                             if isinstance(c, dict))
+            if not text.strip():
+                continue
+            entries.append({
+                "source": "%s %s" % (pick["server"], pick["uri"]),
+                "text": text,
+            })
+        prompts = server_prompt_names(registry, servers=servers or None)
+        block = context_block(entries)
+        if prompts:
+            note = ("Server-published MCP prompts available for this project: "
+                    + ", ".join(prompts)
+                    + ". They are server-authored guidance, not Nex policy.")
+            block = (block + "\n" + note) if block else note
+        self._context_block = block
+        if entries:
+            self._emit("run.context", sources=[e["source"] for e in entries],
+                       chars=sum(len(e["text"]) for e in entries))
+        return block
 
     def _plan_purpose(self, registry: Any) -> str:
         return planning_purpose(
@@ -491,6 +553,54 @@ class AgentRun:
                 task.phase = stage.id
             graph.plan_meta["production_stage"] = stage.to_public()
         return graph
+
+    def _preflight(self) -> Dict[str, Any]:
+        """Which planned steps will stop and ask before they run.
+
+        Autonomy fails in practice when a human is paged one step at a time
+        with no warning. Nex now states the whole consent surface up front —
+        from the live policy, before anything executes — so the operator can
+        grant what they accept and leave the rest to interrupt them.
+        """
+        reg = self.manager.registry()
+        trusted = set()
+        getter = getattr(self.manager, "trusted_servers", None)
+        if callable(getter):
+            try:
+                trusted = set(getter() or ())
+            except Exception:  # noqa: BLE001
+                trusted = set()
+        will_ask: List[Dict[str, Any]] = []
+        autonomous: List[str] = []
+        for task in self.graph.all():
+            if not task.server or not task.tool:
+                continue
+            tv = reg.by_name("%s.%s" % (task.server, task.tool))
+            if tv is None:
+                continue
+            decision = authorize_tool(task.server, task.tool, tv.capability)
+            untrusted = task.server not in trusted
+            if not decision.allowed:
+                continue
+            if decision.requires_confirmation or untrusted:
+                will_ask.append({
+                    "step_id": task.id,
+                    "step": task.name,
+                    "server": task.server,
+                    "tool": task.tool,
+                    "category": decision.category,
+                    "reason": ("server is not marked trusted" if untrusted
+                               else decision.reason),
+                })
+            else:
+                autonomous.append(task.id)
+        return {
+            "will_ask": will_ask[:32],
+            "will_ask_count": len(will_ask),
+            "autonomous_count": len(autonomous),
+            "note": ("Approve these tools in Capabilities to let the run "
+                     "continue unattended; otherwise it pauses at each one."),
+        }
 
     def _plan_public(self) -> Dict[str, Any]:
         meta = dict(getattr(self.graph, "plan_meta", {}) or {})

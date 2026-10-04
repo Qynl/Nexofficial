@@ -54,6 +54,9 @@ _MAX_HEADER_BYTES = 16 * 1024
 _MAX_SESSION_ID_CHARS = 1024
 _MAX_TOOLS = 5000
 _MAX_LIST_PAGES = 50
+_MAX_RESOURCES = 2000
+_MAX_PROMPTS = 500
+_MAX_RESOURCE_CHARS = 64 * 1024          # bounded untrusted resource body
 
 
 def _origin(url: str) -> Tuple[str, str, int]:
@@ -670,7 +673,52 @@ class Upstream:
             # Handshake succeeded but tools/list failed — stay
             # initialized and let tools() retry on demand.
             pass
+        # Resources and prompts are optional MCP surfaces. They are context,
+        # not actions, so discovery failures never fail the connection.
+        self._resources_cache = self._safe_list("resources")
+        self._prompts_cache = self._safe_list("prompts")
         return result
+
+    def _safe_list(self, kind: str) -> List[Dict[str, Any]]:
+        """Best-effort ``resources/list`` / ``prompts/list`` discovery."""
+        limit = _MAX_RESOURCES if kind == "resources" else _MAX_PROMPTS
+        key = kind
+        out: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        seen_cursors: set = set()
+        for _page in range(_MAX_LIST_PAGES):
+            params = {"cursor": cursor} if cursor else None
+            try:
+                resp = self._rpc("%s/list" % kind, params)
+            except UpstreamError:
+                return out
+            if not isinstance(resp, dict) or "error" in resp:
+                return out
+            result = resp.get("result")
+            if not isinstance(result, dict):
+                return out
+            items = result.get(key)
+            if not isinstance(items, list):
+                return out
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                ident = item.get("uri") if kind == "resources" \
+                    else item.get("name")
+                if not isinstance(ident, str) or not ident \
+                        or len(ident) > 1024 \
+                        or any(ord(ch) < 32 or ord(ch) == 127 for ch in ident):
+                    continue
+                out.append(item)
+                if len(out) >= limit:
+                    return out
+            nxt = result.get("nextCursor")
+            if not isinstance(nxt, str) or not nxt or len(nxt) > 2048 \
+                    or nxt in seen_cursors:
+                return out
+            seen_cursors.add(nxt)
+            cursor = nxt
+        return out
 
     def disconnect(self) -> None:
         """Close the session (kills a stdio child)."""
@@ -824,23 +872,75 @@ class Upstream:
         with self._lock:
             if not self._initialized:
                 self.connect()
-            try:
-                resp = self._rpc("resources/list")
-            except UpstreamError:
-                return []
-            if "error" in resp:
-                return []
-            return list(resp.get("result", {}).get("resources", []))
+            if not self._resources_cache:
+                self._resources_cache = self._safe_list("resources")
+            return list(self._resources_cache)
 
     def prompts(self) -> List[Dict[str, Any]]:
         """List MCP prompts exposed by this server (cached)."""
         with self._lock:
             if not self._initialized:
                 self.connect()
-            try:
-                resp = self._rpc("prompts/list")
-            except UpstreamError:
-                return []
+            if not self._prompts_cache:
+                self._prompts_cache = self._safe_list("prompts")
+            return list(self._prompts_cache)
+
+    def read_resource(self, uri: str) -> List[Dict[str, Any]]:
+        """Read one MCP resource. Returns bounded content entries.
+
+        Resource bodies are untrusted project data, never instructions, so
+        text is clipped and binary blobs are described rather than carried.
+        """
+        if not isinstance(uri, str) or not uri or len(uri) > 1024:
+            raise UpstreamError("invalid resource uri")
+        with self._lock:
+            if not self._initialized:
+                self.connect()
+            resp = self._rpc("resources/read", {"uri": uri})
             if "error" in resp:
-                return []
-            return list(resp.get("result", {}).get("prompts", []))
+                raise UpstreamError(
+                    "resources/read failed: " + json.dumps(resp["error"]))
+            result = resp.get("result")
+            if not isinstance(result, dict):
+                raise UpstreamError("resources/read returned a non-object")
+            contents = result.get("contents")
+            if not isinstance(contents, list):
+                raise UpstreamError("resources/read returned no contents")
+            out: List[Dict[str, Any]] = []
+            budget = _MAX_RESOURCE_CHARS
+            for item in contents[:64]:
+                if not isinstance(item, dict):
+                    continue
+                entry = {
+                    "uri": str(item.get("uri") or uri)[:1024],
+                    "mimeType": str(item.get("mimeType") or "")[:120],
+                }
+                text = item.get("text")
+                if isinstance(text, str):
+                    entry["text"] = text[:max(0, budget)]
+                    budget -= len(entry["text"])
+                elif isinstance(item.get("blob"), str):
+                    entry["binary_bytes"] = len(item["blob"])
+                out.append(entry)
+                if budget <= 0:
+                    break
+            return out
+
+    def get_prompt(self, name: str,
+                   arguments: Optional[Dict[str, Any]] = None
+                   ) -> Dict[str, Any]:
+        """Fetch one server-authored MCP prompt (untrusted guidance text)."""
+        if not isinstance(name, str) or not name or len(name) > 256:
+            raise UpstreamError("invalid prompt name")
+        with self._lock:
+            if not self._initialized:
+                self.connect()
+            resp = self._rpc("prompts/get",
+                             {"name": name, "arguments": arguments or {}})
+            if "error" in resp:
+                raise UpstreamError(
+                    "prompts/get failed: " + json.dumps(resp["error"]))
+            result = resp.get("result")
+            if not isinstance(result, dict):
+                raise UpstreamError("prompts/get returned a non-object")
+            return result

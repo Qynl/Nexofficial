@@ -110,6 +110,23 @@ class FakeManager:
     def registry(self):
         return mk_registry(*self.mocks.values())
 
+    def trusted_servers(self):
+        return {n for n, ok in self.trusted.items() if ok}
+
+    def read_resource(self, server, uri, audit_context=None,
+                      autonomous=False):
+        mock = self.mocks.get(server)
+        if mock is None:
+            return {"error": "server '%s' is not connected" % server}
+        if not self.trusted.get(server, False) and autonomous:
+            return {"refused": "untrusted server in an autonomous run"}
+        self.calls.append((server, "resources/read", {"uri": uri}))
+        try:
+            contents = mock.read_resource(uri)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        return {"result": {"uri": uri, "contents": contents}}
+
     def approve_tool(self, server, tool):
         self.approved.add((server, tool))
 

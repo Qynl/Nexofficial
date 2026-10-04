@@ -571,6 +571,8 @@ class ServerManager:
         if up is not None:
             s = up.status()
             out["tools_count"] = s.get("tools_count", 0)
+            out["resources_count"] = s.get("resources_count", 0)
+            out["prompts_count"] = s.get("prompts_count", 0)
             out["server_info"] = s.get("server_info", {})
             out["protocol_version"] = s.get("protocol_version")
             out["latency_ms"] = s.get("latency_ms")
@@ -612,6 +614,104 @@ class ServerManager:
 
     def tools(self, name: str) -> List[Dict[str, Any]]:
         return self._tool_summaries(name)
+
+    # ----- optional MCP context surfaces ----------------------------------
+
+    def resources(self, name: str) -> List[Dict[str, Any]]:
+        """Bounded resource descriptors advertised by one server."""
+        up = self.upstream(name)
+        if up is None:
+            return []
+        try:
+            raw = up.resources() or []
+        except UpstreamError:
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in raw[:500]:
+            if not isinstance(item, dict):
+                continue
+            uri = item.get("uri")
+            if not isinstance(uri, str) or not uri:
+                continue
+            out.append({
+                "uri": uri[:1024],
+                "name": str(item.get("name") or "")[:200],
+                "mime_type": str(item.get("mimeType") or "")[:120],
+                "description": str(item.get("description") or "")[:400],
+            })
+        return out
+
+    def prompts(self, name: str) -> List[Dict[str, Any]]:
+        """Bounded prompt descriptors advertised by one server."""
+        up = self.upstream(name)
+        if up is None:
+            return []
+        try:
+            raw = up.prompts() or []
+        except UpstreamError:
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in raw[:200]:
+            if not isinstance(item, dict):
+                continue
+            pname = item.get("name")
+            if not isinstance(pname, str) or not pname:
+                continue
+            args = item.get("arguments")
+            required = [str(a.get("name") or "")[:80]
+                        for a in (args if isinstance(args, list) else [])[:24]
+                        if isinstance(a, dict) and a.get("required")]
+            out.append({
+                "name": pname[:200],
+                "description": str(item.get("description") or "")[:400],
+                "required_arguments": required,
+            })
+        return out
+
+    def read_resource(self, server: str, uri: str,
+                      audit_context: Optional[Dict[str, Any]] = None,
+                      autonomous: bool = False) -> Dict[str, Any]:
+        """Read one MCP resource through the same gated path as a tool call.
+
+        Resources are read-only context, but they are still third-party data
+        from a third-party process, so trust, policy, and audit all apply.
+        """
+        up = self.upstream(server)
+        if up is None:
+            return {"error": "server '%s' is not connected" % server}
+        trusted = self._is_trusted(server)
+        if not trusted and autonomous:
+            self.audit.record("refuse", server=server, tool="resources/read",
+                              args={"uri": uri}, ok=False,
+                              detail="untrusted server in autonomous run",
+                              context=audit_context)
+            return {"refused": "server '%s' is not trusted; its resources are "
+                               "not read in autonomous runs" % server}
+        cap = capability_for_tool({"name": "read_resource",
+                                   "description": "read an MCP resource"})
+        decision = authorize(server, "read_resource", cap,
+                             args={"uri": uri})
+        if not decision.allowed:
+            self.audit.record("refuse", server=server, tool="resources/read",
+                              args={"uri": uri}, ok=False,
+                              detail=decision.reason, context=audit_context)
+            return {"refused": decision.reason}
+        t0 = time.monotonic()
+        try:
+            contents = up.read_resource(uri)
+        except UpstreamError as exc:
+            self.audit.record(
+                "resource_read", server=server, tool="resources/read",
+                args={"uri": uri}, ok=False, detail=str(exc)[:300],
+                duration_ms=round((time.monotonic() - t0) * 1000),
+                context=audit_context)
+            return {"error": str(exc)}
+        self.audit.record(
+            "resource_read", server=server, tool="resources/read",
+            args={"uri": uri}, ok=True,
+            duration_ms=round((time.monotonic() - t0) * 1000),
+            context=audit_context)
+        return {"result": {"uri": uri, "contents": contents}}
 
     def registry(self) -> CapabilityRegistry:
         """A live capability registry over the connected servers."""

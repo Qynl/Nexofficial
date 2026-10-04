@@ -368,8 +368,29 @@ def assess(profile: QualityProfile, registry: Any,
             evidence[gate].append({
                 "step": str(getattr(task, "name", "") or name)[:120],
                 "tool": tv.full_name,
+                "server": tv.server,
                 "strength": "action" if gate == "implementation" else "payload",
             })
+
+    # Independent corroboration: a server that performed the mutation is an
+    # interested witness. When some OTHER connected server also produced
+    # evidence, the result no longer rests on one party's self-report.
+    mutation_servers = {item.get("server") for item in evidence.get(
+        "implementation", []) if item.get("server")}
+    observation_servers = {
+        item.get("server")
+        for gate in ("visual_review", "diagnostics", "verification",
+                     "performance")
+        for item in evidence.get(gate, []) if item.get("server")
+    }
+    corroboration = {
+        "mutating_servers": sorted(s for s in mutation_servers if s),
+        "observing_servers": sorted(s for s in observation_servers if s),
+        "independent": bool(observation_servers - mutation_servers),
+        "note": ("Independent means at least one observation came from a "
+                 "server that did not perform the changes. Same-server "
+                 "evidence is still evidence, just not independent."),
+    }
 
     gates: List[Dict[str, Any]] = []
     passed_count = 0
@@ -406,6 +427,7 @@ def assess(profile: QualityProfile, registry: Any,
         "missing": missing,
         "unavailable": unavailable,
         "correctable": [g for g in missing if g not in unavailable],
+        "corroboration": corroboration,
         "rejected_evidence": rejected[:12],
         "disclaimer": (
             "This score measures MCP-backed production evidence, not artistic "

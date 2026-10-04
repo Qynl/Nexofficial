@@ -53,6 +53,10 @@ class ServerView:
     latency_ms: Optional[float] = None
     resources: int = 0
     prompts: int = 0
+    # Bounded descriptors for the optional MCP context surfaces. These are
+    # metadata only; reading them still goes through ServerManager.
+    resource_items: List[Dict[str, Any]] = field(default_factory=list)
+    prompt_items: List[Dict[str, Any]] = field(default_factory=list)
     last_error: Optional[str] = None
 
     def by_name(self, name: str) -> Optional[ToolView]:
@@ -210,14 +214,49 @@ class CapabilityRegistry:
                     annotations=t.get("annotations", {}) or {},
                 ))
             st = up.status() if hasattr(up, "status") else {}
+            resource_items = _context_items(up, "resources", "uri")
+            prompt_items = _context_items(up, "prompts", "name")
             servers.append(ServerView(
                 name=up.name,
                 tools=tools,
                 protocol=st.get("protocol_version"),
                 health=st.get("health", "ok"),
                 latency_ms=st.get("latency_ms"),
-                resources=st.get("resources_count", 0),
-                prompts=st.get("prompts_count", 0),
+                resources=st.get("resources_count", len(resource_items)),
+                prompts=st.get("prompts_count", len(prompt_items)),
+                resource_items=resource_items,
+                prompt_items=prompt_items,
                 last_error=st.get("last_error"),
             ))
         return cls(servers)
+
+
+def _context_items(upstream: Any, kind: str, key: str) -> List[Dict[str, Any]]:
+    """Bounded resource/prompt descriptors; discovery never breaks a registry."""
+    getter = getattr(upstream, kind, None)
+    if not callable(getter):
+        return []
+    try:
+        raw = getter() or []
+    except Exception:  # noqa: BLE001 - optional surface, never fatal
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw[:200]:
+        if not isinstance(item, dict):
+            continue
+        ident = item.get(key)
+        if not isinstance(ident, str) or not ident:
+            continue
+        entry = {key: ident[:1024],
+                 "description": str(item.get("description") or "")[:400]}
+        if kind == "resources":
+            entry["name"] = str(item.get("name") or "")[:200]
+            entry["mime_type"] = str(item.get("mimeType") or "")[:120]
+        else:
+            args = item.get("arguments")
+            entry["required_arguments"] = [
+                str(a.get("name") or "")[:80]
+                for a in (args if isinstance(args, list) else [])[:24]
+                if isinstance(a, dict) and a.get("required")]
+        out.append(entry)
+    return out

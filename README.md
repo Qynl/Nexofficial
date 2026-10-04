@@ -645,6 +645,31 @@ Credential-shaped text and sensitive structured fields are redacted before MCP
 output enters provider context or UI previews. MCP images, resources, logs,
 schemas, and results remain untrusted data—never instructions.
 
+### 7. Resources and prompts are first-class, and just as untrusted
+
+Most MCP clients stop at `tools/list`. Nex also discovers `resources/list` and
+`prompts/list` at connect time (bounded: 2000 resources, 500 prompts, 50
+pagination pages) and uses them to start a run informed instead of amnesiac.
+
+Before planning a production goal, Nex ranks resource **descriptors** — never
+their bodies — by project-context signal and goal overlap, then reads only the
+top handful through the same gate every tool call passes: trust check, policy
+authorization, audit record. Untrusted servers are refused outright in
+autonomous runs. The result is fenced into a `LIVE PROJECT CONTEXT` block that
+is explicitly labeled untrusted project data, redacted, and capped at a few
+thousand characters with a per-resource share so one chatty file cannot evict
+everything else. Binary bodies are described by size, never inlined.
+
+Server-published prompts are surfaced by name only, and only when they take no
+required arguments — a server advertising its own expertise is a hint for the
+planner, not a script Nex executes.
+
+| Surface | Discovered | Read | Fenced |
+| --- | --- | --- | --- |
+| `tools/*` | at connect | on authorized call | results redacted, bounded |
+| `resources/*` | at connect | top-ranked few, per run, audited | untrusted block, char budget |
+| `prompts/*` | at connect | names only, argument-free | hint list, never auto-run |
+
 ### What an excellent engine MCP server should do
 
 | Contract property | Why Nex benefits |
@@ -1105,7 +1130,7 @@ Thirteen suites run in isolated processes because several intentionally configur
 | `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
 | `test_engine_profiles` | Unreal 5.8 / Roblox detection, readiness, description distrust, planning contracts, events, and report metadata |
-| `test_mcp_production` | Balanced capability portfolios, schema-signature fidelity, causal plan auditing with one bounded repair, contract pinning, empty-success rejection, structured dataflow, and context redaction |
+| `test_mcp_production` | Balanced capability portfolios, schema-signature fidelity, causal plan auditing with one bounded repair, contract pinning, empty-success rejection, structured dataflow, context redaction, MCP resource/prompt context priming, deterministic production DAGs, pre-flight consent manifests, and cross-server corroboration |
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
@@ -1165,13 +1190,33 @@ Nexofficial/
 
 ## Honest limits
 
-Good boundaries are also honest about what sits outside them.
+Good boundaries are also honest about what sits outside them. Some of these
+boundaries recently moved — because a limit you can engineer away is not a
+law of nature, it is a to-do item.
 
-- **Nex orchestrates capabilities; it does not contain an engine.** If the MCP server cannot manipulate navmeshes, animate characters, capture a viewport, or profile a build, Nex cannot synthesize those powers.
+### Limits that moved
+
+| Used to be true | What Nex does now | Where it lives |
+| --- | --- | --- |
+| Nex only saw **tools**, so every run started amnesiac | Reads MCP **resources** as live project state and lists server-published **prompts** before planning. The planning brief now opens with real level names, build settings, and scene budgets instead of guesses | `mcp/transport.py`, `agent/mcp_production.py`, `agent/loop.py` |
+| Without a model the planner could only fire **one lexically matched tool** | Assembles the full inspect → implement → build → play → capture → review → diagnose → verify → profile DAG from the deterministic gate classification, in the causal order the plan auditor enforces | `agent/planner.py` |
+| A server's work was graded **on its own homework** | Every evidence item records which server produced it, and the scorecard reports whether any observation came from a server that did **not** perform the changes | `agent/quality.py` |
+| Approvals arrived **one surprise at a time** | A pre-flight manifest ships with the plan: exactly which steps will pause, which category they fall into, and why — before a single call executes | `agent/loop.py` |
+
+Each of those is covered by regression tests in `tests/test_mcp_production.py`,
+including the unhappy paths: opaque binary resources are never inlined, project
+context is labeled untrusted and never read for trivial goals, and the
+deterministic planner still refuses the whole production shape rather than
+invent arguments it cannot honestly supply.
+
+### Limits that remain
+
+- **Nex orchestrates capabilities; it does not contain an engine.** It now reads project state through MCP resources, but if the server cannot manipulate navmeshes, animate characters, capture a viewport, or profile a build, Nex cannot synthesize those powers. Reading about a lightmap is not baking one.
 - **The quality score is evidence coverage, not a review score.** `100/100` means all required tool-backed checks ran successfully. It does not mean the art is beautiful, the combat is fun, the story is good, accessibility is complete, or customers will buy it.
-- **Autonomous is not the same as unattended.** Risky tools still wait for a person unless the operator explicitly grants a standing approval.
-- **MCP servers are third-party code.** Nex controls what it sends and how it interprets responses, but a malicious server can lie about what happened. Keep servers untrusted until reviewed. A local stdio server still runs with the OS permissions of the user who launched Nex; the minimal environment prevents accidental token inheritance, not all OS-level access.
-- **The deterministic planner is intentionally modest.** Without an agent model, it handles direct lexical tool requests and blocks ambiguous production work. Confidence theater was not invited to this party.
+- **Autonomous is not the same as unattended.** The pre-flight manifest tells you where the run will stop; it does not remove the stops. Risky tools still wait for a person unless the operator explicitly grants a standing approval.
+- **MCP servers are third-party code.** Nex controls what it sends and how it interprets responses, but a malicious server can lie about what happened. Cross-server corroboration raises the cost of a lie — a second, independent witness now has to agree — but it only works when you actually connect a second server, and colluding servers defeat it. Keep servers untrusted until reviewed. A local stdio server still runs with the OS permissions of the user who launched Nex; the minimal environment prevents accidental token inheritance, not all OS-level access.
+- **Resource content is data, never instruction.** Project context is bounded, redacted, and explicitly fenced as untrusted — which blunts prompt injection, but no fence is proof against a model that decides to be creative.
+- **The deterministic planner is structural, not semantic.** It can now build a real production loop, because causal evidence ordering is deterministic. It still cannot invent arguments: a step whose schema demands values only judgment can supply is reported, not guessed. Confidence theater was never invited to this party.
 - **Voice quality belongs to the browser.** Unsupported Speech APIs simply hide voice controls.
 - **Human creative direction still matters.** The best use of Nex is not “replace a studio.” It is “give a skilled creator a tireless, observable operator that knows when to keep working and when the evidence runs out.”
 

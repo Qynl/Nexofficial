@@ -103,7 +103,9 @@ function renderProductionReadiness(data) {
     const detail = document.createElement('span');
     detail.textContent = `${Number(data.mcp_contract.score || 0)}/100 · `
       + `inputs ${Number(data.mcp_contract.input_schema_coverage || 0)}% · `
-      + `outputs ${Number(data.mcp_contract.output_schema_coverage || 0)}%`;
+      + `outputs ${Number(data.mcp_contract.output_schema_coverage || 0)}% · `
+      + `${Number(data.mcp_contract.context_resources || 0)} resources · `
+      + `${Number(data.mcp_contract.server_prompts || 0)} prompts`;
     contract.appendChild(label);
     contract.appendChild(detail);
     contract.title = data.mcp_contract.note || '';
@@ -247,6 +249,8 @@ function serverCard(s) {
     stats.appendChild(span);
   };
   addStat('', Number(s.tools_count || 0), ' tools');
+  if (s.resources_count) addStat('', Number(s.resources_count), ' resources');
+  if (s.prompts_count) addStat('', Number(s.prompts_count), ' prompts');
   addStat('transport ', s.transport || 'unknown');
   if (s.latency_ms != null) addStat('', Math.round(Number(s.latency_ms) || 0), 'ms');
   if (s.protocol_version) addStat('MCP ', s.protocol_version);

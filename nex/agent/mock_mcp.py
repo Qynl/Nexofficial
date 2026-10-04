@@ -11,18 +11,22 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List, Optional
 
-from mcp.registry import ServerView, ToolView
+from mcp.registry import ServerView, ToolView, _context_items
 from mcp.capability import capability_for_tool
 from mcp.schema import tool_contract_fingerprint
 
 
 class MockMCPServer:
     def __init__(self, name: str, tools: List[Dict[str, Any]],
-                 fail: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+                 fail: Optional[Dict[str, Dict[str, Any]]] = None,
+                 resources: Optional[List[Dict[str, Any]]] = None,
+                 prompts: Optional[List[Dict[str, Any]]] = None) -> None:
         self.name = name
         self._tools = [dict(t) for t in tools]
         # fail: {tool_name: {"count": N, "error": "..."}} -> first N calls fail.
         self._fail = {k: dict(v) for k, v in (fail or {}).items()}
+        self._resources = [dict(r) for r in (resources or [])]
+        self._prompts = [dict(p) for p in (prompts or [])]
 
     def connect(self) -> None:
         pass
@@ -31,10 +35,18 @@ class MockMCPServer:
         return [dict(t) for t in self._tools]
 
     def resources(self) -> List[Dict[str, Any]]:
-        return []
+        return [dict(r) for r in self._resources]
 
     def prompts(self) -> List[Dict[str, Any]]:
-        return []
+        return [dict(p) for p in self._prompts]
+
+    def read_resource(self, uri: str) -> List[Dict[str, Any]]:
+        for item in self._resources:
+            if item.get("uri") == uri:
+                return [{"uri": uri,
+                         "mimeType": item.get("mimeType", "text/plain"),
+                         "text": str(item.get("text", ""))}]
+        raise ValueError("no such resource: %s" % uri)
 
     def call(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
         # Failure injection.
@@ -102,4 +114,6 @@ def server_view(name: str, mock: MockMCPServer,
             annotations=t.get("annotations", {}) or {},
         ))
     return ServerView(name=name, tools=tools, protocol=protocol,
-                      health="ok")
+                      health="ok",
+                      resource_items=_context_items(mock, "resources", "uri"),
+                      prompt_items=_context_items(mock, "prompts", "name"))

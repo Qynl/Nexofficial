@@ -1,24 +1,32 @@
 """Deterministic fallback planner — used only when no model can plan.
 
 Honesty rule: without a model, Nex cannot know HOW an arbitrary goal
-maps onto arbitrary tools. This planner therefore does the one thing
-that is safe to do without intelligence:
+maps onto arbitrary tools. What it CAN do without intelligence is use
+structure that is already deterministic:
 
   * lexically match the goal against the live tool catalog, and if a
     tool clearly IS the request (goal "take a screenshot" → tool
     `take_screenshot`), plan that single step;
+  * for a game-production goal, assemble the production evidence loop
+    (inspect → implement → build → play → capture → review → diagnose →
+    verify → profile) from the deterministic gate classification, in the
+    same causal order the plan auditor enforces;
   * otherwise return an EMPTY graph — the run reports a blocked status
     with the capability summary instead of pretending.
 
-It never invents multi-step workflows. That judgment is the model's
-job; faking it here would produce confident garbage.
+The evidence loop is structural, not semantic: a step is only planned
+when its arguments are honestly satisfiable (no required arguments, or a
+single required string the goal itself supplies). Guessing arguments is
+still the model's job, and faking it here would produce confident
+garbage.
 """
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from mcp.registry import CapabilityRegistry, ToolView
+from agent.quality import GATE_ORDER, gate_catalog, is_game_production_goal
 from agent.task_graph import Task, TaskGraph
 
 _STOP = {
@@ -59,8 +67,114 @@ def _score(tv: ToolView, words: List[str]) -> int:
     return score
 
 
+# Causal order the production auditor enforces: each gate's evidence must
+# descend from the work it is supposed to prove.
+_GATE_PARENTS = {
+    "inspection": (),
+    "implementation": ("inspection",),
+    "build": ("implementation",),
+    "playtest": ("build", "implementation"),
+    "visual": ("playtest",),
+    "visual_review": ("visual",),
+    "diagnostics": ("playtest",),
+    "verification": ("playtest", "build"),
+    "performance": ("playtest",),
+}
+
+
+def _satisfiable_args(tv: ToolView,
+                      payload: str) -> Optional[Dict[str, Any]]:
+    """Arguments we can supply honestly, or None when guessing would start."""
+    schema = tv.schema if isinstance(tv.schema, dict) else {}
+    props = schema.get("properties") or {}
+    required = [k for k in (schema.get("required") or [])
+                if isinstance(k, str)]
+    if not required:
+        return {}
+    if len(required) == 1:
+        spec = props.get(required[0]) if isinstance(props, dict) else None
+        if isinstance(spec, dict) and spec.get("type") == "string" \
+                and "enum" not in spec and payload:
+            return {required[0]: payload}
+    return None
+
+
+def _best_for_gate(tools: List[ToolView], words: List[str]
+                   ) -> List[ToolView]:
+    return sorted(tools, key=lambda tv: (-_score(tv, words), tv.full_name))
+
+
+def production_plan(goal: str, registry: CapabilityRegistry) -> TaskGraph:
+    """Deterministic production evidence loop from the live gate catalog."""
+    g = TaskGraph()
+    if not is_game_production_goal(goal):
+        return g
+    catalog = gate_catalog(registry)
+    words = _goal_words(goal)
+    payload = " ".join(words)[:200]
+    chosen: Dict[str, Task] = {}
+    skipped: List[str] = []
+    index = 0
+    for gate in GATE_ORDER:
+        candidates = catalog.get(gate) or []
+        if not candidates:
+            continue
+        picked: Optional[ToolView] = None
+        args: Dict[str, Any] = {}
+        for tv in _best_for_gate(candidates, words):
+            maybe = _satisfiable_args(tv, payload)
+            if maybe is not None:
+                picked, args = tv, maybe
+                break
+        if picked is None:
+            skipped.append(gate)
+            continue
+        deps = [chosen[parent].id for parent in _GATE_PARENTS.get(gate, ())
+                if parent in chosen]
+        if gate != "inspection" and not deps:
+            # Nothing upstream exists to attach this evidence to, so it would
+            # prove nothing. Report it instead of planning a floating step.
+            skipped.append(gate)
+            continue
+        task = Task(
+            id="d%d" % index,
+            name=picked.name.replace("_", " ").strip().capitalize(),
+            slug=gate,
+            server=picked.server,
+            tool=picked.name,
+            args=args,
+            deps=deps,
+            contract_fingerprint=getattr(picked, "contract_fingerprint", ""),
+            expect="%s evidence from %s" % (gate.replace("_", " "),
+                                            picked.full_name),
+            why="deterministic production loop: %s" % gate.replace("_", " "),
+        )
+        g.add(task)
+        chosen[gate] = task
+        index += 1
+    if "implementation" not in chosen:
+        # Without an authoring step this is an inspection run, not production.
+        return TaskGraph()
+    g.plan_meta = {
+        "title": "Deterministic production evidence loop",
+        "rationale": ("No planning model was available. Nex assembled the "
+                      "causal inspect/build/run/observe/verify loop from the "
+                      "live capability classification and planned only steps "
+                      "whose arguments it could supply honestly."),
+        "requested": len(chosen) + len(skipped),
+        "kept": len(chosen),
+        "dropped": ["%s: needs arguments only a planning model can supply"
+                    % gate for gate in skipped],
+        "deterministic": True,
+    }
+    return g
+
+
 def plan(goal: str, registry: CapabilityRegistry) -> TaskGraph:
-    """Single-step lexical plan, or an honest empty graph."""
+    """Production evidence loop, single-step lexical plan, or empty graph."""
+    structured = production_plan(goal, registry)
+    if structured.all():
+        return structured
     g = TaskGraph()
     words = _goal_words(goal)
     if not words:
