@@ -559,11 +559,76 @@ export function onRunCompleted(ev) {
     updateStatusLine(card);
     updateCounts(card);
     updateAgentPill(null);
+    renderReversal(card, ev.run_id, report.reversal);
     // The summary arrives as a normal assistant message (chat flow).
   }
   if (store.get().activeRun && store.get().activeRun.run_id === ev.run_id) {
     store.set({ activeRun: null });
   }
+}
+
+/* Compensating actions. Never labelled "undo": the coverage is partial by
+   nature and the operator must see exactly what will and will not revert. */
+function renderReversal(card, runId, rev) {
+  if (!rev || !rev.available || !Number(rev.reversible)) return;
+  const box = document.createElement('div');
+  box.className = 'run-reversal';
+
+  const head = document.createElement('div');
+  head.className = 'run-reversal-head';
+  head.textContent = `Compensating actions available: ${rev.reversible} of `
+    + `${rev.mutations} change(s) can be reversed`;
+  box.appendChild(head);
+
+  if (Number(rev.irreversible)) {
+    const warn = document.createElement('div');
+    warn.className = 'run-reversal-warn';
+    warn.textContent = `${rev.irreversible} change(s) cannot be reversed: `
+      + (rev.blocked || []).slice(0, 3)
+        .map((b) => `${b.tool} — ${b.reason}`).join('; ');
+    box.appendChild(warn);
+  }
+
+  const list = document.createElement('ul');
+  list.className = 'run-reversal-list';
+  for (const s of (rev.steps || []).slice(0, 8)) {
+    const li = document.createElement('li');
+    li.textContent = `${s.server}.${s.tool} → undoes ${s.undoes_tool}`
+      + (s.identity ? ` (${s.identity.key}=${s.identity.value})` : '');
+    list.appendChild(li);
+  }
+  box.appendChild(list);
+
+  const btn = document.createElement('button');
+  btn.className = 'btn-deny';
+  btn.type = 'button';
+  btn.textContent = `Revert ${rev.reversible} change(s)`;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = 'Reverting…';
+    try {
+      const out = await api.revertRun(runId);
+      const applied = (out.applied || []).length;
+      const failed = (out.failed || []).length;
+      if (failed) {
+        toast('warn', `Reverted ${applied}, failed ${failed}`,
+          'Some compensating actions did not apply — check the audit log.');
+        btn.textContent = 'Partly reverted';
+      } else {
+        toast('success', `Reverted ${applied} change(s)`,
+          Number(rev.irreversible)
+            ? `${rev.irreversible} change(s) had no compensating action.`
+            : '');
+        btn.textContent = 'Reverted';
+      }
+    } catch (err) {
+      toast('error', 'Revert failed', err.message || String(err));
+      btn.disabled = false;
+      btn.textContent = `Revert ${rev.reversible} change(s)`;
+    }
+  });
+  box.appendChild(btn);
+  card.el.appendChild(box);
 }
 
 export function onRunCancelled(ev) {

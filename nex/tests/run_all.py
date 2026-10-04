@@ -24,6 +24,7 @@ SUITES = [
     "test_production.py",     # multi-stage studio program + MCP readiness
     "test_engine_profiles.py", # Unreal 5.8 + Roblox Studio contracts/readiness
     "test_mcp_production.py", # balanced catalog, plan proof, context safety
+    "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
     "test_server_api.py",     # HTTP API: auth, CSRF, chat, SSE
     "test_escape.py",         # adversarial boundary: no hidden PC route

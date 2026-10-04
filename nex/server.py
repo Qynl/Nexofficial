@@ -953,6 +953,14 @@ class NexHandler(BaseHTTPRequestHandler):
                             {"ok": ok} if ok
                             else error_payload(ERR_USER, "no such run"))
             return
+        if action == "revert":
+            # Compensating actions. Each one re-enters the normal policy
+            # path, so a destructive inverse can still demand confirmation.
+            out = RUNS.revert(run_id)
+            self._send_json(200 if out else 404,
+                            out if out
+                            else error_payload(ERR_USER, "no such run"))
+            return
         self._send_json(404, error_payload(ERR_USER, "unknown run action"))
 
     def _handle_server_add(self) -> None:

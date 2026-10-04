@@ -1133,6 +1133,7 @@ Thirteen suites run in isolated processes because several intentionally configur
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
 | `test_engine_profiles` | Unreal 5.8 / Roblox detection, readiness, description distrust, planning contracts, events, and report metadata |
 | `test_mcp_production` | Balanced capability portfolios, schema-signature fidelity, causal plan auditing with one bounded repair, contract pinning, empty-success rejection, structured dataflow, context redaction, MCP resource/prompt context priming, deterministic production DAGs, pre-flight consent manifests, and cross-server corroboration |
+| `test_reversal` | Inverse-tool discovery, structured identity resolution, LIFO compensation order, honest coverage reporting, and refusal to guess when no inverse or identifier exists |
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
@@ -1204,6 +1205,7 @@ law of nature, it is a to-do item.
 | Without a model the planner could only fire **one lexically matched tool** | Assembles the full inspect → implement → build → play → capture → review → diagnose → verify → profile DAG from the deterministic gate classification, in the causal order the plan auditor enforces | `agent/planner.py` |
 | A server's work was graded **on its own homework** | Every evidence item records which server produced it, and the scorecard reports whether any observation came from a server that did **not** perform the changes | `agent/quality.py` |
 | Approvals arrived **one surprise at a time** | A pre-flight manifest ships with the plan: exactly which steps will pause, which category they fall into, and why — before a single call executes | `agent/loop.py` |
+| A finished run was **one-way** — no way back | Every run reports **compensating actions**: inverse tools discovered in the live catalog, targeted by the identity the server itself returned, executed newest-first through the normal approval gate. Coverage is always stated, never implied | `agent/reversal.py` |
 
 Each of those is covered by regression tests in `tests/test_mcp_production.py`,
 including the unhappy paths: opaque binary resources are never inlined, project
@@ -1218,6 +1220,7 @@ invent arguments it cannot honestly supply.
 - **Autonomous is not the same as unattended.** The pre-flight manifest tells you where the run will stop; it does not remove the stops. Risky tools still wait for a person unless the operator explicitly grants a standing approval.
 - **MCP servers are third-party code.** Nex controls what it sends and how it interprets responses, but a malicious server can lie about what happened. Cross-server corroboration raises the cost of a lie — a second, independent witness now has to agree — but it only works when you actually connect a second server, and colluding servers defeat it. Keep servers untrusted until reviewed. A local stdio server still runs with the OS permissions of the user who launched Nex; the minimal environment prevents accidental token inheritance, not all OS-level access.
 - **Resource content is data, never instruction.** Project context is bounded, redacted, and explicitly fenced as untrusted — which blunts prompt injection, but no fence is proof against a model that decides to be creative.
+- **Reverting is compensation, not a rollback.** MCP has no transaction and no savepoint. Nex can call `delete_level` to compensate a `create_level` it can identify — it cannot un-cook a build, un-publish a release, or restore something a destructive tool deleted. Coverage is reported as a fraction every time, because a partial reversal that presents itself as a clean undo is worse than none: the operator stops looking. **Version-control your project; that is the real undo.**
 - **The deterministic planner is structural, not semantic.** It can now build a real production loop, because causal evidence ordering is deterministic. It still cannot invent arguments: a step whose schema demands values only judgment can supply is reported, not guessed. Confidence theater was never invited to this party.
 - **Voice quality belongs to the browser.** Unsupported Speech APIs simply hide voice controls.
 - **Human creative direction still matters.** The best use of Nex is not “replace a studio.” It is “give a skilled creator a tireless, observable operator that knows when to keep working and when the evidence runs out.”

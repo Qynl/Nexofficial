@@ -64,6 +64,7 @@ export const api = {
   resolveRun: (runId, approved, always) =>
     request('POST', `/api/runs/${runId}/resolve`, { approved, always }),
   cancelRun: (runId) => request('POST', `/api/runs/${runId}/cancel`),
+  revertRun: (runId) => request('POST', `/api/runs/${runId}/revert`),
 
   // -- servers
   servers: () => request('GET', '/api/servers'),

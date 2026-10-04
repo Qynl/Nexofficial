@@ -49,6 +49,7 @@ from agent.mcp_production import (
 )
 from agent.model_planner import model_driven_planner, validate_plan_deep
 from agent.planner import plan as skeleton_plan
+from agent.reversal import plan_reversal
 from agent.prompts import EVALUATOR_SYSTEM, SUMMARIZER_SYSTEM
 from agent.production import (
     STAGES as PRODUCTION_STAGES,
@@ -1390,10 +1391,21 @@ class AgentRun:
             "quality_passes": self._quality_passes,
             "quality": quality,
             "mcp_production_review": plan_meta.get("production_review") or {},
+            "reversal": self._reversal_plan(),
             "engine_targets": list(self._engine_targets),
             "production_program": program,
             "duration_s": round(time.time() - self.started_at, 1),
         }
+
+    def _reversal_plan(self) -> Dict[str, Any]:
+        """Compensating actions for this run's mutations (never executed here)."""
+        try:
+            return plan_reversal(self.graph.all(), self.manager.registry())
+        except Exception as exc:  # noqa: BLE001 - reporting must not fail a run
+            return {"available": False, "mutations": 0, "reversible": 0,
+                    "irreversible": 0, "coverage_pct": 0, "steps": [],
+                    "blocked": [],
+                    "note": "reversal analysis unavailable: %s" % exc}
 
     def _blocked_report(self) -> Dict[str, Any]:
         summary = self.manager.summary()
@@ -1613,6 +1625,68 @@ class RunCoordinator:
         if run is None:
             return False
         return run.resolve_approval(approved, always)
+
+    def reversal(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """The compensation plan for a finished run (read-only)."""
+        run = self.get(run_id)
+        if run is None:
+            return None
+        return (run.report or {}).get("reversal") or run._reversal_plan()
+
+    def revert(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Execute a run's compensating actions, newest mutation first.
+
+        Each step goes through manager.call, so it is authorized, possibly
+        confirmation-gated, and audited exactly like any other mutation.
+        Execution stops at the first failure: a half-applied compensation
+        chain is reported as-is rather than pushed further out of shape.
+        """
+        run = self.get(run_id)
+        if run is None:
+            return None
+        if run.status in ("running", "starting"):
+            return {"ok": False, "error": "run is still active; cancel it "
+                                          "before reverting"}
+        plan = self.reversal(run_id) or {}
+        steps = plan.get("steps") or []
+        applied: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        for step in steps:
+            if failed:
+                break
+            label = "%s.%s" % (step.get("server"), step.get("tool"))
+            try:
+                outcome = self.manager.call(
+                    step["server"], step["tool"], step.get("args") or {},
+                    audit_context={"run": run_id, "purpose": "reversal",
+                                   "undoes": step.get("undoes_tool"),
+                                   "contract_fingerprint":
+                                       step.get("contract_fingerprint", "")})
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"tool": label, "error": str(exc)[:200]})
+                break
+            if "result" in outcome:
+                applied.append({"tool": label,
+                                "undoes": step.get("undoes_tool"),
+                                "identity": step.get("identity")})
+            else:
+                failed.append({
+                    "tool": label,
+                    "error": str(outcome.get("refused")
+                                 or outcome.get("error"))[:200]})
+        return {
+            "ok": not failed,
+            "run": run_id,
+            "applied": applied,
+            "failed": failed,
+            "not_attempted": max(0, len(steps) - len(applied) - len(failed)),
+            "irreversible": plan.get("blocked") or [],
+            "note": ("Compensating actions ran newest-first. "
+                     "%d applied, %d failed, %d mutation(s) never had a "
+                     "compensating action."
+                     % (len(applied), len(failed),
+                        len(plan.get("blocked") or []))),
+        }
 
     def waiting(self) -> List[Dict[str, Any]]:
         with self._lock:
