@@ -330,6 +330,8 @@ python3 server.py
 
 Open the URL printed in the terminal—normally `http://localhost:8787`. The one-time URL exchanges its token for an `HttpOnly`, `SameSite=Strict` cookie and removes the token from the address bar.
 
+Nex binds **loopback only** by default, so starting it does not publish the console to your Wi-Fi network. Set `NEX_HOST` if you really want remote access—you will get a warning at startup, and an SSH tunnel is the better answer.
+
 There is no `pip install`, `npm install`, bundler, migration command, or frontend build step. Nex uses:
 
 - Python’s standard library for HTTP, SQLite, concurrency, and transport;
@@ -1104,7 +1106,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_EVAL_EVERY_STEPS` | `6` | Successful MCP steps between model evaluation checkpoints; failures evaluate immediately |
 | `NEX_RUN_BUDGET_S` | `1800` | Run wall-clock budget |
 | `NEX_APPROVAL_TIMEOUT_S` | `600` | Approval wait budget |
-| `NEX_HOST` / `NEX_PORT` | `0.0.0.0` / `8787` | HTTP bind address |
+| `NEX_HOST` / `NEX_PORT` | `127.0.0.1` / `8787` | HTTP bind address. Loopback by default; any other value prints an exposure warning at startup |
 | `NEX_HOME` | `~/.nex` | Persistent state directory |
 | `NEX_AUTH_TOKEN` | generated | Fixed token override; minimum 32 characters |
 | `NEX_COOKIE_SECURE` | false | Secure cookie for HTTPS deployments |

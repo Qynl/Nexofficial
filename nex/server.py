@@ -21,6 +21,7 @@ Security posture
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import mimetypes
 import os
@@ -50,7 +51,11 @@ from mcp.manager import get_manager, validate_server_entry
 from mcp.policy import Policy, set_policy
 from store import Store
 
-HOST = os.environ.get("NEX_HOST", "0.0.0.0")
+# Loopback by default: Nex is a local operator console, and binding every
+# interface would publish the console to the café Wi-Fi / office LAN. An
+# operator who genuinely wants remote access opts in with NEX_HOST and gets
+# a warning at startup.
+HOST = os.environ.get("NEX_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NEX_PORT", "8787"))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -68,6 +73,16 @@ def _nex_dir() -> str:
     except OSError:
         pass
     return base
+
+
+def _is_loopback_host(host: str) -> bool:
+    h = (host or "").strip().lower().strip("[]")
+    if h in ("localhost", ""):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
 def _token_file_path() -> str:
@@ -113,6 +128,32 @@ def _load_or_create_auth_token() -> str:
 
 
 AUTH_TOKEN = _load_or_create_auth_token()
+
+# Failed-authentication throttle. The token is 256-bit, so this is not what
+# makes brute force infeasible — it stops an unauthenticated peer from
+# burning CPU and filling logs, and it bounds the damage if an operator ever
+# sets a weak NEX_AUTH_TOKEN by hand.
+_AUTH_FAIL_WINDOW_S = 60.0
+_AUTH_FAIL_LIMIT = 20
+_auth_fail_lock = threading.Lock()
+_auth_fails: Dict[str, List[float]] = {}
+
+
+def _auth_throttled(peer: str) -> bool:
+    now = time.time()
+    with _auth_fail_lock:
+        hits = [t for t in _auth_fails.get(peer, ())
+                if now - t < _AUTH_FAIL_WINDOW_S]
+        _auth_fails[peer] = hits
+        if len(_auth_fails) > 1024:          # bounded memory
+            _auth_fails.clear()
+        return len(hits) >= _AUTH_FAIL_LIMIT
+
+
+def _note_auth_failure(peer: str) -> None:
+    now = time.time()
+    with _auth_fail_lock:
+        _auth_fails.setdefault(peer, []).append(now)
 
 
 # ---------------------------------------------------------------------------
@@ -527,11 +568,25 @@ class NexHandler(BaseHTTPRequestHandler):
         on them (and we never answer CORS preflights)."""
         return (self.headers.get("X-Nex") or "").strip() == "1"
 
+    def _peer(self) -> str:
+        try:
+            return str(self.client_address[0])
+        except Exception:  # noqa: BLE001
+            return "?"
+
     def _auth_gate(self, mutating: bool) -> bool:
         sensitive = self.path.startswith("/api/") or self.path == "/api"
         if not sensitive:
             return True
+        peer = self._peer()
+        if _auth_throttled(peer):
+            self.close_connection = True
+            self._send_json(429, error_payload(
+                ERR_USER, "too many failed authentication attempts; wait a "
+                          "minute"))
+            return False
         if not self._auth_ok():
+            _note_auth_failure(peer)
             self._send_json(401, error_payload(ERR_USER, "authentication "
                                                 "required"))
             return False
@@ -542,8 +597,17 @@ class NexHandler(BaseHTTPRequestHandler):
         return True
 
     def _handle_login(self) -> None:
+        peer = self._peer()
+        if _auth_throttled(peer):
+            self.close_connection = True
+            self._send_json(429, error_payload(
+                ERR_USER, "too many failed authentication attempts; wait a "
+                          "minute"))
+            return
         body = self._read_json_body()
         tok = str((body or {}).get("token") or "").strip()
+        if not (tok and secrets.compare_digest(tok, AUTH_TOKEN)):
+            _note_auth_failure(peer)
         if tok and secrets.compare_digest(tok, AUTH_TOKEN):
             payload = b'{"ok": true}'
             self.send_response(200)
@@ -1094,6 +1158,10 @@ def main() -> None:
 
     server = ThreadingHTTPServer((HOST, PORT), NexHandler)
     print("Nex 2.0 serving on http://%s:%s" % (HOST, PORT))
+    if not _is_loopback_host(HOST):
+        print("WARNING: NEX_HOST=%s exposes this console beyond this machine. "
+              "Anyone who can reach %s:%s can attempt to authenticate. Prefer "
+              "127.0.0.1 plus an SSH tunnel." % (HOST, HOST, PORT))
     print("Open: http://localhost:%s/?nex_token=%s   (one click sets the "
           "auth cookie)" % (PORT, AUTH_TOKEN))
     print("Token: %s" % AUTH_TOKEN)

@@ -406,6 +406,49 @@ class APITests(unittest.TestCase):
         expect(s == 404, "unknown API must 404, got %s" % s)
         expect("error" in body, "404 must carry an error object")
 
+    def test_default_bind_is_loopback_only(self):
+        # A local operator console must not publish itself to the LAN
+        # merely by being started.
+        expect(server_mod.HOST == "127.0.0.1",
+               "default NEX_HOST must be loopback, got %r" % server_mod.HOST)
+        expect(server_mod._is_loopback_host("127.0.0.1"), "127.0.0.1 loopback")
+        expect(server_mod._is_loopback_host("localhost"), "localhost loopback")
+        expect(server_mod._is_loopback_host("::1"), "::1 loopback")
+        expect(not server_mod._is_loopback_host("0.0.0.0"),
+               "0.0.0.0 is not loopback")
+        expect(not server_mod._is_loopback_host("192.168.1.10"),
+               "LAN address is not loopback")
+
+    def test_failed_auth_is_throttled_but_valid_auth_is_not(self):
+        peer = "203.0.113.77"
+        server_mod._auth_fails.pop(peer, None)
+        try:
+            for _ in range(server_mod._AUTH_FAIL_LIMIT):
+                expect(not server_mod._auth_throttled(peer),
+                       "must not throttle below the limit")
+                server_mod._note_auth_failure(peer)
+            expect(server_mod._auth_throttled(peer),
+                   "must throttle after the failure limit")
+            # Successful requests never record a failure, so a working
+            # session cannot lock itself out.
+            for _ in range(server_mod._AUTH_FAIL_LIMIT * 2):
+                s, _b = self.req("GET", "/api/health")
+                expect(s == 200, "authenticated traffic must stay 200")
+        finally:
+            server_mod._auth_fails.pop(peer, None)
+
+    def test_bad_token_eventually_returns_429(self):
+        server_mod._auth_fails.clear()
+        try:
+            codes = [self.req("GET", "/api/health",
+                              headers={"X-Nex-Auth": "wrong"},
+                              auth=False)[0]
+                     for _ in range(server_mod._AUTH_FAIL_LIMIT + 3)]
+            expect(401 in codes, "bad tokens must 401 first")
+            expect(429 in codes, "sustained bad tokens must end in 429")
+        finally:
+            server_mod._auth_fails.clear()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
