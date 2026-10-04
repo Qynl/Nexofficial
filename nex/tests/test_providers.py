@@ -3,19 +3,16 @@
 
 The architecture under test:
 
-    PLAN with the chat (GPT / local)  ->  BUILD with NVIDIA NIM
-                                              |  429 / timeout / 5xx / RPM
-                                              v
-                                        GPT takes over as AGENT
-                                        (same plan, different hands)
-                                              |
-                                        NIM cooldown expires -> NIM again
+    ROUTINE (chat, summary, small plan) -> Ollama first
+    HARD WORK -> NVIDIA NIM -> configured GPT -> Ollama
+                                      |
+                            cooldown expires -> NIM again
 
 Concretely verified here:
   1. KEY HANDLING — .env chain, 0600 store, keys never leave the process
      in an API response (masked only).
-  2. ROLE DEFAULTS — NIM is the agent the moment a key exists; the
-     chat is GPT when it can be, otherwise the local model.
+  2. ROLE DEFAULTS — Ollama owns routine work; NIM owns hard work when its
+     key exists, GPT leads when only its key exists, and Ollama is guaranteed.
   3. FAILOVER — every documented failure (429 / timeout / 5xx / auth /
      bad request) hands the SAME call to the next provider and emits an
      event that says the plan continues.
@@ -35,6 +32,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 from email.message import Message
@@ -259,18 +257,33 @@ _expect(providers.mask_key("") == "" and providers.mask_key(None) == "",
 
 print("=== 2. roles ===")
 
+_expect(providers.role_for_purpose("chat") == "chat"
+        and providers.role_for_purpose("summary") == "chat"
+        and providers.role_for_purpose("planning-routine") == "chat",
+        "chat, summaries and small plans select the routine lane")
+_expect(providers.role_for_purpose("planning-hard") == "agent"
+        and providers.role_for_purpose("evaluation") == "agent"
+        and providers.role_for_purpose("diagnosis") == "agent",
+        "complex plans, evaluation and diagnosis select hard work")
+
 saved = {k: os.environ.pop(k, None) for k in
          ("NVIDIA_API_KEY", "OPENAI_API_KEY", "OLLAMA_MODEL", "OLLAMA_HOST",
-          "NEX_PLANNER_PROVIDER", "NEX_BUILDER_PROVIDER", "NEX_PLANNER_MODEL",
-          "NEX_BUILDER_MODEL", "NEX_PROVIDERS_FILE", "NEX_NIM_RPM")}
+          "NEX_CHAT_PROVIDER", "NEX_AGENT_PROVIDER", "NEX_CHAT_MODEL",
+          "NEX_AGENT_MODEL", "NEX_PLANNER_PROVIDER", "NEX_BUILDER_PROVIDER",
+          "NEX_PLANNER_MODEL", "NEX_BUILDER_MODEL", "NEX_PROVIDERS_FILE",
+          "NEX_NIM_RPM")}
 try:
     with tempfile.TemporaryDirectory() as td:
         empty_store = providers.SettingsStore(os.path.join(td, "none.json"))
         r0 = providers.build_router(store=empty_store, load_dot_env=False)
         _expect(r0.roles["chat"]["provider"] == "local",
                 "without keys the CHAT is the local model")
-        _expect(r0.roles["agent"]["provider"] == "local",
-                "without keys the AGENT is the local model too")
+        _expect(r0.roles["agent"]["provider"] == "nim"
+                and r0.status()["agent"]["active"] == "local",
+                "without keys hard work skips cloud and runs on Ollama")
+        r0.set_spec("nim", api_key="nvapi-added-later")
+        _expect(r0.status()["agent"]["active"] == "nim",
+                "adding a NIM key activates hard work without a routing edit")
 
         os.environ["NVIDIA_API_KEY"] = "nvapi-x"
         r1 = providers.build_router(store=empty_store, load_dot_env=False)
@@ -281,16 +294,24 @@ try:
 
         os.environ["OPENAI_API_KEY"] = "sk-x"
         r2 = providers.build_router(store=empty_store, load_dot_env=False)
-        _expect(r2.roles["chat"]["provider"] == "gpt",
-                "with a GPT key the chat becomes GPT")
+        _expect(r2.roles["chat"]["provider"] == "local",
+                "a GPT key does not move routine chat away from Ollama")
         _expect(r2.roles["agent"]["provider"] == "nim",
-                "…and the agent stays NIM (GPT is not used for building)")
+                "…and NIM remains the hard-work primary")
         _expect(r2.chain("agent")[:3] == ["nim", "gpt", "local"],
-                "agent chain: NIM -> GPT -> local (%s)" % r2.chain("agent"))
-        _expect(r2.chain("chat")[:3] == ["gpt", "nim", "local"],
-                "chat chain: GPT -> NIM -> local (%s)" % r2.chain("chat"))
+                "hard chain: NIM -> GPT -> Ollama (%s)" % r2.chain("agent"))
+        _expect(r2.chain("chat")[:3] == ["local", "gpt", "nim"],
+                "routine chain: Ollama -> GPT -> NIM (%s)" % r2.chain("chat"))
         _expect(r2.role_model("agent") == "nvidia/nemotron-3-super-120b-a12b",
                 "agent model resolves from the role config")
+
+        os.environ.pop("NVIDIA_API_KEY", None)
+        r_gpt = providers.build_router(store=empty_store, load_dot_env=False)
+        _expect(r_gpt.roles["agent"]["provider"] == "nim"
+                and r_gpt.status()["agent"]["active"] == "gpt"
+                and r_gpt.chain("agent")[:3] == ["nim", "gpt", "local"],
+                "without a NIM key, GPT serves hard work then Ollama")
+        os.environ["NVIDIA_API_KEY"] = "nvapi-x"
 finally:
     for k, v in saved.items():
         if v is None:
@@ -316,6 +337,8 @@ _expect(role_body.get("response_format") == {"type": "json_object"},
         "NIM planning uses structured JSON mode")
 _expect(role_body.get("temperature") == 0.1,
         "planning gets a deterministic purpose-specific temperature")
+_expect(role_body.get("max_tokens") == 2600,
+        "planning uses a bounded purpose-specific output budget")
 role_state = r_role.states["nim"].to_dict()
 _expect(role_state["total_prompt_tokens"] == 123
         and role_state["total_completion_tokens"] == 17,
@@ -331,6 +354,15 @@ r_plain.set_spec("nim", structured_outputs=False)
 r_plain.chat("agent", MESSAGES, purpose="planning")
 _expect("response_format" not in h_plain.calls[-1][1],
         "JSON mode can be disabled for an incompatible NIM/runtime")
+
+h_tokens = FakeHTTP()
+h_tokens.push("127.0.0.1:11434", "short local summary")
+r_tokens = mk_router(h_tokens, rpm=40)
+r_tokens.set_role("chat", "local", model="gpt-oss:20b",
+                  fallbacks=["gpt", "nim"])
+r_tokens.chat("chat", MESSAGES, purpose="summary")
+_expect(h_tokens.calls[-1][1]["options"].get("num_predict") == 700,
+        "Ollama receives the same compact purpose token budget")
 
 # ===========================================================================
 # 3. FAILOVER: 429 / timeout / 5xx / auth -> next provider, same plan
@@ -370,6 +402,20 @@ _expect(r.status()["agent"]["fallback"] is True,
         "the status view marks the agent as running on a fallback")
 _expect(r.status()["agent"]["serving"] == "gpt",
         "…and names the provider that actually served")
+
+# No GPT credential is a normal state, not an error or a broken chain.
+h_no_gpt = FakeHTTP()
+h_no_gpt.push("integrate.api.nvidia.com",
+              http_error("n", 503, "temporarily unavailable"))
+h_no_gpt.push("127.0.0.1:11434", "ollama took over")
+r_no_gpt = mk_router(h_no_gpt, rpm=40)
+r_no_gpt.set_spec("gpt", api_key="", api_key_env="")
+_expect(r_no_gpt.chat("agent", MESSAGES, purpose="planning-hard") ==
+        "ollama took over",
+        "without a GPT key, NIM failure hands directly to Ollama")
+_expect(len(h_no_gpt.calls) == 2
+        and all("api.openai.com" not in url for url, _body in h_no_gpt.calls),
+        "an unconfigured GPT costs no request and causes no routing bug")
 
 # recovery: cooldown expires -> NIM again
 clock = Clock()
@@ -865,8 +911,8 @@ with tempfile.TemporaryDirectory() as td:
             store=providers.SettingsStore(os.path.join(td, "none.json")),
             load_dot_env=False)
         _expect(r_def.role_model("chat") == "gpt-oss:20b"
-                and r_def.role_model("agent") == "gpt-oss:20b",
-                "a fresh install plans and builds with gpt-oss:20b")
+                and r_def.status()["agent"]["active_model"] == "gpt-oss:20b",
+                "a fresh install actually serves routine and hard work locally")
     finally:
         for k, v in saved2.items():
             if v is not None:
@@ -1001,6 +1047,10 @@ _expect(r_res2.states["nim"].to_dict()["headroom"] is True,
         "…and the state reports 'headroom' for the UI")
 _expect(len([c for c in h_res2.calls if "integrate" in c[0]]) == 2,
         "NIM was called exactly twice — the reserve is real")
+priority = r_res2.chat("agent", MESSAGES, purpose="planning-hard")
+_expect(priority == "nim ok"
+        and r_res2.states["nim"].used_in_window() == 3,
+        "a complex plan may spend one of the RPM slots held in reserve")
 
 # --- with a full window and no fallback, it CHILLS instead of hammering --
 cl3 = Clock()
@@ -1022,6 +1072,33 @@ _expect(len(h_chill.calls) == calls_before,
         "a full window with NO fallback does not send another request")
 _expect(out_chill is None,
         "…it raises instead (the caller degrades honestly, no invented text)")
+
+# --- concurrent runs cannot race through the local RPM ceiling ------------
+h_race = FakeHTTP()
+h_race.push("integrate.api.nvidia.com", "nim ok")
+r_race = providers.Router(
+    {"nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=4,
+                                   reserve=0.0, min_interval_s=0.0,
+                                   max_chill_s=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": []}},
+    transport={"post": h_race.post, "get": h_race.get})
+barrier = threading.Barrier(12)
+
+def race_call():
+    barrier.wait()
+    try:
+        r_race.chat("agent", MESSAGES, purpose="planning-hard")
+    except providers.AllProvidersFailed:
+        pass
+
+threads = [threading.Thread(target=race_call) for _ in range(12)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=5)
+_expect(r_race.states["nim"].used_in_window() == 4
+        and len(h_race.calls) == 4,
+        "concurrent runs share one atomic 4-RPM ceiling")
 
 # --- pacing events are emitted -------------------------------------------
 h_ev = FakeHTTP()
@@ -1188,6 +1265,8 @@ _expect("v1/v1" not in h.streams[0][0],
 _expect(h.streams[0][1].get("stream") is True,
         "the request asks the provider to stream: %r"
         % h.streams[0][1].get("stream"))
+_expect(h.streams[0][1].get("max_tokens") == 1800,
+        "streaming chat also receives its purpose token ceiling")
 _expect(r.states["gpt"].total_calls == 1 and r.states["gpt"].total_ok == 1,
         "a streamed call is counted like any other call")
 # The mock provider is unlimited (rpm=0); give it a budget and prove the

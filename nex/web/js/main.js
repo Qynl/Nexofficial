@@ -260,16 +260,16 @@ function renderProviderChip() {
     return;
   }
   const chat = (prov.roles || {}).chat || {};
-  const serving = chat.serving || chat.active || chat.provider || '';
-  const model = chat.serving_model || chat.active_model || chat.model || '';
-  label.textContent = serving
-    ? `${serving} · ${model || 'default'}`
+  const agent = (prov.roles || {}).agent || {};
+  const routine = chat.serving || chat.active || chat.provider || '';
+  const hard = agent.serving || agent.active || agent.provider || '';
+  label.textContent = routine || hard
+    ? `${routine || '–'} routine · ${hard || '–'} hard`
     : 'no model';
-  chip.dataset.tone = !serving ? 'bad'
-    : chat.fallback ? 'warn' : 'ok';
-  chip.title = `Chat: ${chat.provider || '-'} (${chat.model || '-'})\n`
-    + `Agent: ${((prov.roles || {}).agent || {}).provider || '-'} `
-    + `(${((prov.roles || {}).agent || {}).model || '-'})`;
+  chip.dataset.tone = !routine || !hard ? 'bad'
+    : chat.fallback || agent.fallback ? 'warn' : 'ok';
+  chip.title = `Routine: ${chat.provider || '-'} (${chat.model || '-'})\n`
+    + `Hard work: ${agent.provider || '-'} (${agent.model || '-'})`;
 }
 
 function onProviderEvent(ev) {

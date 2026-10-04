@@ -1728,6 +1728,43 @@ body.user-scrolled #scroller { scroll-behavior: auto; }
   color: var(--fg-dim);
   font-size: 11.5px;
 }
+.workload-policy {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+}
+.workload-policy > strong {
+  grid-column: 1 / -1;
+  color: var(--fg);
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+.workload-lane {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.workload-lane span {
+  color: var(--accent);
+  font: 700 9.5px var(--font-mono);
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+.workload-lane small { color: var(--fg-dim); font-size: 11px; }
+.workload-policy p {
+  grid-column: 1 / -1;
+  margin: 1px 0 0;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
 .role-routing {
   margin-bottom: 16px;
   padding: 15px;
@@ -1769,6 +1806,8 @@ body.user-scrolled #scroller { scroll-behavior: auto; }
 }
 .role-route-save { margin-top: 11px; padding: 7px 14px; }
 @media (max-width: 720px) {
+  .workload-policy { grid-template-columns: 1fr; }
+  .workload-policy > strong, .workload-policy p { grid-column: 1; }
   .role-route { grid-template-columns: 1fr; margin-top: 14px; }
 }
 .prov-roles {

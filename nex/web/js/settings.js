@@ -55,11 +55,12 @@ async function renderModelPanel() {
   const intro = document.createElement('p');
   intro.style.cssText =
     'color:var(--fg-faint);font-size:12.5px;margin:0 0 14px;';
-  intro.textContent = 'Two roles, each with its own provider chain: '
-    + 'Chat answers you; Agent plans, evaluates and repairs. If a provider '
-    + 'fails or is rate-limited, the next one in the chain takes over '
-    + 'without losing the work.';
+  intro.textContent = 'Two workload lanes, one seamless hand-off. By default, '
+    + 'Ollama handles routine chat, summaries and small plans. NIM does complex '
+    + 'production work; configured GPT is next, and Ollama takes over if cloud '
+    + 'providers fail or run out of requests. The validated MCP plan stays put.';
   panel.appendChild(intro);
+  panel.appendChild(workloadPolicy(view));
   panel.appendChild(roleRouting(view));
 
   for (const p of view.providers || []) {
@@ -67,12 +68,40 @@ async function renderModelPanel() {
   }
 }
 
+function workloadPolicy(view) {
+  const policy = view.workload_policy || {};
+  const box = document.createElement('div');
+  box.className = 'workload-policy';
+  const title = document.createElement('strong');
+  title.textContent = 'Smart workload scheduler';
+  box.appendChild(title);
+  for (const lane of ['routine', 'hard']) {
+    const data = policy[lane] || {};
+    const row = document.createElement('div');
+    row.className = 'workload-lane';
+    const name = document.createElement('span');
+    name.textContent = lane === 'routine' ? 'ROUTINE' : 'HARD WORK';
+    const detail = document.createElement('small');
+    detail.textContent = data.description || (lane === 'routine'
+      ? 'Ollama-first local jobs' : 'NIM → GPT → Ollama');
+    row.appendChild(name);
+    row.appendChild(detail);
+    box.appendChild(row);
+  }
+  const foot = document.createElement('p');
+  foot.textContent = 'Normal progress is evaluated every few completed MCP steps, '
+    + 'not after every action. Compact token ceilings and a protected NIM RPM '
+    + 'reserve keep rounds available for difficult plans and repairs.';
+  box.appendChild(foot);
+  return box;
+}
+
 function roleRouting(view) {
   const box = document.createElement('div');
   box.className = 'role-routing';
   const title = document.createElement('div');
   title.className = 'role-routing-title';
-  title.textContent = 'Model flight plan';
+  title.textContent = 'Lane routing';
   box.appendChild(title);
 
   const providerModels = new Map(
@@ -86,7 +115,7 @@ function roleRouting(view) {
 
     const identity = document.createElement('div');
     const roleName = document.createElement('strong');
-    roleName.textContent = role === 'chat' ? 'Chat brain' : 'Agent brain';
+    roleName.textContent = role === 'chat' ? 'Routine lane' : 'Hard-work lane';
     const status = document.createElement('small');
     status.textContent = live
       ? `live: ${live} · ${config.serving_model || config.active_model || config.model || 'default model'}`
@@ -201,7 +230,8 @@ function providerCard(p, view) {
     if (idx >= 0) {
       const tag = document.createElement('span');
       tag.className = 'role-tag';
-      tag.textContent = idx === 0 ? `${role} · primary` : `${role} · fallback ${idx}`;
+      const lane = role === 'chat' ? 'routine' : 'hard work';
+      tag.textContent = idx === 0 ? `${lane} · primary` : `${lane} · fallback ${idx}`;
       roles.appendChild(tag);
     }
   }

@@ -4,7 +4,7 @@ Covers the behaviors the overhaul is about:
   * deterministic planning when no LLM is available
   * model-driven planning with tool validation (hallucinated tools dropped)
   * argument references ($slug / $slug.key) between steps
-  * the recovery ladder (transient retry → arg fix → switch tool → honest fail)
+  * safe recovery (read-only transient retry; ambiguous mutations never repeat)
   * replanning on structural failure
   * approval waiting + resolution + always-allow
   * cancellation
@@ -31,6 +31,7 @@ os.environ.setdefault("NEX_HOME", "/tmp/nex-loop-tests")
 from agent.mock_mcp import MockMCPServer, server_view          # noqa: E402
 from agent.loop import AgentRun, RunCoordinator                # noqa: E402
 from agent.model_planner import plan_to_graph                   # noqa: E402
+from agent.workload import planning_purpose                     # noqa: E402
 from mcp.registry import CapabilityRegistry                    # noqa: E402
 from mcp.capability import capability_for_tool                 # noqa: E402
 from mcp.policy import authorize                               # noqa: E402
@@ -200,7 +201,7 @@ class PlanningTests(unittest.TestCase):
 
         def llm(messages, purpose=""):
             purposes.append(purpose)
-            if purpose == "planning":
+            if purpose == "planning-routine":
                 return ('{"steps":['
                         '{"name":"say","tool":"echo.echo",'
                         '"args":{"text":"hello"}},'
@@ -211,9 +212,55 @@ class PlanningTests(unittest.TestCase):
             return "The echo completed successfully."
         llm.supports_purpose = True
 
-        report = AgentRun("t4p", "echo hello", self.mgr, llm=llm).run()
+        report = AgentRun("t4p", "echo hello", self.mgr, llm=llm,
+                          eval_every_steps=1).run()
         self.assertEqual(report["status"], "completed")
-        self.assertEqual(purposes, ["planning", "evaluation", "summary"])
+        self.assertEqual(
+            purposes, ["planning-routine", "evaluation", "summary"])
+
+    def test_workload_classifier_keeps_routine_local_and_debug_hard(self):
+        self.assertEqual(planning_purpose("echo hello"), "planning-routine")
+        self.assertEqual(
+            planning_purpose("debug the intermittent save corruption"),
+            "planning-hard")
+
+    def test_complex_game_planning_is_labeled_hard(self):
+        purposes = []
+
+        def llm(messages, purpose=""):
+            purposes.append(purpose)
+            return '{"plan":{"title":"blocked","steps":[]}}'
+        llm.supports_purpose = True
+
+        AgentRun("t4hard", "build a production-ready open-world game",
+                 self.mgr, llm=llm, max_production_stages=1).run()
+        self.assertEqual(purposes[0], "planning-hard")
+
+    def test_progress_evaluation_is_checkpointed_not_per_step(self):
+        purposes = []
+
+        def llm(messages, purpose=""):
+            purposes.append(purpose)
+            if purpose.startswith("planning-"):
+                return ('{"steps":['
+                        '{"name":"one","tool":"echo.echo",'
+                        '"args":{"text":"1"}},'
+                        '{"name":"two","tool":"echo.echo",'
+                        '"args":{"text":"2"},"depends_on":["one"]},'
+                        '{"name":"three","tool":"echo.echo",'
+                        '"args":{"text":"3"},"depends_on":["two"]},'
+                        '{"name":"four","tool":"echo.echo",'
+                        '"args":{"text":"4"},"depends_on":["three"]}]}')
+            if purpose == "evaluation":
+                return '{"done":false,"adjust":"none","reason":"continue"}'
+            return "Four actions completed."
+        llm.supports_purpose = True
+
+        report = AgentRun("t4rpm", "run four echo actions", self.mgr,
+                          llm=llm, eval_every_steps=3).run()
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["model_evaluations"], 1)
+        self.assertEqual(purposes.count("evaluation"), 1)
 
     def test_qualified_tool_namespace_is_never_stripped(self):
         def llm(prompt):
@@ -304,6 +351,21 @@ class RecoveryTests(unittest.TestCase):
         mgr = FakeManager([self.mock], fail={"echo": [1, "connection reset"]})
         report = AgentRun("r1", "echo the text hi", mgr).run()
         self.assertEqual(report["status"], "completed")
+
+    def test_transient_mutation_with_unknown_outcome_is_not_repeated(self):
+        failure = [1, "connection reset after request was sent"]
+        mgr = FakeManager([self.mock], fail={"create_thing": failure})
+
+        def llm(messages):
+            return ('{"steps":[{"name":"make","tool":"echo.create_thing",'
+                    '"args":{"name":"one"}}]}')
+
+        report = AgentRun("r1mut", "create one thing", mgr, llm=llm).run()
+        self.assertNotEqual(report["status"], "completed")
+        self.assertEqual(failure[0], 0)
+        self.assertIn("did not automatically repeat",
+                      " ".join(item.get("error", "")
+                               for item in report.get("failed", [])))
 
     def test_persistent_failure_reports_failed(self):
         mgr = FakeManager([self.mock],

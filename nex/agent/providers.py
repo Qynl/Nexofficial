@@ -1,35 +1,26 @@
-"""Provider layer — who PLANS, who BUILDS, and what happens when one is down.
+"""Provider layer — local routine work, cloud heavy work, clean hand-offs.
 
-The architecture this module implements:
+The architecture implemented here has two operator-controlled lanes:
 
-        USER
-         |
-         v
-    [ CHAT ]  reasoning / architecture / decomposition   (rare, big calls)
-         |
-    exact build plan
-         |
-         v
-    [ AGENT ]  executes the plan through MCP tools         (frequent calls)
-         |
-      MCP only  ->  a Blender MCP, a game MCP, anything
+  * ROUTINE (the ``chat`` route, local Ollama by default): conversation,
+    summaries, and small plans. These jobs do not spend hosted quota while the
+    local model is healthy.
+  * HARD WORK (the ``agent`` route): complex production plans, evaluations,
+    failure diagnosis, and bounded batch jobs. NVIDIA NIM is preferred, GPT is
+    an explicit credentialed fallback, and Ollama is always the terminal
+    fallback. If there is no GPT key, it is simply skipped.
 
-Roles are separate on purpose:
-
-  * CHAT  (default: the local model, or GPT when an OpenAI key is present)
-    is called a handful of times per run: design document, systems, tests.
-  * AGENT  (default: NVIDIA NIM) is called during the build loop —
-    failure diagnosis, repair decisions — and nothing else.
-
-Why a router instead of one model call: hosted NIM limits can vary by model,
+Why a router instead of one model call: hosted NIM limits vary by model,
 endpoint, account and current service load. Nex therefore ships a configurable
 40-RPM LOCAL safety ceiling rather than pretending that number is NVIDIA's
-contract. Budgeting lives client-side and failover is explicit:
+contract. Routine work stays local, evaluations are checkpointed, output-token
+budgets are purpose-specific, and scarce requests are reserved for complex
+plans and repairs. Failover is explicit:
 
     NIM 429 / timeout / 5xx / RPM exhausted
-        -> the SAME call is retried on the fallback provider (GPT, then local)
-        -> the build plan is untouched: only the hands change, not the plan
-        -> after cooldown the router hands back to NIM automatically
+        -> the SAME model job goes to GPT when configured, otherwise Ollama
+        -> the validated MCP plan is untouched: only the model changes
+        -> after cooldown the router hands hard work back to NIM automatically
 
 Nothing here executes a tool. A provider returns TEXT; the agent loop turns
 that text into validated MCP calls. The agent therefore cannot reach the
@@ -73,8 +64,12 @@ _ROLE_MIGRATION = {"planner": ROLE_CHAT, "builder": ROLE_AGENT}
 # to be named here (or by the operator) to be tried, so a future provider
 # added to the catalog can never silently become a fallback for a role.
 ROLE_DEFAULT_FALLBACKS: Dict[str, List[str]] = {
+    # Hard work: NIM -> GPT when configured -> local, with local guaranteed by
+    # Router.chain even if an operator shortens this list.
     ROLE_AGENT: ["gpt", "local"],
-    ROLE_CHAT: ["nim", "local"],
+    # Routine work starts locally; cloud providers are resilience fallbacks,
+    # not the normal place where chat/summaries spend quota.
+    ROLE_CHAT: ["gpt", "nim"],
 }
 
 KIND_OLLAMA = "ollama"    # /api/chat, /api/tags
@@ -108,13 +103,47 @@ FAILOVER_KINDS = (ERR_RATE_LIMIT, ERR_TIMEOUT, ERR_SERVER, ERR_AUTH,
 # names are attached by the loop (not guessed from user text) and are visible
 # in provider telemetry. Providers may opt out when a model lacks JSON mode.
 STRUCTURED_PURPOSES = frozenset({
-    "planning", "evaluation", "diagnosis", "batch",
+    "planning", "planning-routine", "planning-hard", "evaluation",
+    "diagnosis", "batch",
+})
+ROUTINE_PURPOSES = frozenset({
+    "chat", "summary", "planning-routine",
+})
+HIGH_PRIORITY_PURPOSES = frozenset({
+    "planning-hard", "diagnosis",
 })
 _PURPOSE_TEMPERATURES = {
     "planning": 0.1,
+    "planning-routine": 0.1,
+    "planning-hard": 0.1,
     "evaluation": 0.0,
     "diagnosis": 0.0,
     "summary": 0.2,
+}
+# Output ceilings are intentionally much smaller than a provider's generic
+# maximum for compact machine jobs. An explicit caller limit still wins.
+PURPOSE_MAX_TOKENS: Dict[str, int] = {
+    "chat": 1800,
+    "summary": 700,
+    "planning-routine": 1800,
+    "planning-hard": 3200,
+    "planning": 2600,       # backwards-compatible injected callers
+    "evaluation": 550,
+    "diagnosis": 850,
+    "batch": 2200,
+}
+WORKLOAD_POLICY = {
+    "routine": {
+        "role": ROLE_CHAT,
+        "purposes": sorted(ROUTINE_PURPOSES),
+        "description": "Ollama-first: chat, summaries and small plans",
+    },
+    "hard": {
+        "role": ROLE_AGENT,
+        "purposes": ["planning-hard", "evaluation", "diagnosis", "batch-*"],
+        "description": "NIM-first, then configured GPT, then Ollama",
+    },
+    "token_limits": dict(PURPOSE_MAX_TOKENS),
 }
 _MAX_PROVIDER_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_PROVIDER_STREAM_BYTES = 16 * 1024 * 1024
@@ -123,6 +152,20 @@ _MAX_PROVIDER_STREAM_LINE_BYTES = 1024 * 1024
 
 def _structured_purpose(purpose: str) -> bool:
     return purpose in STRUCTURED_PURPOSES or purpose.startswith("batch-")
+
+
+def role_for_purpose(purpose: str, default: str = ROLE_AGENT) -> str:
+    """Map trusted internal jobs onto the routine or hard-work lane."""
+    return ROLE_CHAT if purpose in ROUTINE_PURPOSES else default
+
+
+def purpose_token_limit(purpose: str, provider_limit: int = 0) -> int:
+    """Bound output tokens by job while respecting a tighter provider cap."""
+    key = "batch" if purpose.startswith("batch-") else purpose
+    job_limit = PURPOSE_MAX_TOKENS.get(key, 0)
+    if provider_limit and job_limit:
+        return min(provider_limit, job_limit)
+    return provider_limit or job_limit
 
 
 def _safe_usage(value: Any) -> Dict[str, int]:
@@ -159,7 +202,7 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "timeout": 120.0,
         "cooldown_s": 5.0,
         "structured_outputs": False,
-        "note": "Private, free, no quota — the fallback that always works.",
+        "note": "Routine lane: private chat, summaries and small plans; terminal fallback for hard work.",
     },
     "nim": {
         "label": "NVIDIA NIM",
@@ -171,7 +214,7 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "timeout": 240.0,
         "cooldown_s": 20.0,
         "structured_outputs": True,
-        "note": "Agent. Purpose-aware JSON mode, pacing, and automatic failover.",
+        "note": "Hard-work primary. Purpose-aware JSON, quota pacing, GPT/Ollama hand-off.",
     },
     "gpt": {
         "label": "GPT (OpenAI-compatible)",
@@ -183,7 +226,7 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "timeout": 240.0,
         "cooldown_s": 15.0,
         "structured_outputs": True,
-        "note": "Chat. Takes over as agent when NIM is rate-limited.",
+        "note": "Credentialed hard-work fallback after NIM; skipped cleanly when no key is set.",
     },
 }
 
@@ -783,6 +826,7 @@ class ProviderState:
         self.name = name
         self.rpm = rpm
         self._clock = clock
+        self._lock = threading.RLock()
         self._window: Deque[float] = deque()
         self.cooldown_until = 0.0
         self.status = ST_AVAILABLE
@@ -818,14 +862,18 @@ class ProviderState:
             self._window.popleft()
 
     def used_in_window(self) -> int:
-        now = self._clock()
-        self._trim(now)
-        return len(self._window)
+        with self._lock:
+            now = self._clock()
+            self._trim(now)
+            return len(self._window)
 
     def budget_left(self) -> int:
-        if self.rpm <= 0:
-            return 10 ** 6
-        return max(0, self.rpm - self.used_in_window())
+        with self._lock:
+            if self.rpm <= 0:
+                return 10 ** 6
+            now = self._clock()
+            self._trim(now)
+            return max(0, self.rpm - len(self._window))
 
     def soft_cap(self) -> int:
         """Where we STOP spending and start saving (rpm minus the reserve)."""
@@ -835,22 +883,35 @@ class ProviderState:
 
     def seconds_until_slot(self) -> float:
         """Seconds until the oldest request leaves the window (0 if room)."""
-        now = self._clock()
-        self._trim(now)
-        if self.rpm <= 0 or len(self._window) < self.rpm:
-            return 0.0
-        return max(0.0, 60.0 - (now - self._window[0]))
+        with self._lock:
+            now = self._clock()
+            self._trim(now)
+            if self.rpm <= 0 or len(self._window) < self.rpm:
+                return 0.0
+            return max(0.0, 60.0 - (now - self._window[0]))
 
     def reserve(self) -> bool:
-        """Take one request slot. False = local budget exhausted."""
-        if self.rpm <= 0:
+        """Atomically take one request slot (kept for router compatibility)."""
+        with self._lock:
+            now = self._clock()
+            if self.rpm <= 0:
+                return True
+            self._trim(now)
+            if len(self._window) >= self.rpm:
+                return False
+            self._window.append(now)
             return True
-        now = self._clock()
-        self._trim(now)
-        if len(self._window) >= self.rpm:
-            return False
-        self._window.append(now)
-        return True
+
+    def begin_call(self) -> bool:
+        """Atomically take an RPM slot and record one provider attempt."""
+        with self._lock:
+            now = self._clock()
+            if not self.reserve():
+                return False
+            self.total_calls += 1
+            self.last_call_ts = time.time()
+            self.last_call_clock = now
+            return True
 
     # -- state ------------------------------------------------------------
     def auth_block_s(self) -> float:
@@ -1127,8 +1188,8 @@ class Router:
     def chain(self, role: str) -> List[str]:
         """Ordered provider names for a role: primary -> named fallbacks.
 
-        EXPLICIT only. Agent: NIM -> gpt -> local. Chat: gpt -> nim ->
-        local. A provider that is configured but not named in the role's
+        EXPLICIT only. Hard-work agent: NIM -> GPT -> local. Routine chat:
+        local -> GPT -> NIM by default. A provider that is configured but not named in the role's
         fallback list can still be SELECTED as the primary — it just never
         appears in a chain by itself, so adding a provider (or a catalog
         entry) can never silently change who builds.
@@ -1141,11 +1202,10 @@ class Router:
         for name in self.fallbacks(role):
             if name in self.specs and name not in order:
                 order.append(name)
-        # The LOCAL model is the terminal fallback and cannot be removed from
-        # a chain: it is the only provider that cannot lose a key, run out of
-        # quota or answer with a 5xx. Everything else is explicit — but if
-        # NIM is rate-limited and no GPT is configured, Ollama takes over
-        # without anyone having to configure that.
+        # LOCAL cannot be removed from a chain: it is the only provider that
+        # cannot lose a key or hosted quota. It is first for routine work and
+        # terminal for the default hard-work route. If NIM fails and no GPT
+        # key exists, Ollama therefore takes over without extra configuration.
         if "local" in self.specs and "local" not in order:
             order.append("local")
         return order
@@ -1277,6 +1337,7 @@ class Router:
 
     def _stream_call(self, spec: ProviderSpec,
                      messages: List[Dict[str, str]], model: str,
+                     purpose: str,
                      temperature: Optional[float] = None):
         """Stream one provider call. Raises ProviderError before the first
         token if the provider cannot serve it at all."""
@@ -1292,14 +1353,16 @@ class Router:
         if spec.key:
             headers["Authorization"] = "Bearer " + spec.key
         temp = spec.temperature if temperature is None else temperature
+        mt = purpose_token_limit(purpose, spec.max_tokens)
         if spec.kind == KIND_OLLAMA:
+            options: Dict[str, Any] = {"temperature": temp}
+            if mt:
+                options["num_predict"] = mt
             body: Dict[str, Any] = {"model": model, "messages": messages,
-                                    "stream": True,
-                                    "options": {"temperature": temp}}
+                                    "stream": True, "options": options}
         else:
             body = {"model": model, "messages": messages,
                     "stream": True, "temperature": temp}
-            mt = spec.max_tokens
             if mt:
                 body["max_tokens"] = mt
         stream = self._transport.get("stream") or self._stream_http
@@ -1386,7 +1449,7 @@ class Router:
                     == "skip":
                 attempts.append({"provider": name, "error": "pacing"})
                 continue
-            if not state.reserve():
+            if not state.begin_call():
                 state.mark_error(ERR_RATE_LIMIT,
                                  "local RPM budget exhausted (%d/min)"
                                  % spec.rpm)
@@ -1395,14 +1458,11 @@ class Router:
                             "roles": self.role_snapshot(),
                             "note": "budget exhausted"})
                 continue
-            state.total_calls += 1
-            state.last_call_ts = time.time()
-            state.last_call_clock = self._clock()
             first: Optional[str] = None
             selected_model = self.model_for(role, name)
             try:
                 stream = self._stream_call(
-                    spec, messages, selected_model, temperature)
+                    spec, messages, selected_model, purpose, temperature)
                 for token in stream:
                     first = token
                     break
@@ -1478,17 +1538,20 @@ class Router:
             temp = _PURPOSE_TEMPERATURES.get(purpose, spec.temperature)
         else:
             temp = temperature
+        mt = max_tokens or purpose_token_limit(purpose, spec.max_tokens)
         if spec.kind == KIND_OLLAMA:
+            options: Dict[str, Any] = {"temperature": temp}
+            if mt:
+                options["num_predict"] = mt
             body: Dict[str, Any] = {
                 "model": model, "messages": messages, "stream": False,
-                "options": {"temperature": temp},
+                "options": options,
             }
         else:
             body = {"model": model, "messages": messages,
                     "stream": False, "temperature": temp}
             if spec.structured_outputs and _structured_purpose(purpose):
                 body["response_format"] = {"type": "json_object"}
-            mt = max_tokens or spec.max_tokens
             if mt:
                 body["max_tokens"] = mt
         try:
@@ -1538,10 +1601,9 @@ class Router:
         safety ceiling, not a claim about NVIDIA's current quota. A 429 still
         wastes a request, so a limit is a ceiling to stay under:
 
-          * a RESERVE (25% by default) is held back, so a build never eats
-            the entire allowance of the minute;
-          * while inside the reserve, a request is routed around to the
-            fallback if one is usable (the plan continues either way);
+          * a RESERVE (25% by default) is held for complex plans and repairs;
+          * evaluations/batches inside that reserve route to a fallback when
+            one is usable, while priority work may spend to the hard ceiling;
           * if this is the only option left, it CHILLS for a bounded moment
             instead of hammering — and only calls when the window has room;
           * consecutive calls to the same provider keep a minimum spacing.
@@ -1565,9 +1627,10 @@ class Router:
                         "chill_s": round(wait, 1), "purpose": purpose,
                         "budget_left": 0, "roles": self.role_snapshot()})
             return "skip"
-        if used >= state.soft_cap():
-            # Inside the reserve: let a fallback absorb the work and keep the
-            # remaining allowance for whatever comes next.
+        if used >= state.soft_cap() and purpose not in HIGH_PRIORITY_PURPOSES:
+            # Inside the reserve: lower-priority evaluation/batch work moves to
+            # a fallback. Complex plans and failure repairs may use the held
+            # slots up to the hard ceiling — this is what the reserve is for.
             if self._has_candidate(chain, index):
                 state.paced_skips += 1
                 self._emit({"type": "provider.paced", "provider": name,
@@ -1612,7 +1675,7 @@ class Router:
                     == "skip":
                 attempts.append({"provider": name, "error": "pacing"})
                 continue
-            if not state.reserve():
+            if not state.begin_call():
                 state.mark_error(ERR_RATE_LIMIT,
                                  "local RPM budget exhausted (%d/min)" % spec.rpm)
                 attempts.append({"provider": name, "error": "rpm_budget"})
@@ -1620,9 +1683,6 @@ class Router:
                             "roles": self.role_snapshot(),
                             "note": "budget exhausted"})
                 continue
-            state.total_calls += 1
-            state.last_call_ts = time.time()
-            state.last_call_clock = self._clock()
             selected_model = self.model_for(role, name)
             try:
                 text, response = self._call(
@@ -2130,12 +2190,16 @@ def _default_roles(specs: Dict[str, ProviderSpec]) -> Dict[str, Dict[str, str]]:
     chat_provider = _env_first("NEX_CHAT_PROVIDER", "NEX_PLANNER_PROVIDER")
     agent_provider = _env_first("NEX_AGENT_PROVIDER", "NEX_BUILDER_PROVIDER")
     if not chat_provider:
-        chat_provider = "gpt" if (specs.get("gpt") and
-                                  specs["gpt"].configured and
-                                  specs["gpt"].key) else "local"
+        # Routine work should not spend hosted requests just because a key is
+        # present. Operators can still select a cloud routine primary.
+        chat_provider = "local"
     if not agent_provider:
-        agent_provider = "nim" if (specs.get("nim") and specs["nim"].key) \
-            else "local"
+        # Keep the preferred route stable even before credentials are entered.
+        # Unconfigured providers cost no request and are skipped, so this is
+        # NIM -> configured GPT -> Ollama today and automatically activates NIM
+        # when its key is added later through Settings (no second routing edit).
+        agent_provider = "nim" if "nim" in specs else (
+            "gpt" if "gpt" in specs else "local")
     roles = {
         ROLE_CHAT: {
             "provider": chat_provider,

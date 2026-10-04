@@ -336,6 +336,7 @@ def plan_to_graph(plan: Dict[str, Any], registry,
 def model_driven_planner(goal: str, registry,
                          llm: Optional[Callable] = None,
                          max_catalog: int = 80,
+                         purpose: str = "planning",
                          note: str = "",
                          feedback: Optional[List[str]] = None,
                          quality_brief: str = "",
@@ -349,6 +350,8 @@ def model_driven_planner(goal: str, registry,
     returns its empty/partial graph plus the plan, preserving validation
     findings rather than silently substituting unrelated work.
 
+    `purpose` is a trusted internal routing label (`planning-routine` or
+    `planning-hard` in normal runs), never copied from user text.
     `note` is guidance for a RE-PLAN (what the previous attempt taught).
     `feedback` is a list of concrete findings to address.
     `quality_brief` is a deterministic, live-catalog production contract for
@@ -384,7 +387,7 @@ def model_driven_planner(goal: str, registry,
         {"role": "user", "content": user_msg},
     ]
     try:
-        reply = call_llm(llm, messages, "planning")
+        reply = call_llm(llm, messages, purpose)
     except Exception:  # noqa: BLE001
         return TaskGraph(), None
     if not reply or not isinstance(reply, str):

@@ -56,6 +56,7 @@ from agent.quality import (
     planning_brief as quality_planning_brief,
     profile_for_goal,
 )
+from agent.workload import planning_purpose
 from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING, WAITING,
 )
@@ -86,6 +87,10 @@ DEFAULT_MAX_STEPS = _env_int("NEX_MAX_STEPS", 64)
 DEFAULT_MAX_REPLANS = _env_int("NEX_MAX_REPLANS", 3)
 DEFAULT_MAX_QUALITY_PASSES = _env_int("NEX_MAX_QUALITY_PASSES", 1)
 DEFAULT_MAX_PRODUCTION_STAGES = _env_int("NEX_MAX_PRODUCTION_STAGES", 8)
+# A model evaluation after every dependency wave burns hosted RPM without
+# adding value when a validated plan is progressing normally. Evaluate at a
+# bounded checkpoint, and immediately on stalls/failures.
+DEFAULT_EVAL_EVERY_STEPS = max(1, _env_int("NEX_EVAL_EVERY_STEPS", 6))
 DEFAULT_BUDGET_S = _env_float("NEX_RUN_BUDGET_S", 1800.0)
 DEFAULT_APPROVAL_TIMEOUT_S = _env_float("NEX_APPROVAL_TIMEOUT_S", 600.0)
 
@@ -200,6 +205,7 @@ class AgentRun:
                  max_replans: int = DEFAULT_MAX_REPLANS,
                  max_quality_passes: int = DEFAULT_MAX_QUALITY_PASSES,
                  max_production_stages: int = DEFAULT_MAX_PRODUCTION_STAGES,
+                 eval_every_steps: int = DEFAULT_EVAL_EVERY_STEPS,
                  budget_s: float = DEFAULT_BUDGET_S,
                  on_summary: Optional[Callable] = None):
         self.run_id = run_id
@@ -213,6 +219,7 @@ class AgentRun:
         self.max_quality_passes = max(0, max_quality_passes)
         self.max_production_stages = max(
             1, min(max_production_stages, len(PRODUCTION_STAGES)))
+        self.eval_every_steps = max(1, int(eval_every_steps))
         self.budget_s = budget_s
         self.on_summary = on_summary      # (run, text) -> None
         self._stop = threading.Event()
@@ -224,8 +231,11 @@ class AgentRun:
         self.report: Dict[str, Any] = {}
         self.started_at = time.time()
         self._steps_executed = 0
+        self._steps_at_last_eval = 0
+        self._failures_at_last_eval = 0
         self._step_budget_hit = False
         self._replans = 0
+        self._evaluations = 0
         self._quality_passes = 0
         self._quality_profile = profile_for_goal(goal)
         self._program_active = is_large_game_goal(goal)
@@ -273,6 +283,7 @@ class AgentRun:
         self._emit("run.phase", phase="planning",
                    detail="Deciding how to reach the goal")
         self.graph = self._make_plan()
+        self._failures_at_last_eval = len(self.context.failures)
         if not self.graph.all():
             report = self._blocked_report()
             return self._finish(report)
@@ -314,6 +325,11 @@ class AgentRun:
                         break
                 elif not progressed:
                     break   # nothing more we can do
+                continue
+            # A validated plan that is progressing does not need a hosted
+            # judgement after every dependency wave. Check at a bounded step
+            # interval, or immediately when new failures appear.
+            if not self._evaluation_due():
                 continue
             verdict = self._evaluate()
             if self._stop.is_set():
@@ -358,10 +374,19 @@ class AgentRun:
                 self.goal, self._program_stage, registry))
         return "\n\n".join(p for p in parts if p)
 
+    def _plan_purpose(self, registry: Any) -> str:
+        return planning_purpose(
+            self.goal,
+            game_production=bool(self._quality_profile.active),
+            large_program=self._program_active,
+            registry=registry,
+        )
+
     def _make_plan(self) -> TaskGraph:
         reg = self.manager.registry()
         graph, model_plan = model_driven_planner(
             self.goal, reg, llm=self.llm,
+            purpose=self._plan_purpose(reg),
             note=self._eval_note,
             quality_brief=self._planning_brief(reg),
             id_prefix=("p0_" if self._program_active else ""))
@@ -613,6 +638,22 @@ class AgentRun:
 
     # ----- recovery ------------------------------------------------------------
 
+    def _retry_is_safe(self, task: Task) -> bool:
+        """Only repeat a call automatically when live policy says read-only.
+
+        A timed-out mutation may have succeeded upstream before its reply was
+        lost. Retrying it could duplicate an asset, purchase, publish, delete,
+        or code execution. Server-provided idempotent hints are untrusted and
+        cannot downgrade that ambiguity.
+        """
+        reg = self.manager.registry()
+        tv = reg.by_name("%s.%s" % (task.server, task.tool)) \
+            if task.server and task.tool else None
+        if tv is None and task.tool:
+            tv = reg.by_name(task.tool)
+        return bool(tv is not None and tv.capability
+                    and tv.capability.read_only)
+
     def _attempt(self, task: Task) -> Optional[Dict[str, Any]]:
         """One try at calling the task's tool with resolved args.
 
@@ -657,12 +698,24 @@ class AgentRun:
             return "refused: " + str(outcome.get(
                 "refused", outcome.get("needs_confirmation", "")))
 
-        # A. retry unchanged (transient error, within budget)
-        if _is_transient(error) and not repeated \
-                and task.attempts < task.max_attempts:
+        # A. retry unchanged only when duplicate execution is structurally
+        # safe. A timeout on a mutating tool has an UNKNOWN outcome: the call
+        # may have completed before the response was lost.
+        transient = _is_transient(error)
+        if transient and not self._retry_is_safe(task):
+            guarded = ("%s; outcome is unknown and Nex did not automatically "
+                       "repeat the non-read-only MCP call" % error)
+            self.context.record_failure(task.name, task.tool, guarded)
+            self.graph.mark_failed(task.id, guarded, sig)
+            self._emit("run.tool", step_id=task.id, tool=task.tool,
+                       server=task.server, phase="error",
+                       preview="unknown outcome — unsafe retry prevented")
+            self._emit("run.step", step=task.to_public())
+            return
+        if transient and not repeated and task.attempts < task.max_attempts:
             self._emit("run.tool", step_id=task.id, tool=task.tool,
                        server=task.server, phase="retry",
-                       preview="transient error — retrying")
+                       preview="transient read-only error — retrying")
             outcome = self._attempt(task)
             if outcome is None:
                 self.graph.mark_failed(
@@ -750,9 +803,22 @@ class AgentRun:
 
     # ----- evaluation ---------------------------------------------------------
 
+    def _evaluation_due(self) -> bool:
+        if self.llm is None:
+            return False
+        if len(self.context.failures) > self._failures_at_last_eval:
+            return True
+        return (self._steps_executed - self._steps_at_last_eval
+                >= self.eval_every_steps)
+
     def _evaluate(self) -> Optional[Dict[str, Any]]:
         if self.llm is None:
             return None
+        # Advance the checkpoint even when the provider is temporarily down;
+        # fallback/recovery belongs to the router, not a tight evaluation loop.
+        self._steps_at_last_eval = self._steps_executed
+        self._failures_at_last_eval = len(self.context.failures)
+        self._evaluations += 1
         self._emit("run.phase", phase="evaluating",
                    detail="Checking progress against the goal")
         parts = [
@@ -891,6 +957,7 @@ class AgentRun:
         reg = self.manager.registry()
         graph, _ = model_driven_planner(
             self.goal, reg, llm=self.llm,
+            purpose="planning-hard",
             note=("The previous production stage completed. Preserve and "
                   "reuse these results; plan only the newly assigned stage:\n"
                   + (summary or "(no reusable outputs)")),
@@ -989,6 +1056,7 @@ class AgentRun:
         reg = self.manager.registry()
         graph, _ = model_driven_planner(
             self.goal, reg, llm=self.llm,
+            purpose=self._plan_purpose(reg),
             note=("Previous attempt: %s\nWhat already succeeded (do NOT "
                   "repeat it):\n%s\nWhat to change: %s"
                   % (verdict.get("reason", ""), summary or "(nothing)",
@@ -1110,6 +1178,8 @@ class AgentRun:
             "reasons": out_reasons,
             "missing": missing,
             "replans": self._replans,
+            "model_evaluations": self._evaluations,
+            "evaluation_interval_steps": self.eval_every_steps,
             "quality_passes": self._quality_passes,
             "quality": quality,
             "production_program": program,

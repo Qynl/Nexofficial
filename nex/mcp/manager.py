@@ -71,6 +71,23 @@ _METADATA_HOSTS = {
 _MAX_CONFIG_BYTES = 1024 * 1024
 _MAX_STDIO_ARGS = 128
 _MAX_STDIO_ARG_CHARS = 8192
+_MAX_TOOL_ERROR_CHARS = 1200
+
+
+def _mcp_tool_error(result: Any) -> Optional[str]:
+    """Turn MCP ``isError: true`` content into bounded untrusted error data."""
+    if not isinstance(result, dict) or result.get("isError") is not True:
+        return None
+    parts: List[str] = []
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content[:12]:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text[:400])
+    detail = " | ".join(parts)[:_MAX_TOOL_ERROR_CHARS]
+    return detail or "the MCP tool returned isError=true"
 
 
 def _norm_host(host: str) -> str:
@@ -755,6 +772,17 @@ class ServerManager:
                               detail=str(exc)[:300], context=audit_context)
             return {"error": str(exc)}
         result = resp.get("result") if isinstance(resp, dict) else resp
+        tool_error = _mcp_tool_error(result)
+        if tool_error is not None:
+            # JSON-RPC succeeded, but MCP defines isError=true as a failed tool
+            # execution. Never let it become success/evidence in the agent.
+            self.audit.record(
+                "tool_error", server=server, tool=tool, args=args, ok=False,
+                detail="MCP tool returned isError=true",
+                duration_ms=round((time.monotonic() - t0) * 1000),
+                context=audit_context)
+            return {"error": "MCP tool reported an error: " + tool_error,
+                    "tool_error": True}
         output_errors = validate_tool_output(
             tool_def.get("outputSchema"), result)
         if output_errors:

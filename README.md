@@ -120,13 +120,13 @@ There is no `pip install`, `npm install`, bundler, migration command, or fronten
 - local Ollama, NVIDIA NIM, or another OpenAI-compatible model endpoint; and
 - MCP servers for **every** real-world action.
 
-Choose a brain—or do nothing and use the local default:
+Choose a workload route—or do nothing and use the local default:
 
 ```bash
 # Local-only
 export OLLAMA_MODEL=gpt-oss:20b
 
-# NVIDIA NIM as the agent brain (chat can remain local)
+# NVIDIA NIM for hard work; routine chat/plans remain local
 export NVIDIA_API_KEY=nvapi-your-key
 export NEX_AGENT_PROVIDER=nim
 export NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
@@ -134,7 +134,7 @@ export NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
 
 Then:
 
-1. Open **Settings → Model** and verify the **Model flight plan**.
+1. Open **Settings → Model** and verify the **Smart workload scheduler**.
 2. Open **Capabilities → Add server**.
 3. Connect an HTTP MCP endpoint or a local stdio MCP command.
 4. Review the discovered tools and classifications.
@@ -357,10 +357,15 @@ References resolve recursively inside nested objects and arrays, but only after 
 
 A failed call moves through a fixed ladder:
 
-1. retry a transient transport failure;
+1. retry a transient transport failure **only for policy-classified read-only calls**;
 2. apply a deterministic schema-informed argument fix when possible;
 3. ask one tightly scoped model diagnosis to repair arguments or select a real alternative tool;
 4. stop and report the failure honestly.
+
+A timeout after a mutation has an ambiguous outcome: the server may have applied
+the change before its reply was lost. Nex now refuses to repeat that call
+automatically, marks the outcome unknown, and requires later inspection/replan
+instead of risking duplicate assets, purchases, publishes, or deletes.
 
 Retries, replans, steps, quality passes, approval waits, and wall time all have budgets. Cancellation works while a run is active. Dependency failure marks downstream steps skipped rather than replaying the whole project.
 
@@ -505,28 +510,36 @@ The Capabilities view connects/disconnects/reconnects/removes servers, exposes l
 
 Streaming markdown, fenced code, copy/listen/regenerate/edit-and-resend actions, search, automatic titles, SQLite persistence, and browser-native speech all run without a frontend framework.
 
-### Model flight plan
+### Smart workload scheduler
 
 Settings → Model is an operations panel rather than three disconnected API-key
-forms. It edits Chat and Agent primaries, exact role models, ordered fallbacks,
+forms. Nex now splits model work into two lanes:
+
+| Lane | Default route | Jobs |
+| --- | --- | --- |
+| **Routine** | **Ollama → GPT → NIM** | normal chat, final summaries, small MCP plans |
+| **Hard work** | **NIM → configured GPT → Ollama** | complex production plans, evaluation, diagnosis, bounded batches |
+
+The split is deterministic and code-owned; user text is not accepted as a
+direct provider selector. By default, a small plan stays private and costs no
+hosted round while Ollama is healthy. A
+production-grade game request is sent to NIM. If NIM fails, GPT takes over only
+when a key is configured; otherwise Ollama receives the same model job directly.
+No completed MCP action is replayed and no plan is merged or regenerated during
+a provider hand-off.
+
+The panel edits both lane primaries, exact primary models, ordered fallbacks,
 provider defaults, local RPM ceilings, and structured-output support. Live cards
-show the provider/model that really answered, last agent job, calls, tokens, and
+show the provider/model that really answered, last job, calls, tokens, and
 headroom. Dynamic provider/model text is inserted as text—not executable HTML.
 
 ## Model providers
 
-Nex separates **conversation** from **operation**:
-
-| Role | What it does | Typical call shape |
-| --- | --- | --- |
-| **Chat brain** | talks with the operator and decides whether a request should become an autonomous run | streaming, expressive, low frequency |
-| **Agent brain** | plans, evaluates, diagnoses, replans, and writes the evidence report | non-streaming, structured, repeated |
-
-Each role owns an explicit primary provider, exact model, and ordered fallback
+Each lane owns an explicit primary provider, exact model, and ordered fallback
 chain. Local Ollama, NVIDIA NIM, OpenAI, and custom OpenAI-compatible endpoints
-can be mixed. The **Model flight plan** in Settings shows both routes, the model
-actually serving now, recent job purpose, token counts, success counts, and
-remaining local RPM headroom.
+can be mixed. The shipped defaults deliberately keep routine traffic local while
+using the strongest configured cloud route for difficult work: NIM first, GPT
+when NIM is absent or unavailable, and Ollama as the guaranteed local safety net.
 
 A model produces text. It never receives an OS handle, shell, filesystem, or
 MCP transport. Provider failover can change the brain serving a request; it
@@ -539,19 +552,17 @@ operational contract designed for long autonomous runs.
 
 ```mermaid
 graph LR
-    J[Agent job] --> T{trusted purpose tag}
-    T -->|planning| P[temperature 0.1 + JSON mode]
-    T -->|evaluation| E[temperature 0.0 + JSON mode]
-    T -->|diagnosis| D[temperature 0.0 + JSON mode]
-    T -->|summary| S[normal text response]
-    P --> N[NVIDIA NIM]
-    E --> N
-    D --> N
-    S --> N
-    N -->|answer| V[finish reason + shape checks]
-    N -->|429 / timeout / 5xx / bad output| F[exact fallback chain]
-    V --> U[usage + model telemetry]
-    F --> U
+    J[Trusted internal job] --> T{workload scheduler}
+    T -->|chat / summary / small plan| L[Routine lane · Ollama first]
+    T -->|complex plan / evaluation / diagnosis| N[Hard lane · NVIDIA NIM]
+    N -->|failure or protected reserve| G{GPT key configured?}
+    G -->|yes| GPT[GPT fallback]
+    G -->|no or GPT fails| O[Ollama takeover]
+    L -->|local unavailable| RF[configured routine fallbacks]
+    N --> V[finish reason + JSON shape checks]
+    GPT --> V
+    O --> V
+    V --> U[bounded usage + model telemetry]
 ```
 
 ### What Nex now does for NIM
@@ -561,10 +572,11 @@ model placed in the real request body—not merely a label in Settings. If NIM
 falls back to GPT or Ollama, that provider receives its own model ID. A NIM
 model name is never accidentally sent to a different backend.
 
-**2. It identifies the job without reading tea leaves.**  The agent loop passes
-trusted purpose tags: `planning`, `evaluation`, `diagnosis`, and `summary`.
-Those tags come from code, not user prompt text. They drive deterministic
-sampling and appear in the flight telemetry.
+**2. It identifies and sizes the job without reading tea leaves.**  The agent
+loop passes trusted purpose tags such as `planning-routine`, `planning-hard`,
+`evaluation`, `diagnosis`, and `summary`. Those tags come from code, not user
+prompt text. They select the routine/hard lane, drive sampling and output-token
+ceilings, and appear in flight telemetry.
 
 **3. It asks for machine output as machine output.**  NIM and GPT default to
 OpenAI-compatible `response_format: {"type":"json_object"}` for plans,
@@ -587,10 +599,13 @@ and aggregate prompt/completion token counts. It stores none of the prompt or
 answer text in telemetry.
 
 **7. It protects scarce calls before a 429.**  `NEX_NIM_RPM=40` is Nex’s
-configurable local safety ceiling—not a promise about NVIDIA’s quota. A sliding
-60-second window, minimum spacing, and a 25% headroom reserve keep an agent run
-from spending every available request. Hosted NIM limits can vary by account,
-model, endpoint, and load.
+configurable local safety ceiling—not a promise about NVIDIA’s quota. All
+concurrent runs share one atomic sliding 60-second budget. Routine work never
+reaches NIM while Ollama is healthy. Normal progress evaluation is checkpointed
+(default: every six completed MCP steps) instead of called after every wave.
+A 25% reserve moves lower-priority evaluation/batch jobs to a fallback while
+allowing complex plans and repairs to spend the protected slots when needed.
+Hosted limits can still vary by account, model, endpoint, and load.
 
 **8. It obeys real recovery signals.**  `Retry-After` works as either seconds or
 an HTTP date. A full local window waits briefly when useful, otherwise hands the
@@ -608,6 +623,12 @@ server, are stored `0600`, and are bound to the host for which they were entered
 Changing the base URL makes the key go dark until it is re-entered. Redirects
 may not cross hosts. Metadata/link-local targets, URL credentials, oversized
 responses, oversized stream lines, and unbounded streams are rejected.
+
+**11. It budgets tokens for the job, not the provider maximum.**  Evaluations
+are capped at 550 output tokens, diagnoses at 850, summaries at 700, routine
+plans at 1,800, and hard plans at 3,200 by default. OpenAI-compatible providers
+receive `max_tokens`; Ollama receives the equivalent `num_predict`. A tighter
+operator/provider cap always wins.
 
 NVIDIA documents hosted and self-hosted NIM chat through the OpenAI-compatible
 `/v1/chat/completions` endpoint and supports model discovery at `/v1/models`.
@@ -630,25 +651,29 @@ NEX_AGENT_PROVIDER=local
 NEX_AGENT_MODEL=gpt-oss:20b
 ```
 
-#### Local chat + NIM production agent
+#### Recommended: local routine + NIM hard work
 
 ```dotenv
 NVIDIA_API_KEY=nvapi-your-key
 NEX_CHAT_PROVIDER=local
 NEX_CHAT_MODEL=gpt-oss:20b
+NEX_CHAT_FALLBACKS=gpt,nim
 NEX_AGENT_PROVIDER=nim
 NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
-NEX_AGENT_FALLBACKS=local
+NEX_AGENT_FALLBACKS=gpt,local
 NEX_NIM_RPM=40
 ```
 
-#### Cloud planning + NIM agent + local last resort
+No OpenAI key is required. `gpt` is skipped without a key, so a NIM failure
+hands the job directly to Ollama.
+
+#### Local routine + NIM → GPT → Ollama hard-work chain
 
 ```dotenv
 OPENAI_API_KEY=your-openai-key
 NVIDIA_API_KEY=nvapi-your-key
-NEX_CHAT_PROVIDER=gpt
-NEX_CHAT_FALLBACKS=nim,local
+NEX_CHAT_PROVIDER=local
+NEX_CHAT_FALLBACKS=gpt,nim
 NEX_AGENT_PROVIDER=nim
 NEX_AGENT_FALLBACKS=gpt,local
 ```
@@ -678,9 +703,9 @@ All settings are optional unless your chosen model provider requires a key.
 | --- | ---: | --- |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Local Ollama endpoint |
 | `OLLAMA_MODEL` | provider default | Local model |
-| `NEX_CHAT_PROVIDER` / `NEX_AGENT_PROVIDER` | `local` | Primary provider per role |
-| `NEX_CHAT_MODEL` / `NEX_AGENT_MODEL` | provider default | Model per role |
-| `NEX_CHAT_FALLBACKS` / `NEX_AGENT_FALLBACKS` | configured chain | Comma-separated role failovers |
+| `NEX_CHAT_PROVIDER` / `NEX_AGENT_PROVIDER` | routine: `local`; hard: NIM, else GPT, else local | Primary provider per lane |
+| `NEX_CHAT_MODEL` / `NEX_AGENT_MODEL` | provider default | Primary model per lane |
+| `NEX_CHAT_FALLBACKS` / `NEX_AGENT_FALLBACKS` | routine: `gpt,nim`; hard: `gpt,local` | Comma-separated lane failovers |
 | `NVIDIA_API_KEY` | empty | NVIDIA NIM credential |
 | `OPENAI_API_KEY` | empty | OpenAI-compatible credential |
 | `NEX_PROVIDER_HOSTS` | empty | Optional strict exact-host allowlist for model endpoints |
@@ -696,6 +721,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_MAX_REPLANS` | `3` | Maximum structural replans |
 | `NEX_MAX_QUALITY_PASSES` | `1` | Maximum final evidence/polish passes after game work |
 | `NEX_MAX_PRODUCTION_STAGES` | `8` | Milestone-plan cap for studio-scale game goals |
+| `NEX_EVAL_EVERY_STEPS` | `6` | Successful MCP steps between model evaluation checkpoints; failures evaluate immediately |
 | `NEX_RUN_BUDGET_S` | `1800` | Run wall-clock budget |
 | `NEX_APPROVAL_TIMEOUT_S` | `600` | Approval wait budget |
 | `NEX_HOST` / `NEX_PORT` | `0.0.0.0` / `8787` | HTTP bind address |

@@ -221,7 +221,8 @@ def error_payload(code: str, detail: str = "") -> Dict[str, Any]:
 # Chat pipeline
 # ---------------------------------------------------------------------------
 
-MAX_HISTORY_MESSAGES = 24
+MAX_HISTORY_MESSAGES = 18
+MAX_HISTORY_CHARS = 24 * 1024
 MAX_MESSAGE_CHARS = 4000
 MAX_USER_MESSAGE_CHARS = 32 * 1024
 _DIRECTIVE_BUFFER_LIMIT = 4096
@@ -263,13 +264,28 @@ def _history_messages(cid: str,
         out.append({"role": m["role"], "content": content})
     if not include_last_user and out and out[-1]["role"] == "user":
         out = out[:-1]
-    return out[-MAX_HISTORY_MESSAGES:]
+    # Keep the newest coherent turns under both a message and character cap.
+    # Local context is finite too; carrying 90k chars into every routine chat
+    # makes Ollama slower and leaves less room for the actual answer.
+    kept: List[Dict[str, str]] = []
+    total = 0
+    for item in reversed(out[-MAX_HISTORY_MESSAGES:]):
+        size = len(item["content"])
+        if kept and total + size > MAX_HISTORY_CHARS:
+            break
+        kept.append(item)
+        total += size
+    return list(reversed(kept))
 
 
 def _agent_llm() -> Optional[Callable]:
     def llm(messages: List[Dict[str, str]], purpose: str = "agent") -> str:
-        return ROUTER.chat(_providers.ROLE_AGENT, messages,
-                           purpose=purpose)
+        # Trusted internal purpose tags select a lane; raw user text is never a
+        # provider name/route override. Routine plans/summaries stay local-first,
+        # while difficult planning, evaluation and diagnosis use
+        # NIM -> configured GPT -> Ollama.
+        role = _providers.role_for_purpose(purpose, _providers.ROLE_AGENT)
+        return ROUTER.chat(role, messages, purpose=purpose)
     llm.supports_purpose = True  # type: ignore[attr-defined]
     return llm
 
@@ -1044,6 +1060,7 @@ def _provider_view() -> Dict[str, Any]:
             role: ROUTER.role_model(role) for role in _providers.ROLES
         },
         "catalog": list(_providers.CATALOG),
+        "workload_policy": dict(_providers.WORKLOAD_POLICY),
     }
 
 

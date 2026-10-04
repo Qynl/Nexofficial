@@ -174,6 +174,22 @@ class APITests(unittest.TestCase):
         s, _ = self.req("DELETE", "/api/conversations/%s" % cid)
         expect(s == 404, "double delete must 404")
 
+    def test_model_history_has_message_and_character_budget(self):
+        conversation = server_mod.STORE.create_conversation("history budget")
+        cid = conversation["id"]
+        try:
+            for i in range(30):
+                server_mod.STORE.add_message(
+                    cid, "user" if i % 2 == 0 else "assistant",
+                    ("message-%02d " % i) + ("x" * 1980))
+            history = server_mod._history_messages(cid)
+            self.assertLessEqual(len(history), server_mod.MAX_HISTORY_MESSAGES)
+            self.assertLessEqual(sum(len(m["content"]) for m in history),
+                                 server_mod.MAX_HISTORY_CHARS)
+            self.assertIn("message-29", history[-1]["content"])
+        finally:
+            server_mod.STORE.delete_conversation(cid)
+
     def test_search_filters(self):
         s, c = self.req("POST", "/api/conversations")
         cid = c["conversation"]["id"]
@@ -325,6 +341,12 @@ class APITests(unittest.TestCase):
         expect(any(item.get("provider") == "nim"
                    for item in body.get("catalog", [])),
                "curated NIM starting points must reach settings UI")
+        policy = body.get("workload_policy") or {}
+        expect((policy.get("routine") or {}).get("role") == "chat"
+               and (policy.get("hard") or {}).get("role") == "agent",
+               "routine/hard workload policy must reach settings UI")
+        expect((policy.get("token_limits") or {}).get("evaluation") == 550,
+               "purpose token ceilings must be visible to operators")
 
     def test_provider_patch_rejected_for_bad_shape(self):
         s, body = self.req("POST", "/api/providers",

@@ -105,6 +105,22 @@ class ManagerTests(unittest.TestCase):
         text = out["result"]["content"][0]["text"]
         self.assertEqual(text, "hi")
 
+    def test_mcp_is_error_result_never_becomes_success(self):
+        up = self.mgr.upstream("echo")
+        original = up.call
+        up.call = lambda _tool, _args: {
+            "result": {"isError": True,
+                       "content": [{"type": "text",
+                                    "text": "engine rejected the operation"}]}}
+        try:
+            out = self.mgr.call("echo", "echo", {"text": "hi"})
+        finally:
+            up.call = original
+        self.assertTrue(out.get("tool_error"), out)
+        self.assertIn("engine rejected", out.get("error", ""))
+        self.assertNotIn("result", out)
+        self.assertEqual(self.mgr.audit_entries(1)[0]["kind"], "tool_error")
+
     def test_call_unknown_tool(self):
         out = self.mgr.call("echo", "nope", {})
         self.assertIn("error", out)
@@ -222,7 +238,9 @@ class ManagerTests(unittest.TestCase):
     def test_config_persists(self):
         home = os.environ["NEX_HOME"]
         self.assertTrue(os.path.exists(os.path.join(home, "servers.json")))
-        data = json.load(open(os.path.join(home, "servers.json")))
+        with open(os.path.join(home, "servers.json"),
+                  encoding="utf-8") as handle:
+            data = json.load(handle)
         self.assertIn("echo", json.dumps(data))
 
     def test_valid_persisted_config_reloads(self):
