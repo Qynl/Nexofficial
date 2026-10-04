@@ -51,6 +51,7 @@ export function buildRunCard(message) {
     goal: message.content,
     steps: new Map(),
     phase: null,
+    engineTargets: (message.meta && message.meta.engine_targets) || [],
     waiting: null,
   };
   runCards.set(runId, card);
@@ -129,6 +130,13 @@ function renderCard(card) {
 function updateStatusLine(card) {
   const line = card.lineEl;
   line.innerHTML = '';
+  for (const engine of card.engineTargets || []) {
+    const chip = document.createElement('span');
+    chip.className = 'run-engine-chip';
+    chip.textContent = engine.label || engine.id;
+    chip.title = `Live MCP readiness ${Number(engine.score || 0)}/100`;
+    line.appendChild(chip);
+  }
   if (card.phase && PHASE_LABELS[card.phase]) {
     const chip = document.createElement('span');
     chip.className = 'run-phase-chip';
@@ -160,10 +168,15 @@ export function onRunStarted(ev) {
   const st = store.get();
   if (ev.conversation_id !== st.activeId) return;
   let card = runCards.get(ev.run_id);
-  if (card) return;
+  if (card) {
+    card.engineTargets = ev.engine_targets || [];
+    updateStatusLine(card);
+    return;
+  }
   const el = document.createElement('div');
   card = {
     runId: ev.run_id, el, goal: ev.goal, steps: new Map(), phase: null,
+    engineTargets: ev.engine_targets || [],
   };
   runCards.set(ev.run_id, card);
   renderCard(card);

@@ -45,6 +45,12 @@ class IntentTests(unittest.TestCase):
         self.assertEqual(p.tier, "flagship")
         self.assertIn("performance", p.required_gates)
 
+    def test_unreal_and_roblox_authoring_terms_activate_protocol(self):
+        self.assertTrue(is_game_production_goal(
+            "Compile and fix this Blueprint"))
+        self.assertTrue(is_game_production_goal(
+            "Refactor this Luau RemoteEvent handler"))
+
     def test_discussion_or_runtime_request_does_not_overreach(self):
         self.assertFalse(is_game_production_goal("What makes a game fun?"))
         self.assertFalse(is_game_production_goal("Run the game"))

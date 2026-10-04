@@ -94,6 +94,54 @@ function renderProductionReadiness(data) {
     blockers.textContent = `Hard gaps: ${data.blockers.join(', ')}`;
     el.appendChild(blockers);
   }
+
+  const profiles = data.engines || {};
+  const engineGrid = document.createElement('div');
+  engineGrid.className = 'engine-readiness-grid';
+  for (const id of ['unreal_5_8', 'roblox_studio']) {
+    const profile = profiles[id];
+    if (!profile) continue;
+    engineGrid.appendChild(engineReadinessCard(profile));
+  }
+  if (engineGrid.children.length) el.appendChild(engineGrid);
+}
+
+function engineReadinessCard(profile) {
+  const card = document.createElement('section');
+  card.className = 'engine-readiness-card';
+  card.dataset.ready = profile.ready ? '1' : '0';
+
+  const head = document.createElement('div');
+  head.className = 'engine-readiness-head';
+  const title = document.createElement('strong');
+  title.textContent = profile.label || profile.id;
+  const score = document.createElement('span');
+  score.textContent = `${Number(profile.score || 0)}/100`;
+  head.appendChild(title);
+  head.appendChild(score);
+  card.appendChild(head);
+
+  const checks = document.createElement('div');
+  checks.className = 'engine-readiness-checks';
+  const labels = new Map((profile.requirements || [])
+    .map((item) => [item.id, item.label]));
+  for (const [id, ok] of Object.entries(profile.checks || {})) {
+    const chip = document.createElement('span');
+    chip.dataset.ok = ok ? '1' : '0';
+    const label = labels.get(id) || id.replaceAll('_', ' ');
+    chip.textContent = `${ok ? '✓' : '—'} ${label}`;
+    checks.appendChild(chip);
+  }
+  card.appendChild(checks);
+
+  const note = document.createElement('p');
+  const missing = (profile.blockers || []).join(', ')
+    || 'review optional disciplines';
+  note.textContent = profile.ready
+    ? 'Live MCP coverage supports the engine-specific production loop.'
+    : `Missing hard coverage: ${missing}`;
+  card.appendChild(note);
+  return card;
 }
 
 /* ─── list ───────────────────────────────────────────────────── */
@@ -166,11 +214,19 @@ function serverCard(s) {
   // stats
   const stats = document.createElement('div');
   stats.className = 'server-stats';
-  stats.innerHTML = `
-    <span><b>${s.tools_count ?? 0}</b> tools</span>
-    <span>transport <b>${s.transport}</b></span>
-    ${s.latency_ms != null ? `<span><b>${Math.round(s.latency_ms)}ms</b></span>` : ''}
-    ${s.protocol_version ? `<span>MCP <b>${s.protocol_version}</b></span>` : ''}`;
+  const addStat = (prefix, value, suffix = '') => {
+    const span = document.createElement('span');
+    span.append(document.createTextNode(prefix));
+    const strong = document.createElement('b');
+    strong.textContent = String(value);
+    span.appendChild(strong);
+    if (suffix) span.append(document.createTextNode(suffix));
+    stats.appendChild(span);
+  };
+  addStat('', Number(s.tools_count || 0), ' tools');
+  addStat('transport ', s.transport || 'unknown');
+  if (s.latency_ms != null) addStat('', Math.round(Number(s.latency_ms) || 0), 'ms');
+  if (s.protocol_version) addStat('MCP ', s.protocol_version);
   el.appendChild(stats);
 
   if (s.error || s.last_error) {
@@ -250,9 +306,14 @@ function serverCard(s) {
   toolsWrap.className = 'server-tools';
   const toggle = document.createElement('button');
   toggle.className = 'tools-toggle';
-  toggle.innerHTML = `<span class="run-chev" style="transform:rotate(-90deg)">
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></span>
-    ${s.tools_count ?? 0} tools`;
+  const toggleIcon = document.createElement('span');
+  toggleIcon.className = 'run-chev';
+  toggleIcon.style.transform = 'rotate(-90deg)';
+  toggleIcon.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" '
+    + 'fill="none" stroke="currentColor" stroke-width="2" '
+    + 'stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>';
+  toggle.appendChild(toggleIcon);
+  toggle.append(document.createTextNode(` ${Number(s.tools_count || 0)} tools`));
   const toolsList = document.createElement('div');
   toolsList.className = 'tools-list';
   const inner = document.createElement('div');
@@ -277,7 +338,11 @@ function serverCard(s) {
           inner.innerHTML = '<div style="padding:10px;color:var(--fg-faint);font-size:12px">no tools exposed</div>';
         }
       } catch (err) {
-        inner.innerHTML = `<div class="server-error">${err.message}</div>`;
+        inner.innerHTML = '';
+        const error = document.createElement('div');
+        error.className = 'server-error';
+        error.textContent = err.message;
+        inner.appendChild(error);
       }
     }
   });
@@ -365,9 +430,14 @@ function addServerDialog() {
 
   const form = document.createElement('form');
   form.innerHTML = `
+    <div class="form-note" style="margin-bottom:14px">
+      Nex has first-class readiness profiles for <strong>Unreal Engine 5.8</strong>
+      and <strong>Roblox Studio</strong>. Start the editor's MCP server first,
+      then enter its documented endpoint or command here. Nex never guesses one.
+    </div>
     <div class="field">
       <label>Name <span class="hint">— lowercase, used as the tool namespace</span></label>
-      <input name="name" type="text" placeholder="blender" required
+      <input name="name" type="text" placeholder="unreal_editor" required
              pattern="[a-z0-9][a-z0-9_-]{0,31}" autocomplete="off">
     </div>
     <div class="field">

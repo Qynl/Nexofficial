@@ -57,12 +57,15 @@ _GAME_NOUNS = frozenset({
     "quests", "combat", "platformer", "shooter", "rpg", "puzzle",
     "world", "worlds", "boss", "hud", "menu", "menus", "character",
     "characters", "mechanic", "mechanics", "checkpoint", "arena", "gta",
-    "sandbox", "mmorpg", "mmo", "metroidvania",
+    "sandbox", "mmorpg", "mmo", "metroidvania", "obby", "tycoon",
+    "experience", "roblox", "unreal", "ue5", "blueprint", "blueprints",
+    "luau", "datamodel", "remoteevent", "remotefunction",
 })
 _AUTHORING_WORDS = frozenset({
     "make", "create", "build", "develop", "design", "implement", "add",
     "produce", "prototype", "polish", "upgrade", "improve", "fix", "ship",
-    "author", "craft", "remake", "refactor", "integrate",
+    "author", "craft", "remake", "refactor", "integrate", "compile",
+    "cook", "package", "publish",
 })
 _FLAGSHIP_WORDS = (
     "aaa", "aaa-style", "triple-a", "triple a", "high quality",
@@ -113,13 +116,16 @@ def tool_gates(tool: Any) -> Set[str]:
     if _contains_any(name, (
             "playtest", "run_game", "launch_game", "play_game", "start_pie",
             "pie_start", "play_in_editor", "start_play", "simulate_game",
-            "runtime_session", "start_session")):
+            "runtime_session", "start_session", "play_solo",
+            "start_local_server", "start_server", "start_client",
+            "test_players", "standalone_game")):
         gates.add("playtest")
 
     if _contains_any(name, (
             "screenshot", "screen_grab", "screengrab", "capture_frame",
             "capture_view", "render_preview", "visual_preview",
-            "viewport_capture", "snapshot_view")):
+            "viewport_capture", "snapshot_view", "capture_viewport",
+            "studio_screenshot")):
         gates.add("visual")
 
     if _contains_any(name, (
@@ -135,18 +141,23 @@ def tool_gates(tool: Any) -> Set[str]:
 
     if _contains_any(name, (
             "log", "console_output", "diagnostic", "error_report", "crash",
-            "warning", "runtime_output")):
+            "warning", "runtime_output", "output_log", "message_log",
+            "studio_output", "script_analysis")):
         gates.add("diagnostics")
 
     if _contains_any(name, (
             "profile", "profiler", "performance", "frametime", "frame_time",
-            "fps", "memory_stats", "gpu_stats", "telemetry", "benchmark")):
+            "fps", "memory_stats", "gpu_stats", "telemetry", "benchmark",
+            "unreal_insights", "trace_capture", "stat_unit", "stat_gpu",
+            "microprofiler", "micro_profiler", "script_profiler",
+            "performance_stats", "developer_console")):
         gates.add("performance")
 
     if _contains_any(name, (
             "verify", "validate", "automation_test", "unit_test",
             "integration_test", "functional_test", "acceptance_test",
-            "check_game", "check_asset", "audit_game")):
+            "check_game", "check_asset", "audit_game", "testservice",
+            "test_service", "validate_place", "lint_luau", "gauntlet")):
         gates.add("verification")
     elif category == TEST and "play" not in name and "run_game" not in name:
         gates.add("verification")

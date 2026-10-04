@@ -254,9 +254,15 @@ _ENGINE_TOOLS = {
     "get_console_output": "read", "create_part": "create",
     "insert_model": "create", "set_property": "modify",
     "run_script": "code_execution", "execute_luau": "code_execution",
-    "get_datamodel_tree": "read",
+    "get_datamodel_tree": "read", "instance_tree": "read",
+    "studio_output": "read", "script_analysis": "read",
+    "start_local_server": "test", "start_client": "test",
+    "run_testservice": "test", "validate_place": "test",
+    "create_remote_event": "create",
     # Unreal Engine MCP
     "pie_start": "test", "get_output_log": "read",
+    "asset_registry": "read", "world_outliner": "read",
+    "engine_version": "read", "project_info": "read",
     "spawn_actor": "create", "compile_blueprint": "build",
     "set_actor_property": "modify", "open_level": "modify",
     "create_blueprint": "create", "import_asset": "create",
@@ -276,7 +282,7 @@ _expect(not _bad, "real engine tool names classify correctly: %s" % _bad)
 
 # Starting a playtest must NOT require confirmation (it is the quality path);
 # it is a TEST, and TEST is allowed outright.
-for _n in ("play_solo", "pie_start"):
+for _n in ("play_solo", "pie_start", "start_local_server", "start_client"):
     _c = cap.capability_for_tool({"name": _n})
     _d = policy_mod.authorize("studio", _n, _c)
     _expect(_c.category == "test" and _d.allowed

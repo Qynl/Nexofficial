@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Set
 
+from agent.engines import all_engine_readiness
 from agent.quality import (
     gate_catalog, is_game_production_goal, result_declares_failure, tool_gates,
 )
@@ -28,6 +29,8 @@ _LARGE_SCOPE_TERMS = (
     "full game", "complete game", "entire game", "whole game", "aaa game",
     "triple-a game", "live service", "mmo", "mmorpg", "city sandbox",
     "large-scale game", "large scale game", "commercial game",
+    "full roblox experience", "complete roblox experience",
+    "build a roblox experience", "make a roblox experience",
 )
 _LARGE_GENRES = frozenset({
     "mmorpg", "mmo", "sandbox", "metroidvania", "immersive-sim",
@@ -160,22 +163,29 @@ _MIN_STAGE_EVIDENCE_STEPS = {
 _DISCIPLINES: Dict[str, Sequence[str]] = {
     "world_authoring": (
         "level", "scene", "world", "terrain", "landscape", "map", "actor",
-        "node", "prefab", "streaming", "district", "environment"),
+        "node", "prefab", "streaming", "district", "environment", "workspace",
+        "datamodel", "instance", "part", "worldpartition", "meshterrain", "pcg"),
     "gameplay": (
         "gameplay", "player", "character", "movement", "input", "combat",
-        "weapon", "vehicle", "mission", "quest", "interaction", "physics"),
+        "weapon", "vehicle", "mission", "quest", "interaction", "physics",
+        "blueprint", "luau", "remoteevent", "remotefunction", "humanoid",
+        "replication", "gamefeature"),
     "ai_navigation": (
         "ai", "npc", "behavior", "behaviour", "nav", "path", "perception",
-        "crowd", "traffic", "spawn"),
+        "crowd", "traffic", "spawn", "statetree", "behaviortree",
+        "navmesh", "pathfindingservice"),
     "presentation": (
         "material", "mesh", "texture", "lighting", "shader", "vfx", "fx",
-        "animation", "rig", "audio", "sound", "camera", "cinematic"),
+        "animation", "rig", "audio", "sound", "camera", "cinematic",
+        "niagara", "lumen", "megalights", "nanite", "surfaceappearance"),
     "ui_accessibility": (
         "ui", "hud", "menu", "widget", "subtitle", "accessibility",
-        "localization", "controller", "prompt"),
+        "localization", "controller", "prompt", "umg", "screengui",
+        "guiobject"),
     "data_progression": (
         "save", "load", "persist", "inventory", "economy", "progression",
-        "data", "state", "checkpoint"),
+        "data", "state", "checkpoint", "datastore", "memorystore",
+        "savegame", "gamestate"),
 }
 
 
@@ -208,9 +218,11 @@ def tool_disciplines(tool: Any) -> Set[str]:
     if cap not in {READ, CREATE, MODIFY, BUILD, TEST, CODE_EXECUTION}:
         return set()
     tokens = set(re.findall(r"[a-z0-9]+", name))
+    compact = re.sub(r"[^a-z0-9]", "", name)
     return {
         discipline for discipline, terms in _DISCIPLINES.items()
-        if any((term in tokens if len(term) <= 3 else term in name)
+        if any((term in tokens if len(term) <= 3 else
+                term.replace("_", "") in compact)
                for term in terms)
     }
 
@@ -246,6 +258,8 @@ def readiness(registry: Any) -> Dict[str, Any]:
                              for d, names in disciplines.items()},
         "missing": missing,
         "blockers": blockers,
+        "engines": all_engine_readiness(registry),
+        "focus": ["unreal_5_8", "roblox_studio"],
         "note": (
             "Readiness measures MCP capability breadth, not team size, content "
             "volume, schedule, originality, or guaranteed product quality."

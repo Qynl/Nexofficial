@@ -35,6 +35,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent import diagnose
 from agent.context import RunContext, result_preview, result_to_text
+from agent.engines import (
+    planning_brief as engine_planning_brief,
+    public_targets as public_engine_targets,
+)
 from agent.events import (
     STATUS_COMPLETED, STATUS_PARTIAL, STATUS_FAILED, STATUS_BLOCKED,
     STATUS_CANCELLED, emit,
@@ -239,6 +243,7 @@ class AgentRun:
         self._quality_passes = 0
         self._quality_profile = profile_for_goal(goal)
         self._program_active = is_large_game_goal(goal)
+        self._engine_targets: List[Dict[str, Any]] = []
         self._program_stage = 0
         self._program_completed: List[str] = []
         self._program_reviews: Dict[str, Dict[str, Any]] = {}
@@ -275,7 +280,18 @@ class AgentRun:
 
     def run(self) -> Dict[str, Any]:
         self.status = "running"
-        self._emit("run.started", goal=self.goal)
+        try:
+            self._engine_targets = public_engine_targets(
+                self.goal, self.manager.registry())
+        except Exception:  # noqa: BLE001 - planning reports registry failures
+            self._engine_targets = []
+        self._emit("run.started", goal=self.goal,
+                   engine_targets=[{
+                       "id": target.get("id"),
+                       "label": target.get("label"),
+                       "version": target.get("version"),
+                       "score": target.get("score"),
+                   } for target in self._engine_targets])
         if self._program_active:
             self._emit("run.program", program=self._program_public())
 
@@ -372,6 +388,7 @@ class AgentRun:
         if self._program_active:
             parts.append(production_stage_brief(
                 self.goal, self._program_stage, registry))
+        parts.append(engine_planning_brief(self.goal, registry))
         return "\n\n".join(p for p in parts if p)
 
     def _plan_purpose(self, registry: Any) -> str:
@@ -1182,6 +1199,7 @@ class AgentRun:
             "evaluation_interval_steps": self.eval_every_steps,
             "quality_passes": self._quality_passes,
             "quality": quality,
+            "engine_targets": list(self._engine_targets),
             "production_program": program,
             "duration_s": round(time.time() - self.started_at, 1),
         }
@@ -1243,6 +1261,7 @@ class AgentRun:
             "steps": [t.to_public() for t in self.graph.all()],
             "waiting": (self._approval is not None),
             "quality": self._quality_scorecard(),
+            "engine_targets": list(self._engine_targets),
             "production_program": (
                 self._program_public() if self._program_active else
                 {"active": False}),

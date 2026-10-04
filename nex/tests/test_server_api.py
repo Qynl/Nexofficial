@@ -257,8 +257,10 @@ class APITests(unittest.TestCase):
         s, body = self.req("GET", "/api/production/readiness")
         expect(s == 200, "production readiness: %s" % s)
         for key in ("score", "ready_for_large_scope", "gates",
-                    "disciplines", "missing", "blockers"):
+                    "disciplines", "missing", "blockers", "engines", "focus"):
             expect(key in body, "production readiness lacks %r" % key)
+        expect(set(body["engines"]) == {"unreal_5_8", "roblox_studio"},
+               "production readiness must expose both engine profiles")
 
     def test_add_server_validation(self):
         s, body = self.req("POST", "/api/servers",

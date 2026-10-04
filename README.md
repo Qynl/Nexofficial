@@ -1,18 +1,20 @@
 <div align="center">
 
-# NEX // AGENT STUDIO
+# NEX // DUAL-ENGINE AGENT STUDIO
 
-### A local-first AI operator with a face, a hard MCP boundary, and a refusal to confuse activity with completion.
+### A local-first production operator for **Unreal Engine 5.8** and **Roblox Studio**—with a face, a hard MCP boundary, and zero patience for fake completion.
 
-**PLAN → AUTHORIZE → ACT → OBSERVE → VERIFY → POLISH → PROVE**<br>
-<sub>Python standard library · zero frontend build · no hidden computer access</sub>
+**INSPECT → PLAN → AUTHORIZE → BUILD → PLAY → OBSERVE → PROFILE → PROVE**<br>
+<sub>Unreal 5.8 + Roblox Studio first · Python standard library · zero frontend build · no hidden computer access</sub>
 
 <br>
 
 ![Python standard library](https://img.shields.io/badge/runtime-Python%20stdlib-3776AB?style=for-the-badge)
 ![Action boundary](https://img.shields.io/badge/action%20boundary-MCP%20only-54D3B5?style=for-the-badge)
-![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-purpose--aware-76B900?style=for-the-badge)
-![Test suites](https://img.shields.io/badge/test%20suites-11-8B7CF6?style=for-the-badge)
+![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.8-0E1128?style=for-the-badge&logo=unrealengine)
+![Roblox Studio](https://img.shields.io/badge/Roblox-Studio-E2231A?style=for-the-badge&logo=roblox)
+![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-hard%20work-76B900?style=for-the-badge)
+![Test suites](https://img.shields.io/badge/test%20suites-12-8B7CF6?style=for-the-badge)
 ![Shell access](https://img.shields.io/badge/model%20shell-NONE-20242C?style=for-the-badge)
 
 <br>
@@ -37,19 +39,28 @@ This is editorial photography, not a Nex screenshot.
 
 ## Read this first
 
-Nex has two non-negotiable opinions:
+Nex has three non-negotiable opinions:
 
-1. **software should feel alive** — the interface is an expressive WebGL face,
+1. **Unreal Engine 5.8 and Roblox Studio deserve real production workflows** —
+   not the same generic “make game” prompt with a different logo;
+2. **software should feel alive** — the interface is an expressive WebGL face,
    not a spinner taped to a form; and
-2. **an agent must earn “done”** — every external action crosses one visible,
+3. **an agent must earn “done”** — every external action crosses one visible,
    policy-gated MCP boundary, and every ambitious result ends in evidence, not
    celebratory prose.
 
-Connect Unreal, Unity, Godot, Roblox Studio, Blender, an internal engine, or
-any other MCP server. Nex discovers the live surface, plans only with tools that
-exist, validates a dependency graph, executes approved calls, carries structured
-outputs forward, inspects results, repairs bounded failures, and reports exactly
-what was proven.
+Nex now treats **Unreal Engine 5.8** and **Roblox Studio** as first-class,
+separate production targets. It detects the target from the goal and, cautiously,
+from unmistakable live MCP namespaces. It applies engine-specific architecture,
+security, test, performance, and shipping contracts; shows a separate readiness
+score for each editor; and records the target profile in run events and reports.
+
+Other MCP servers still work. Blender, source control, DCC, asset, build-farm,
+and internal-engine tools remain welcome collaborators. But the game-production
+brain is optimized around the two editor ecosystems above. Nex discovers the
+live surface, plans only with tools that exist, validates a dependency graph,
+executes approved calls, carries structured outputs forward, inspects results,
+repairs bounded failures, and reports exactly what was proven.
 
 > [!IMPORTANT]
 > **“AAA” is a production ambition, not a magic adjective.** Nex can run the
@@ -63,6 +74,8 @@ what was proven.
 | I want to… | Go here |
 | --- | --- |
 | launch Nex in under a minute | [Quick start](#quick-start) |
+| see the Unreal 5.8 contract | [Unreal Engine 5.8](#unreal-engine-58--blueprints-c-pie-cook-proof) |
+| see the Roblox contract | [Roblox Studio](#roblox-studio--luau-authority-multi-client-proof) |
 | understand the “make GTA 7” behavior | [The studio program](#from-make-gta-7-to-an-actual-production-program) |
 | see why a green tool call is not enough | [Evidence gates](#the-nine-evidence-gates) |
 | understand NVIDIA NIM routing | [NIM flight deck](#nvidia-nim-flight-deck) |
@@ -86,11 +99,13 @@ YOU
                               ▼                                  │
                    ONE MCP ACTION BOUNDARY                        │
                               │                                  │
-                  ┌───────────┼───────────┐                      │
-                  ▼           ▼           ▼                      │
-               engine       Blender      your server             │
-                  │           │           │                      │
-                  └────────── evidence ───┘                      │
+                  ┌───────────┼──────────────┐                   │
+                  ▼           ▼              ▼                   │
+            Unreal 5.8   Roblox Studio   support servers         │
+                  │           │              │                   │
+                  └───────────┴──────────────┘                   │
+                              │                                  │
+                           evidence                              │
                               │                                  │
                               ▼                                  │
                 honest result: complete / partial / blocked <────┘
@@ -102,6 +117,207 @@ YOU
 | plan size and production stage | code—not prompt text—owns authority |
 | available evidence and quality score | unavailable proof never becomes “passed” |
 | NIM/GPT/local provider serving a call | failover never rewrites the build plan |
+
+## Two editors. Two contracts. One honest boundary.
+
+“Game engine support” often means a model was told which brand name to repeat.
+Nex takes the opposite approach. `agent/engines.py` contains two deterministic
+production profiles. A profile contributes all of the following:
+
+- **target detection** from explicit goal language and unmistakable live MCP
+  namespaces—not from untrusted tool descriptions;
+- **planning rules** that use the engine's real architecture and vocabulary;
+- **capability readiness** measured separately across inspection, authoring,
+  runtime, observation, testing, performance, persistence, and shipping work;
+- **run metadata** so the UI and final report identify which production contract
+  was active; and
+- **hard honesty** when the connected tools cannot open the editor, compile the
+  project, start a session, capture a viewport, inspect logs, or ship.
+
+| Production concern | Unreal Engine 5.8 | Roblox Studio |
+| --- | --- | --- |
+| project truth | `.uproject`, `EngineAssociation`, modules, plugins, assets, levels | place/DataModel, services, Instances, scripts, packages |
+| code/content split | C++ modules + Blueprints + cooked content | server Luau + client Luau + replicated Instances |
+| runtime proof | PIE or standalone session | Studio server plus clients / appropriate play mode |
+| diagnostics | Output Log, Message Log, Blueprint/C++ build output | Studio Output, script analysis, Developer Console |
+| visual proof | viewport or runtime capture, then visual review | Studio/client capture, then visual review |
+| performance | Unreal Insights, traces, stat data, target build | MicroProfiler, Script Profiler, memory/network/device data |
+| release proof | build, cook, package, target-platform launch | saved place, publish approval, post-publish checks |
+| biggest trap | “asset saved” is not “compiled/package works” | “Play Solo passed” is not “multi-client/live works” |
+
+The **Capabilities** screen shows two readiness cards. A score means “named live
+MCP tools cover these disciplines”; it does **not** mean an editor is currently
+open, the project is healthy, or the game is shippable. Descriptions advertised
+by an MCP server do not count as capability evidence. Exact tool namespaces and
+machine-observed results do.
+
+When a goal explicitly targets both engines, Nex keeps their project state,
+identifiers, assets, sessions, tests, and acceptance evidence separate. A Roblox
+Instance path must never leak into an Unreal task, and an Unreal object path must
+never be offered to Studio.
+
+<p align="center">
+  <img src="docs/assets/nex-dual-engine-desk.jpg"
+       alt="A real software development desk with a monitor displaying source code"
+       width="1000">
+</p>
+<p align="center"><sub>
+Production means looking at the real project, not imagining one. Photo by
+<a href="https://unsplash.com/@karlp?utm_source=nex&utm_medium=referral">Karl Pawlowicz</a>
+on <a href="https://unsplash.com/photos/a-computer-monitor-sitting-on-top-of-a-wooden-desk-gbRaa67fEPo?utm_source=nex&utm_medium=referral">Unsplash</a>.
+Editorial photography—not a Nex screenshot.
+</sub></p>
+
+## Unreal Engine 5.8 — Blueprints, C++, PIE, cook, proof
+
+The Unreal profile is pinned to **5.8**. A planner must first inspect the live
+project and confirm its `EngineAssociation`; it must never silently convert an
+older project or assume a newer one is compatible. The discovery pass should
+look at the `.uproject`, target platform, enabled plugins, `Source` modules,
+`Content`, asset registry, current levels/worlds, World Outliner, project
+settings, source-control state, and relevant logs before changing anything.
+
+### The Unreal production contract
+
+1. **Respect the existing architecture.** Preserve module boundaries, project
+   naming, asset paths, source-control conventions, and the project's chosen
+   C++/Blueprint split. Do not replace stable project systems merely because a
+   fresh implementation is easier to prompt.
+2. **Treat UE 5.8 features as tools, not confetti.** World Partition, PCG,
+   Nanite, Lumen, MegaLights, Dataflow, Control Rig, Common UI, and the broader
+   5.8 toolset are selected only when the project, platform, and goal justify
+   them. Experimental features—including Mesh Terrain—are opt-in and require
+   the relevant plugin and risk decision.
+3. **Compile what changed.** Modified Blueprints must compile. Affected C++
+   targets must build. Broken references, redirectors, warnings, and Output Log
+   errors remain defects even if the editor accepted a save.
+4. **Prove gameplay in a runtime.** Opening a level or moving an Actor in the
+   editor is not a playtest. Nex asks for a real PIE or standalone path with the
+   expected player start, input, state transition, failure/restart behavior, and
+   representative interaction.
+5. **Separate editor proof from release proof.** PIE success does not prove a
+   cook. A cook does not prove packaging. A package does not prove launch on the
+   target hardware. Each claim needs its own available MCP action and result.
+6. **Observe and profile.** Capture a viewport/runtime frame, inspect Output Log,
+   run automation or functional tests, and use Unreal Insights/trace/stat
+   evidence where live tools expose them.
+
+A useful Unreal MCP surface therefore exposes recognizable operations for:
+
+```text
+inspect .uproject / engine version / modules / plugins
+list assets / levels / actors / components / references
+create or edit Actors / Components / Blueprints / materials / systems
+compile Blueprints / build C++ targets / cook / package
+start and stop PIE or standalone sessions
+capture viewport / read Output Log / collect diagnostics
+run Automation, Functional, or Gauntlet-style tests
+capture Unreal Insights or equivalent frame/memory/CPU/GPU evidence
+```
+
+Nex does not require those exact spellings; it matches a bounded engine
+vocabulary against discovered `server.tool` names. It prints the exact available
+names into the planning contract and marks missing disciplines as unavailable.
+
+Example goal:
+
+```text
+“In this Unreal Engine 5.8 project, inspect the .uproject, enabled plugins,
+current World Partition map, existing locomotion Blueprints, and Output Log.
+Build one production-quality traversal encounter using the existing framework.
+Compile every changed Blueprint and C++ target, run it in PIE, capture the
+viewport, inspect logs, run the available functional test, profile the frame,
+and report packaging as unverified unless you actually package the target.”
+```
+
+Useful primary references:
+
+- [Unreal Engine 5.8 release notes](https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-5-8-release-notes)
+- [Unreal Engine testing and optimizing](https://dev.epicgames.com/documentation/unreal-engine/testing-and-optimizing-your-content)
+- [Unreal Insights](https://dev.epicgames.com/documentation/unreal-engine/unreal-insights-in-unreal-engine)
+
+> [!NOTE]
+> UE 5.8 can provide MCP-facing editor capabilities, but Nex does not bundle,
+> install, or secretly bypass an Unreal MCP server. The operator connects and
+> trusts that server; the server decides what editor operations actually exist.
+
+## Roblox Studio — Luau, authority, multi-client proof
+
+The Roblox profile begins with the live **DataModel**, not a blank-script
+fantasy. Discovery should map services, Instances, scripts and ModuleScripts,
+packages, tags/attributes, collision groups, StreamingEnabled behavior, existing
+framework conventions, and which code runs on the server versus the client.
+
+### The Roblox production contract
+
+1. **The server is authoritative.** Clients can request; they do not award
+   currency, accept impossible movement, choose arbitrary inventory records, or
+   dictate damage. Every RemoteEvent and RemoteFunction argument is untrusted
+   input and must be type-, range-, permission-, state-, and rate-validated on
+   the server.
+2. **Replication boundaries are architecture.** Server-only logic and secrets
+   stay in server containers. Shared contracts belong in deliberate replicated
+   locations. Client code is considered observable by an attacker. Typed Luau,
+   narrow modules, explicit lifecycle/cleanup, and deterministic resets are
+   preferred over one giant script.
+3. **Play Solo is not multiplayer proof.** Relevant work should run with a
+   Studio server and multiple clients. Nex asks for server and client Output,
+   Remote behavior, join/leave/rejoin paths, race conditions, ownership, and
+   exploit-shaped invalid requests—not merely a clean solo spawn.
+4. **Protect persistence during tests.** Studio access can reach real data when
+   enabled. DataStore work uses a separate test version or isolated keys and
+   guarded server-side operations. Migration, retry, budget, failure, and
+   shutdown behavior need explicit evidence.
+5. **Test streaming and devices honestly.** StreamingEnabled changes what a
+   client can see and when. Desktop Studio success cannot prove low-memory
+   mobile behavior, touch controls, thermals, network quality, or loading time.
+   Device emulation and real-device Developer Console/MicroProfiler evidence are
+   separate claims.
+6. **Save and publish are different verbs.** Publishing is a network action,
+   stays policy-gated, and may require exact-call operator approval. A successful
+   local save never becomes a published-production claim.
+
+A useful Roblox MCP surface therefore exposes recognizable operations for:
+
+```text
+inspect DataModel / services / descendants / properties / script ownership
+create and modify Instances / terrain / UI / Script / LocalScript / ModuleScript
+read and write typed Luau source through bounded editor operations
+inspect RemoteEvents / RemoteFunctions / replication boundaries
+start Studio play modes / local server / multiple clients
+capture viewport / read server+client Output / run script analysis
+run TestService, unit, integration, and invalid-remote checks
+inspect DataStore test isolation / StreamingEnabled behavior
+capture MicroProfiler / Script Profiler / memory / network / device evidence
+save place / request separately approved publish / observe post-publish health
+```
+
+Example goal:
+
+```text
+“In Roblox Studio, inspect the current DataModel and module ownership before
+editing. Build a polished co-op round loop with typed Luau. Keep scoring and
+inventory server-authoritative, validate and rate-limit every RemoteEvent, use
+isolated test persistence, then run a server with three clients. Review server
+and client Output, test join/leave/rejoin and malformed remote requests, inspect
+streaming behavior, capture a representative client view, profile it, and do not
+publish without a separate approval.”
+```
+
+Useful primary references:
+
+- [Remote events and callbacks](https://create.roblox.com/docs/scripting/events/remote)
+- [Server-side detection and consequencing](https://create.roblox.com/docs/scripting/security/server-side-detection)
+- [Data stores](https://create.roblox.com/docs/cloud-services/data-stores)
+- [Instance streaming](https://create.roblox.com/docs/workspace/streaming)
+- [Test on hardware](https://create.roblox.com/docs/performance-optimization/test-on-hardware)
+- [MicroProfiler](https://create.roblox.com/docs/studio/microprofiler)
+
+> [!WARNING]
+> A Studio green check is not evidence of live-service correctness. Real device,
+> regional network, production DataStore budget, moderation, rollout, analytics,
+> and live concurrency remain unverified until an appropriate connected tool or
+> operator proves them.
 
 ## Quick start
 
@@ -135,21 +351,35 @@ export NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
 Then:
 
 1. Open **Settings → Model** and verify the **Smart workload scheduler**.
-2. Open **Capabilities → Add server**.
-3. Connect an HTTP MCP endpoint or a local stdio MCP command.
-4. Review the discovered tools and classifications.
-5. Ask Nex to do something.
-6. Watch the run card tell the truth in real time.
+2. Start the MCP server/plugin that is already integrated with your editor.
+3. Open **Capabilities → Add server** and connect its documented HTTP endpoint
+   or stdio command. Give it an honest namespace such as `unreal_editor` or
+   `roblox_studio`; Nex does not guess vendor commands or ports.
+4. Keep the server untrusted until you have reviewed its discovered tools,
+   schemas, annotations, and Nex classifications.
+5. Check the separate **Unreal Engine 5.8** and **Roblox Studio** readiness cards.
+   Missing runtime or observation coverage is a real gap, not a setup warning to
+   click through.
+6. Ask Nex to do something, then watch the run card name the engine target and
+   tell the truth in real time.
 
 ```text
-“Build a polished vertical slice for the abandoned observatory level.
-Reuse the project’s existing movement and materials. Add one complete
-combat encounter, a readable objective, a restart loop, and a 60 FPS
-performance target. Playtest it, inspect the result, fix the highest-impact
-problem once, then tell me exactly what remains unverified.”
+UNREAL
+“Build a polished UE 5.8 vertical slice for the abandoned observatory.
+Reuse existing movement and materials. Compile every affected Blueprint/C++
+target; run PIE; capture the viewport; inspect Output Log; profile the frame;
+and report cook/package as unverified unless those tools really run.”
+
+ROBLOX
+“Build a polished three-player observatory escape in Roblox Studio. Inspect the
+DataModel first, validate all client remotes on the server, test with one server
+and three clients, review both Outputs, test streaming and restart behavior,
+capture a client view, profile it, and leave publishing for explicit approval.”
 ```
 
-That is the kind of prompt the production protocol is designed to handle—**provided the connected MCP tools can actually inspect, edit, run, capture, verify, and profile the project**.
+Those are the kinds of prompts the production protocol is designed to
+handle—**provided the connected MCP tools can actually inspect, edit, run,
+capture, verify, profile, and (when requested) ship the project**.
 
 ## What Nex is
 
@@ -158,6 +388,7 @@ That is the kind of prompt the production protocol is designed to handle—**pro
 | **Presence** | WebGL face with idle, listening, thinking, speaking, planning, working, and verifying states | Fake activity with decorative progress |
 | **Conversation** | Streaming chat, markdown, code blocks, voice, search, regeneration, persistent history | Send provider secrets to the browser |
 | **Agent loop** | Plans a DAG, executes ready tasks, records evidence, evaluates, recovers, replans, and summarizes | Treat “the tool returned” as “the goal is complete” |
+| **Engine profiles** | Detects Unreal 5.8 / Roblox Studio, injects separate production contracts, scores live MCP coverage, and records targets | Pretend a profile is an editor connection |
 | **Studio program** | Breaks whole-game/open-world goals into eight separately planned production stages with cross-stage dataflow | Confuse one vertical slice with a finished giant game |
 | **Game-production protocol** | Applies capability-aware quality gates and a bounded corrective pass to game-authoring goals | Promise artistic, commercial, or literal AAA quality |
 | **MCP boundary** | Discovers and calls operator-connected tools through one manager/policy/audit path | Expose a built-in shell, filesystem, terminal, or arbitrary host tool |
@@ -738,7 +969,7 @@ cd nex
 python3 tests/run_all.py
 ```
 
-Eleven suites run in isolated processes because several intentionally configure different state homes and policies:
+Twelve suites run in isolated processes because several intentionally configure different state homes and policies:
 
 | Suite | What it proves |
 | --- | --- |
@@ -749,6 +980,7 @@ Eleven suites run in isolated processes because several intentionally configure 
 | `test_agent_loop` | Planning, DAG validation, references, retries, argument repair, replanning, budgets, cancellation, reports |
 | `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
+| `test_engine_profiles` | Unreal 5.8 / Roblox detection, readiness, description distrust, planning contracts, events, and report metadata |
 | `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route |
@@ -776,6 +1008,7 @@ Nexofficial/
     ├── .env.example                providers, MCP, policy, budgets, server
     ├── agent/
     │   ├── loop.py                 plan → act → observe → evaluate → adapt
+    │   ├── engines.py              Unreal 5.8 + Roblox contracts/readiness
     │   ├── production.py           eight-stage studio program + MCP readiness
     │   ├── quality.py              production contracts, gates, scorecards
     │   ├── model_planner.py        model plan + deterministic live validation
@@ -801,7 +1034,7 @@ Nexofficial/
     │   ├── index.html              accessible application shell
     │   ├── css/app.css             complete visual system
     │   └── js/                     face, chat, runs, capabilities, settings
-    └── tests/                       eleven isolated suites + HTTP echo MCP
+    └── tests/                       twelve isolated suites + HTTP echo MCP
 ```
 
 ## Honest limits

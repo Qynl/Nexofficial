@@ -42,6 +42,7 @@ from agent import providers as _providers
 _providers.load_env()
 
 from agent import prompts as _prompts
+from agent.engines import public_targets as public_engine_targets
 from agent.jsonreply import extract_json_with_key
 from agent.loop import RunCoordinator
 from agent.production import readiness as production_readiness
@@ -316,9 +317,23 @@ def _start_run(cid: str, goal: str, say: str) -> None:
         _publish_chat(cid, "chat.delta", message_id=m["id"], delta=say,
                       text=say)
         _publish_chat(cid, "chat.done", message_id=m["id"], content=say)
-    STORE.add_message(cid, "assistant", goal, kind="run",
-                      meta={"run": "starting"})
-    RUNS.start(goal, conversation_id=cid)
+    try:
+        targets = public_engine_targets(goal, MANAGER.registry())
+    except Exception:  # noqa: BLE001 - optional display metadata
+        targets = []
+    compact_targets = [{
+        "id": target.get("id"),
+        "label": target.get("label"),
+        "version": target.get("version"),
+        "score": target.get("score"),
+    } for target in targets]
+    run_message = STORE.add_message(
+        cid, "assistant", goal, kind="run", meta={"run": "starting"})
+    run_id = RUNS.start(goal, conversation_id=cid)
+    STORE.update_message(run_message["id"], meta={
+        "run": "starting", "run_id": run_id,
+        "engine_targets": compact_targets,
+    })
 
 
 def _chat_turn(cid: str, user_text: str,
