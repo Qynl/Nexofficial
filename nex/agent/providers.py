@@ -7,8 +7,10 @@ The architecture implemented here has two operator-controlled lanes:
     local model is healthy.
   * HARD WORK (the ``agent`` route): complex production plans, evaluations,
     failure diagnosis, and bounded batch jobs. NVIDIA NIM is preferred, GPT is
-    an explicit credentialed fallback, and Ollama is always the terminal
-    fallback. If there is no GPT key, it is simply skipped.
+    an explicit credentialed fallback, then two FREE no-card gateways
+    (OpenCode Zen, OpenRouter) take over, and Ollama is always the terminal
+    fallback. Any provider without a key (or without a key for THIS lane) is
+    simply skipped — nothing in the chain ever blocks on a missing credential.
 
 Why a router instead of one model call: hosted NIM limits vary by model,
 endpoint, account and current service load. Nex therefore ships a configurable
@@ -18,9 +20,19 @@ budgets are purpose-specific, and scarce requests are reserved for complex
 plans and repairs. Failover is explicit:
 
     NIM 429 / timeout / 5xx / RPM exhausted
-        -> the SAME model job goes to GPT when configured, otherwise Ollama
+        -> the SAME model job goes to GPT when configured
+        -> otherwise the free OpenCode Zen / OpenRouter gateways take it
+        -> otherwise Ollama runs it locally
         -> the validated MCP plan is untouched: only the model changes
         -> after cooldown the router hands hard work back to NIM automatically
+
+OpenCode Zen (https://opencode.ai/zen/v1) and OpenRouter
+(https://openrouter.ai/api/v1) are both plain OpenAI-compatible chat/
+completions endpoints, so they need no special-case code — they are
+DEFAULT_PROVIDERS entries like any other, free only because the account
+behind the key is free. Free listings can change or retire; Settings →
+Model always reads the LIVE ``/v1/models`` catalog from the configured key,
+which is the authority — the CATALOG below is only a curated starting point.
 
 Nothing here executes a tool. A provider returns TEXT; the agent loop turns
 that text into validated MCP calls. The agent therefore cannot reach the
@@ -63,13 +75,19 @@ _ROLE_MIGRATION = {"planner": ROLE_CHAT, "builder": ROLE_AGENT}
 # EXPLICIT fallback lists. Nothing enters a chain implicitly: a provider has
 # to be named here (or by the operator) to be tried, so a future provider
 # added to the catalog can never silently become a fallback for a role.
+#
+# "opencode" (OpenCode Zen) and "openrouter" are FREE, no-card cloud gateways
+# — they cost the operator nothing even without NIM/GPT credentials, so they
+# sit between the paid clouds and the guaranteed local model: a build keeps
+# getting real hosted quality instead of dropping straight to Ollama the
+# moment NIM/GPT are absent or rate limited.
 ROLE_DEFAULT_FALLBACKS: Dict[str, List[str]] = {
-    # Hard work: NIM -> GPT when configured -> local, with local guaranteed by
-    # Router.chain even if an operator shortens this list.
-    ROLE_AGENT: ["gpt", "local"],
-    # Routine work starts locally; cloud providers are resilience fallbacks,
-    # not the normal place where chat/summaries spend quota.
-    ROLE_CHAT: ["gpt", "nim"],
+    # Hard work: NIM -> configured GPT -> free gateways -> local, with local
+    # guaranteed by Router.chain even if an operator shortens this list.
+    ROLE_AGENT: ["gpt", "opencode", "openrouter", "local"],
+    # Routine work starts locally; the free gateways are tried before any
+    # paid one, and NIM's scarce hard-work budget is the last resort.
+    ROLE_CHAT: ["opencode", "openrouter", "gpt", "nim"],
 }
 
 KIND_OLLAMA = "ollama"    # /api/chat, /api/tags
@@ -141,7 +159,8 @@ WORKLOAD_POLICY = {
     "hard": {
         "role": ROLE_AGENT,
         "purposes": ["planning-hard", "evaluation", "diagnosis", "batch-*"],
-        "description": "NIM-first, then configured GPT, then Ollama",
+        "description": "NIM-first, then configured GPT, then free "
+                       "OpenCode Zen / OpenRouter, then Ollama",
     },
     "token_limits": dict(PURPOSE_MAX_TOKENS),
 }
@@ -228,6 +247,41 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "structured_outputs": True,
         "note": "Credentialed hard-work fallback after NIM; skipped cleanly when no key is set.",
     },
+    "opencode": {
+        "label": "OpenCode Zen",
+        "kind": KIND_OPENAI,
+        "base_url": "https://opencode.ai/zen/v1",
+        "model": "nemotron-3-ultra-free",
+        "api_key_env": "OPENCODE_API_KEY",
+        # No published per-model RPM; a conservative local ceiling avoids
+        # hammering a free, no-card gateway into a hard 429/ban.
+        "rpm": 20,
+        "timeout": 180.0,
+        "cooldown_s": 15.0,
+        "structured_outputs": False,
+        "note": "Free, no-card gateway (opencode.ai/auth). Several models are "
+                "$0/token today — Nemotron 3 Ultra/Lightning, Ling 3.0 Flash "
+                "Fin, MiMo-V2.5, Big Pickle — but a free listing can change "
+                "or retire; Settings → Model pulls the live catalog.",
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "kind": KIND_OPENAI,
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "inclusionai/ling-3.1-flash",
+        "api_key_env": "OPENROUTER_API_KEY",
+        # Published free-tier default: 20 req/min, 50/day (1,000/day once the
+        # account has bought $10 of credit). This is a local safety ceiling,
+        # not a guarantee of OpenRouter's current policy.
+        "rpm": 20,
+        "timeout": 180.0,
+        "cooldown_s": 20.0,
+        "structured_outputs": False,
+        "note": "Free, no-card aggregator (20+ ':free' models, one key). "
+                "Default model is Ling 3.1 Flash (inclusionAI, 560B-MoE, "
+                "free, 262K context) — widest single net for 'try another "
+                "free cloud model' once NIM/GPT/OpenCode are all down.",
+    },
 }
 
 # Curated NIM starting points (reviewed 2026-10; the live /v1/models list in
@@ -289,6 +343,46 @@ CATALOG: List[Dict[str, Any]] = [
      "label": "GPT-5.2", "note": "Reasoning effort configurable."},
     {"provider": "gpt", "id": "gpt-5.6-terra", "role": "chat",
      "label": "GPT-5.6 Terra", "note": "Production generalist."},
+    # --- OpenCode Zen (free, no card — reviewed 2026-10) -----------------
+    # Only the chat/completions-protocol models are listed: Zen also serves
+    # GPT/Claude/Gemini/Qwen through Responses/Messages/native endpoints this
+    # router does not speak, so those are left off even when free.
+    {"provider": "opencode", "id": "nemotron-3-ultra-free",
+     "role": "agent", "label": "Nemotron 3 Ultra (OpenCode Zen, free)",
+     "note": "Same 550B Nemotron Ultra family NIM charges for — free here. "
+             "Slow; good for a careful plan, not a tight loop."},
+    {"provider": "opencode", "id": "nemotron-3.5-lightning-free",
+     "role": "agent", "label": "Nemotron 3.5 Lightning (OpenCode Zen, free)",
+     "note": "Free mirror of NIM's fast Lightning tier — low-latency agent "
+             "loops when NIM's own Lightning is rate limited."},
+    {"provider": "opencode", "id": "ling-3.0-flash-fin-free",
+     "role": "agent", "label": "Ling 3.0 Flash Fin (OpenCode Zen, free)",
+     "note": "Ant Group / inclusionAI MoE flash model, free on Zen. The "
+             "newer Ling 3.1 Flash is free on OpenRouter instead."},
+    {"provider": "opencode", "id": "mimo-v2.5-free",
+     "role": "chat", "label": "MiMo V2.5 (OpenCode Zen, free)",
+     "note": "Xiaomi general-purpose model; free coding/chat generalist."},
+    {"provider": "opencode", "id": "big-pickle",
+     "role": "chat", "label": "Big Pickle (OpenCode Zen, free)",
+     "note": "OpenCode's rotating stealth eval model — quality varies by "
+             "the week since it is whatever they are currently measuring."},
+    # --- OpenRouter (free, no card — 20+ ':free' models, reviewed 2026-10) -
+    {"provider": "openrouter", "id": "inclusionai/ling-3.1-flash",
+     "role": "agent", "label": "Ling 3.1 Flash (OpenRouter, free)",
+     "note": "inclusionAI MoE, 560B total/25B active, 262K context, free. "
+             "Strong agentic/tool-calling scores for a $0 model."},
+    {"provider": "openrouter", "id": "deepseek/deepseek-chat-v3.1:free",
+     "role": "agent", "label": "DeepSeek V3.1 (OpenRouter, free)",
+     "note": "Free tier of DeepSeek's chat/coding model via OpenRouter."},
+    {"provider": "openrouter", "id": "qwen/qwen3-coder:free",
+     "role": "agent", "label": "Qwen3 Coder (OpenRouter, free)",
+     "note": "Free agentic-coding model — tool calling tuned."},
+    {"provider": "openrouter", "id": "meta-llama/llama-3.3-70b-instruct:free",
+     "role": "chat", "label": "Llama 3.3 70B (OpenRouter, free)",
+     "note": "Reliable free generalist; good baseline for chat/summaries."},
+    {"provider": "openrouter", "id": "google/gemini-2.5-flash-lite:free",
+     "role": "chat", "label": "Gemini 2.5 Flash Lite (OpenRouter, free)",
+     "note": "Fast, cheap-quality free chat/summary model."},
 ]
 
 # Env -> provider field overrides (kept small and explicit).
@@ -298,6 +392,14 @@ ENV_PROVIDER_KEYS: Dict[str, Dict[str, str]] = {
             "api_key": "NEX_NIM_API_KEY", "rpm": "NEX_NIM_RPM"},
     "gpt": {"base_url": "NEX_OPENAI_BASE_URL", "model": "NEX_OPENAI_MODEL",
             "api_key": "NEX_OPENAI_API_KEY"},
+    "opencode": {"base_url": "NEX_OPENCODE_BASE_URL",
+                 "model": "NEX_OPENCODE_MODEL",
+                 "api_key": "NEX_OPENCODE_API_KEY",
+                 "rpm": "NEX_OPENCODE_RPM"},
+    "openrouter": {"base_url": "NEX_OPENROUTER_BASE_URL",
+                   "model": "NEX_OPENROUTER_MODEL",
+                   "api_key": "NEX_OPENROUTER_API_KEY",
+                   "rpm": "NEX_OPENROUTER_RPM"},
 }
 
 
@@ -1928,11 +2030,15 @@ class Router:
                 "nice_to_know": {
                     "NVIDIA_API_KEY": "NIM API key (nvapi-…) — build.nvidia.com",
                     "OPENAI_API_KEY": "GPT chat key",
+                    "OPENCODE_API_KEY": "OpenCode Zen key, free/no-card — opencode.ai/auth",
+                    "OPENROUTER_API_KEY": "OpenRouter key, free/no-card — openrouter.ai/keys",
                     "OLLAMA_HOST": "local model base URL",
                     "OLLAMA_MODEL": "local model name",
                     "NEX_PLANNER_PROVIDER": "which provider plans",
                     "NEX_BUILDER_PROVIDER": "which provider builds",
                     "NEX_NIM_RPM": "NIM requests/minute budget (default 40)",
+                    "NEX_OPENCODE_RPM": "OpenCode Zen local safety ceiling (default 20)",
+                    "NEX_OPENROUTER_RPM": "OpenRouter local safety ceiling (default 20)",
                 },
             },
             "settings_file": self.store_path(),
@@ -2167,6 +2273,16 @@ def _specs_from_env(base: Dict[str, ProviderSpec]) -> Dict[str, ProviderSpec]:
                     break
         if name == "gpt" and not fields.get("api_key"):
             for extra in ("OPENAI_API_KEY", "NEX_OPENAI_API_KEY"):
+                if os.environ.get(extra):
+                    fields["api_key"] = os.environ[extra]
+                    break
+        if name == "opencode" and not fields.get("api_key"):
+            for extra in ("OPENCODE_API_KEY", "NEX_OPENCODE_API_KEY"):
+                if os.environ.get(extra):
+                    fields["api_key"] = os.environ[extra]
+                    break
+        if name == "openrouter" and not fields.get("api_key"):
+            for extra in ("OPENROUTER_API_KEY", "NEX_OPENROUTER_API_KEY"):
                 if os.environ.get(extra):
                     fields["api_key"] = os.environ[extra]
                     break

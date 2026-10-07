@@ -5,7 +5,6 @@ connection + tool calls, so the transport layer is exercised too.
 """
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -21,7 +20,6 @@ import mcp_echo_server as echo                        # noqa: E402
 
 os.environ["NEX_HOME"] = tempfile.mkdtemp(prefix="nex-mgr-")
 
-from mcp import manager as manager_mod                # noqa: E402
 from mcp.manager import ServerManager                 # noqa: E402
 from mcp.schema import validate_tool_output            # noqa: E402
 

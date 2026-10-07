@@ -25,14 +25,13 @@ import ipaddress
 import json
 import mimetypes
 import os
-import re
 import secrets
 import sys
 import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -47,7 +46,7 @@ from agent.engines import public_targets as public_engine_targets
 from agent.jsonreply import extract_json_with_key
 from agent.loop import RunCoordinator
 from agent.production import readiness as production_readiness
-from mcp.manager import get_manager, validate_server_entry
+from mcp.manager import get_manager
 from mcp.policy import Policy, set_policy
 from store import Store
 
@@ -387,7 +386,6 @@ def _chat_turn(cid: str, user_text: str,
     buffered = ""
     streaming = False
     message_id = "m-" + secrets.token_hex(6)
-    had_error = False
 
     def _emit_delta(chunk: str) -> None:
         nonlocal streaming
@@ -408,7 +406,6 @@ def _chat_turn(cid: str, user_text: str,
                     continue        # possible ACT directive — keep buffering
             _emit_delta(token)
     except Exception as exc:  # noqa: BLE001
-        had_error = True
         code = ERR_MODEL
         detail = "%s: %s" % (type(exc).__name__, exc)
         if "timeout" in detail.lower():

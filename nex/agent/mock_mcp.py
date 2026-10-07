@@ -8,7 +8,6 @@ autonomous loop's repair/retry path can be exercised.
 
 from __future__ import annotations
 
-import copy
 from typing import Any, Dict, List, Optional
 
 from mcp.registry import ServerView, ToolView, _context_items

@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
 from mcp.capability import (
-    READ, CREATE, MODIFY, BUILD, TEST, CODE_EXECUTION, DESTRUCTIVE, NETWORK,
+    CODE_EXECUTION, DESTRUCTIVE, NETWORK,
     UNKNOWN, ToolCapability, apply_capability_registry, capability_for_tool,
     max_capability, tokenize,
 )

@@ -34,7 +34,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent import diagnose
-from agent.context import RunContext, result_preview, result_to_text
+from agent.context import RunContext, result_preview
 from agent.engines import (
     planning_brief as engine_planning_brief,
     public_targets as public_engine_targets,
@@ -66,7 +66,7 @@ from agent.quality import (
 )
 from agent.workload import planning_purpose
 from agent.task_graph import (
-    Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING, WAITING,
+    Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING,
 )
 from agent.jsonreply import extract_json_with_key
 from mcp.policy import authorize as authorize_tool
@@ -786,8 +786,11 @@ class AgentRun:
         # --- success ------------------------------------------------------------
         result = outcome.get("result")
         self.graph.mark_success(task.id, result)
-        text = self.context.observe(task.name, task.tool or "?",
-                                    task.server or "?", result, ok=True)
+        # observe() records the (truncated) result into working memory for
+        # later prompts; its return value is a convenience for other callers
+        # and is not needed here.
+        self.context.observe(task.name, task.tool or "?",
+                             task.server or "?", result, ok=True)
         self._emit("run.tool", step_id=task.id, tool=task.tool,
                    server=task.server, phase="ok",
                    preview=result_preview(result))

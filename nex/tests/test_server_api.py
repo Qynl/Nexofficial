@@ -5,7 +5,6 @@ exercises every endpoint the web client uses — plus the SSE stream.
 """
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading

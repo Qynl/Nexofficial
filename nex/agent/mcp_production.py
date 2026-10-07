@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from agent.engines import detect_engine_targets, profile_readiness
 from agent.quality import GATE_ORDER, gate_catalog, tool_gates

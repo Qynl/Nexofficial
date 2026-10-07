@@ -34,9 +34,8 @@ os.environ["NEX_HOME"] = HOME
 
 from mcp.capability import capability_for_tool      # noqa: E402
 from mcp.policy import authorize, MCP_ONLY          # noqa: E402
-from mcp.manager import (ServerManager,              # noqa: E402
-                         validate_server_entry)
-from agent.mock_mcp import MockMCPServer, server_view  # noqa: E402
+from mcp.manager import validate_server_entry        # noqa: E402
+from agent.mock_mcp import MockMCPServer             # noqa: E402
 from agent.loop import AgentRun                      # noqa: E402
 
 _FAILED = []

@@ -470,9 +470,6 @@ class ApprovalTests(unittest.TestCase):
         self.assertTrue(ok)
         t.join(timeout=5)
         self.assertEqual(run.report["status"], "completed")
-        kinds = [e["type"] if isinstance(e, dict) else e.type
-                 for e in events]
-        # hmm — events may be dicts or Event objects depending on bus shape
         self.assertIn("completed", run.report["status"])
 
     def test_denied_approval_fails_step(self):

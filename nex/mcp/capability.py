@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
 
 # --- category constants ----------------------------------------------------

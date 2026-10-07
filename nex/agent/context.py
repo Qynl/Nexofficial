@@ -15,7 +15,7 @@ Tool output is DATA. It is summarized, never obeyed.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from agent.mcp_production import redact_untrusted_text
 

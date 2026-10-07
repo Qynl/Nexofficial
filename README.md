@@ -14,7 +14,8 @@
 ![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.8-0E1128?style=for-the-badge&logo=unrealengine)
 ![Roblox Studio](https://img.shields.io/badge/Roblox-Studio-E2231A?style=for-the-badge&logo=roblox)
 ![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-hard%20work-76B900?style=for-the-badge)
-![Test suites](https://img.shields.io/badge/test%20suites-13-8B7CF6?style=for-the-badge)
+![Free cloud models](https://img.shields.io/badge/OpenCode%20Zen%20%2B%20OpenRouter-free%2C%20no%20card-F97316?style=for-the-badge)
+![Test suites](https://img.shields.io/badge/test%20suites-14-8B7CF6?style=for-the-badge)
 ![Shell access](https://img.shields.io/badge/model%20shell-NONE-20242C?style=for-the-badge)
 
 <br>
@@ -80,6 +81,7 @@ repairs bounded failures, and reports exactly what was proven.
 | see why a green tool call is not enough | [Evidence gates](#the-nine-evidence-gates) |
 | understand the production-grade MCP core | [MCP production intelligence](#mcp-production-intelligence) |
 | understand NVIDIA NIM routing | [NIM flight deck](#nvidia-nim-flight-deck) |
+| run Nex on 100% free cloud models, no card | [Five providers, one code path](#five-providers-one-code-path) |
 | audit the safety boundary | [Security model](#security-model) |
 | connect an engine MCP correctly | [MCP server contract](#what-a-capable-game-engine-mcp-server-should-expose) |
 | configure everything | [Configuration reference](#configuration-reference) |
@@ -117,7 +119,7 @@ YOU
 | provider, model, engine, tools, project, goal | MCP is the only action path |
 | plan size and production stage | code—not prompt text—owns authority |
 | available evidence and quality score | unavailable proof never becomes “passed” |
-| NIM/GPT/local provider serving a call | failover never rewrites the build plan |
+| NIM/GPT/OpenCode Zen/OpenRouter/local provider serving a call | failover never rewrites the build plan |
 
 ## Connecting the first-party engine MCP servers
 
@@ -951,16 +953,17 @@ forms. Nex now splits model work into two lanes:
 
 | Lane | Default route | Jobs |
 | --- | --- | --- |
-| **Routine** | **Ollama → GPT → NIM** | normal chat, final summaries, small MCP plans |
-| **Hard work** | **NIM → configured GPT → Ollama** | complex production plans, evaluation, diagnosis, bounded batches |
+| **Routine** | **Ollama → OpenCode Zen → OpenRouter → GPT → NIM** | normal chat, final summaries, small MCP plans |
+| **Hard work** | **NIM → configured GPT → OpenCode Zen → OpenRouter → Ollama** | complex production plans, evaluation, diagnosis, bounded batches |
 
 The split is deterministic and code-owned; user text is not accepted as a
 direct provider selector. By default, a small plan stays private and costs no
 hosted round while Ollama is healthy. A
 production-grade game request is sent to NIM. If NIM fails, GPT takes over only
-when a key is configured; otherwise Ollama receives the same model job directly.
-No completed MCP action is replayed and no plan is merged or regenerated during
-a provider hand-off.
+when a key is configured; otherwise the two FREE, no-card gateways —
+**OpenCode Zen** and **OpenRouter** — take the same job before Ollama ever has
+to run it locally. No completed MCP action is replayed and no plan is merged
+or regenerated during a provider hand-off.
 
 The panel edits both lane primaries, exact primary models, ordered fallbacks,
 provider defaults, local RPM ceilings, and structured-output support. Live cards
@@ -970,14 +973,79 @@ headroom. Dynamic provider/model text is inserted as text—not executable HTML.
 ## Model providers
 
 Each lane owns an explicit primary provider, exact model, and ordered fallback
-chain. Local Ollama, NVIDIA NIM, OpenAI, and custom OpenAI-compatible endpoints
-can be mixed. The shipped defaults deliberately keep routine traffic local while
-using the strongest configured cloud route for difficult work: NIM first, GPT
-when NIM is absent or unavailable, and Ollama as the guaranteed local safety net.
+chain. Local Ollama, NVIDIA NIM, OpenAI, OpenCode Zen, OpenRouter, and any
+other custom OpenAI-compatible endpoint can be mixed. The shipped defaults
+deliberately keep routine traffic local while using the strongest configured
+cloud route for difficult work: NIM first, GPT when NIM is absent or
+unavailable, then the two free no-card gateways, and Ollama as the guaranteed
+local safety net.
 
 A model produces text. It never receives an OS handle, shell, filesystem, or
 MCP transport. Provider failover can change the brain serving a request; it
 cannot bypass policy or invent another action path.
+
+### Five providers, one code path
+
+Every provider below is a `ProviderSpec` entry — same router, same pacing,
+same failover, same masked-key settings view. Nothing about NIM, OpenCode Zen
+or OpenRouter is special-cased: they are all plain OpenAI-compatible
+`/v1/chat/completions` endpoints, so adding one is a config entry, not new code.
+
+| Provider | Cost | Key | Base URL | Default model |
+| --- | --- | --- | --- | --- |
+| **Local (Ollama)** | free, your hardware | none | `http://127.0.0.1:11434` | `gpt-oss:20b` |
+| **NVIDIA NIM** | pay-as-you-go | `NVIDIA_API_KEY` | `integrate.api.nvidia.com/v1` | `nvidia/nemotron-3-super-120b-a12b` |
+| **GPT (OpenAI-compatible)** | pay-as-you-go | `OPENAI_API_KEY` | `api.openai.com/v1` | `gpt-5.1` |
+| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `nemotron-3-ultra-free` |
+| **OpenRouter** | **free, no card** | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | `inclusionai/ling-3.1-flash` |
+
+#### OpenCode Zen — free NIM-grade models with no credit card
+
+[OpenCode Zen](https://opencode.ai/zen) is the model gateway behind the
+OpenCode coding agent. Sign in at `opencode.ai/auth` (GitHub or Google, no
+card) and copy a key from the API Keys page. As of this writing several
+models are listed at **$0 input/output**:
+
+| Model id | What it is |
+| --- | --- |
+| `nemotron-3-ultra-free` | The same 550B Nemotron Ultra family NIM charges for, free here — slow, good for a careful plan |
+| `nemotron-3.5-lightning-free` | Free mirror of NIM's fast Lightning tier — low-latency agent loops |
+| `ling-3.0-flash-fin-free` | Ant Group / inclusionAI MoE flash model, finance-tuned variant |
+| `mimo-v2.5-free` | Xiaomi general-purpose model |
+| `big-pickle` | OpenCode's rotating stealth eval model — quality varies week to week |
+
+Only the models served through Zen's `chat/completions` protocol are usable
+here (Zen also fronts GPT/Claude/Gemini/Qwen through Responses/Messages/native
+endpoints this router does not speak — those stay off the curated list even
+when free). Free listings are promotional and can change or retire at any
+time; `Settings → Model` always reads the **live** catalog from
+`opencode.ai/zen/v1/models`, which is the authority over this README.
+
+#### OpenRouter — one free key, 20+ zero-cost models
+
+[OpenRouter](https://openrouter.ai) aggregates hundreds of models behind one
+OpenAI-compatible API and a no-card key (`openrouter.ai/keys`). Append `:free`
+to a model id for the zero-cost variant. The published free tier is **20
+requests/minute, 50/day** (1,000/day once the account has ≥$10 of purchased
+credit) — `NEX_OPENROUTER_RPM=20` mirrors that as Nex's local safety ceiling.
+
+Nex's default OpenRouter model is **Ling 3.1 Flash**
+(`inclusionai/ling-3.1-flash`) — a 560B-total/25B-active mixture-of-experts
+model from Ant Group's inclusionAI lab, free on OpenRouter with a 262K-token
+context window and solid agentic/tool-calling scores for a $0 model. Other
+curated free entries include DeepSeek V3.1, Qwen3 Coder, Llama 3.3 70B, and
+Gemini 2.5 Flash Lite — but OpenRouter's free roster has fully turned over
+before, so treat the curated catalog as a starting point and press **list**
+in Settings to see what is free *today*.
+
+#### Why both
+
+OpenCode Zen and OpenRouter solve different problems. Zen's free Nemotron
+models are drop-in upgrades of NIM's own paid tiers — a free *mirror* of the
+hard-work lane. OpenRouter is the widest single net of free third-party
+models (Ling, DeepSeek, Qwen, Llama, Gemini) behind one key, which is why it
+sits one hop further down the chain: try Zen's NIM-family free models first,
+then the broader OpenRouter catalog, before ever touching local compute.
 
 ## NVIDIA NIM flight deck
 
@@ -991,10 +1059,14 @@ graph LR
     T -->|complex plan / evaluation / diagnosis| N[Hard lane · NVIDIA NIM]
     N -->|failure or protected reserve| G{GPT key configured?}
     G -->|yes| GPT[GPT fallback]
-    G -->|no or GPT fails| O[Ollama takeover]
+    G -->|no or GPT fails| Z[OpenCode Zen · free]
+    Z -->|no key or fails| OR[OpenRouter · free]
+    OR -->|no key or fails| O[Ollama takeover]
     L -->|local unavailable| RF[configured routine fallbacks]
     N --> V[finish reason + JSON shape checks]
     GPT --> V
+    Z --> V
+    OR --> V
     O --> V
     V --> U[bounded usage + model telemetry]
 ```
@@ -1074,6 +1146,34 @@ and the live [NVIDIA API Catalog](https://build.nvidia.com/explore/discover).
 The live model list in Settings is authoritative; the curated list is only a
 starting point because catalog availability changes.
 
+### More free cloud model APIs you can wire in the same way
+
+Every provider in Nex is one `DEFAULT_PROVIDERS` entry plus (optionally) a few
+`CATALOG` lines — adding another OpenAI-compatible free gateway is a config
+change, not new code, as long as it speaks `/v1/chat/completions`. Candidates
+worth adding next, roughly ordered by how generous the free tier is today:
+
+| Provider | Free tier (no card unless noted) | Notes |
+| --- | --- | --- |
+| **Google AI Studio (Gemini)** | Generous: Gemini 2.5/3.x Flash + Pro variants, up to 1M context | Mostly OpenAI-compatible via `generativelanguage.googleapis.com/v1beta/openai/`; best raw free quality/volume today |
+| **Groq** | ~30 RPM / 1,000 req/day on Llama, Qwen3, GPT-OSS, Kimi K2 | Custom LPU hardware — extremely low latency, good for tight agent loops |
+| **Cloudflare Workers AI** | Daily free "neuron" budget, no card | Llama, Mistral, Qwen hosted on Cloudflare's edge; OpenAI-compatible endpoint |
+| **Mistral La Plateforme** | Free tier incl. Codestral (~1B tokens/month) | Strong for code-focused agent work |
+| **GitHub Models** | Free with a GitHub account, rate-limited | Multiple vendors (OpenAI, Llama, Mistral, Phi) behind one token |
+| **Cohere** | Free trial key, monthly allowance | Command R/R+ family; decent tool-calling |
+| **HuggingFace Inference** | Small free monthly credit | Useful as a long tail for open-weight models not on the others |
+| **Cerebras** | Was a generous free tier; now a $5 **paid** trial (card required) | Mention for completeness — no longer truly free, listed last on purpose |
+
+A sensible next hop in the fallback chain would be `gpt → opencode →
+openrouter → groq → google → local` — Groq for latency-sensitive loops,
+Google AI Studio as the single highest-volume free safety net before local
+compute. All of the no-card rows above follow the exact same integration
+shape as OpenCode Zen/OpenRouter: a `base_url`, an `api_key_env`, a default
+model, and a few curated `CATALOG` rows — nothing in the router, the settings
+UI, or the failover logic needs to change. Free tiers and model rosters shift
+often on every one of these services; re-check current terms before building
+a dependency on any single one.
+
 ### Recommended routes
 
 #### Private workstation
@@ -1101,18 +1201,38 @@ NEX_NIM_RPM=40
 No OpenAI key is required. `gpt` is skipped without a key, so a NIM failure
 hands the job directly to Ollama.
 
-#### Local routine + NIM → GPT → Ollama hard-work chain
+#### Zero-cost cloud: no NIM, no GPT, no card at all
+
+```dotenv
+OPENCODE_API_KEY=your-opencode-zen-key
+OPENROUTER_API_KEY=your-openrouter-key
+NEX_CHAT_PROVIDER=local
+NEX_CHAT_FALLBACKS=opencode,openrouter
+NEX_AGENT_PROVIDER=opencode
+NEX_AGENT_MODEL=nemotron-3-ultra-free
+NEX_AGENT_FALLBACKS=openrouter,local
+```
+
+Routine work still stays on Ollama; hard work gets real hosted model quality
+(free Nemotron Ultra, then free Ling 3.1 Flash) with zero recurring cost and
+no payment method on file anywhere in the chain.
+
+#### Local routine + NIM → GPT → free gateways → Ollama hard-work chain
 
 ```dotenv
 OPENAI_API_KEY=your-openai-key
 NVIDIA_API_KEY=nvapi-your-key
+OPENCODE_API_KEY=your-opencode-zen-key
+OPENROUTER_API_KEY=your-openrouter-key
 NEX_CHAT_PROVIDER=local
 NEX_CHAT_FALLBACKS=gpt,nim
 NEX_AGENT_PROVIDER=nim
-NEX_AGENT_FALLBACKS=gpt,local
+NEX_AGENT_FALLBACKS=gpt,opencode,openrouter,local
 ```
 
-Copy the complete example if you prefer configuration as code:
+This is the longest safety net Nex ships: NIM, then GPT, then two free
+no-card gateways, then local — a build only ever stops if every one of those
+is down at once. Copy the complete example if you prefer configuration as code:
 
 ```bash
 cp nex/.env.example nex/.env
@@ -1139,9 +1259,15 @@ All settings are optional unless your chosen model provider requires a key.
 | `OLLAMA_MODEL` | provider default | Local model |
 | `NEX_CHAT_PROVIDER` / `NEX_AGENT_PROVIDER` | routine: `local`; hard: NIM, else GPT, else local | Primary provider per lane |
 | `NEX_CHAT_MODEL` / `NEX_AGENT_MODEL` | provider default | Primary model per lane |
-| `NEX_CHAT_FALLBACKS` / `NEX_AGENT_FALLBACKS` | routine: `gpt,nim`; hard: `gpt,local` | Comma-separated lane failovers |
+| `NEX_CHAT_FALLBACKS` / `NEX_AGENT_FALLBACKS` | routine: `opencode,openrouter,gpt,nim`; hard: `gpt,opencode,openrouter,local` | Comma-separated lane failovers |
 | `NVIDIA_API_KEY` | empty | NVIDIA NIM credential |
 | `OPENAI_API_KEY` | empty | OpenAI-compatible credential |
+| `OPENCODE_API_KEY` | empty | OpenCode Zen credential — **free, no card** (opencode.ai/auth) |
+| `NEX_OPENCODE_MODEL` | `nemotron-3-ultra-free` | OpenCode Zen model id |
+| `NEX_OPENCODE_RPM` | `20` | OpenCode Zen local safety ceiling (no published quota) |
+| `OPENROUTER_API_KEY` | empty | OpenRouter credential — **free, no card** (openrouter.ai/keys) |
+| `NEX_OPENROUTER_MODEL` | `inclusionai/ling-3.1-flash` | OpenRouter model id (append `:free` for zero-cost variants) |
+| `NEX_OPENROUTER_RPM` | `20` | OpenRouter local safety ceiling (matches the published free-tier 20 RPM) |
 | `NEX_PROVIDER_HOSTS` | empty | Optional strict exact-host allowlist for model endpoints |
 | `NEX_SERVERS` | empty | Startup MCP server definitions |
 | `NEX_HTTP_ALLOW` | loopback only | Pre-approved remote MCP hosts |
@@ -1224,7 +1350,7 @@ Nexofficial/
     │   ├── diagnose.py             one-shot failure repair decisions
     │   ├── llm.py                  trusted purpose tags for provider calls
     │   ├── prompts.py              scoped model roles and hard boundary language
-    │   ├── providers.py            NIM JSON mode, exact models, pacing, telemetry, fallback
+    │   ├── providers.py            NIM/GPT/OpenCode Zen/OpenRouter, JSON mode, pacing, telemetry, fallback
     │   ├── events.py               public execution-state vocabulary
     │   ├── jsonreply.py            bounded JSON extraction
     │   └── mock_mcp.py             deterministic in-process MCP for tests

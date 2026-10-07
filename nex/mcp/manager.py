@@ -468,7 +468,7 @@ class ServerManager:
         up = self._build_upstream(entry)
         try:
             up.connect()
-            tools = up.tools()
+            up.tools()   # populate the tool cache; also proves the server works
         except UpstreamError as exc:
             with self._lock:
                 old = self._live.pop(name, None)
@@ -974,7 +974,6 @@ class ServerManager:
             if not e.get("enabled", True):
                 continue
             name = e["name"]
-            before = self.server_status(name).get("status")
             up = self.upstream(name)
             if up is not None:
                 # Connected: light health check via cached tools refresh.

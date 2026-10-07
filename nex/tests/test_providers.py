@@ -94,6 +94,7 @@ class FakeHTTP:
     @staticmethod
     def host_of(url):
         for h in ("integrate.api.nvidia.com", "api.openai.com",
+                  "opencode.ai", "openrouter.ai",
                   "127.0.0.1:11434", "localhost"):
             if h in url:
                 return h
@@ -298,10 +299,14 @@ try:
                 "a GPT key does not move routine chat away from Ollama")
         _expect(r2.roles["agent"]["provider"] == "nim",
                 "…and NIM remains the hard-work primary")
-        _expect(r2.chain("agent")[:3] == ["nim", "gpt", "local"],
-                "hard chain: NIM -> GPT -> Ollama (%s)" % r2.chain("agent"))
-        _expect(r2.chain("chat")[:3] == ["local", "gpt", "nim"],
-                "routine chain: Ollama -> GPT -> NIM (%s)" % r2.chain("chat"))
+        _expect(r2.chain("agent") ==
+                ["nim", "gpt", "opencode", "openrouter", "local"],
+                "hard chain: NIM -> GPT -> free gateways -> Ollama (%s)"
+                % r2.chain("agent"))
+        _expect(r2.chain("chat") ==
+                ["local", "opencode", "openrouter", "gpt", "nim"],
+                "routine chain: Ollama -> free gateways -> GPT -> NIM (%s)"
+                % r2.chain("chat"))
         _expect(r2.role_model("agent") == "nvidia/nemotron-3-super-120b-a12b",
                 "agent model resolves from the role config")
 
@@ -309,8 +314,10 @@ try:
         r_gpt = providers.build_router(store=empty_store, load_dot_env=False)
         _expect(r_gpt.roles["agent"]["provider"] == "nim"
                 and r_gpt.status()["agent"]["active"] == "gpt"
-                and r_gpt.chain("agent")[:3] == ["nim", "gpt", "local"],
-                "without a NIM key, GPT serves hard work then Ollama")
+                and r_gpt.chain("agent") ==
+                ["nim", "gpt", "opencode", "openrouter", "local"],
+                "without a NIM key, GPT serves hard work then free gateways "
+                "then Ollama")
         os.environ["NVIDIA_API_KEY"] = "nvapi-x"
 finally:
     for k, v in saved.items():
@@ -1343,5 +1350,92 @@ try:
     _expect(False, "no usable provider must raise, got %r" % (out5,))
 except providers.AllProvidersFailed:
     _expect(True, "streaming raises AllProvidersFailed when nothing serves")
+
+# ===========================================================================
+# 13. FREE CLOUD GATEWAYS — OpenCode Zen + OpenRouter
+# ===========================================================================
+
+print("=== 13. free gateways (OpenCode Zen / OpenRouter) ===")
+
+_expect(providers.DEFAULT_PROVIDERS["opencode"]["kind"] == providers.KIND_OPENAI
+        and providers.DEFAULT_PROVIDERS["opencode"]["base_url"]
+        == "https://opencode.ai/zen/v1",
+        "OpenCode Zen is a plain OpenAI-compatible endpoint at opencode.ai/zen/v1")
+_expect(providers.DEFAULT_PROVIDERS["openrouter"]["kind"] == providers.KIND_OPENAI
+        and providers.DEFAULT_PROVIDERS["openrouter"]["base_url"]
+        == "https://openrouter.ai/api/v1",
+        "OpenRouter is a plain OpenAI-compatible endpoint at openrouter.ai/api/v1")
+
+spec_oc = providers.ProviderSpec("opencode", api_key="oc-test")
+_expect(spec_oc.chat_url == "https://opencode.ai/zen/v1/chat/completions",
+        "OpenCode Zen chat URL does not double the /v1 segment: %s"
+        % spec_oc.chat_url)
+_expect(spec_oc.models_url == "https://opencode.ai/zen/v1/models",
+        "OpenCode Zen models URL matches the documented live catalog: %s"
+        % spec_oc.models_url)
+spec_or = providers.ProviderSpec("openrouter", api_key="or-test")
+_expect(spec_or.chat_url == "https://openrouter.ai/api/v1/chat/completions",
+        "OpenRouter chat URL does not double the /v1 segment: %s"
+        % spec_or.chat_url)
+
+_expect(not providers.ProviderSpec("opencode").configured,
+        "OpenCode Zen needs a key like any other hosted OpenAI-compatible "
+        "provider — it is free, not keyless")
+_expect(not providers.ProviderSpec("openrouter").configured,
+        "OpenRouter needs a key too")
+
+catalog_oc = [c for c in providers.CATALOG if c["provider"] == "opencode"]
+catalog_or = [c for c in providers.CATALOG if c["provider"] == "openrouter"]
+_expect(len(catalog_oc) >= 3, "OpenCode Zen ships several curated free models")
+_expect(any(c["id"] == "inclusionai/ling-3.1-flash" for c in catalog_or),
+        "Ling 3.1 Flash is in the curated OpenRouter catalog")
+_expect(providers.DEFAULT_PROVIDERS["openrouter"]["model"]
+        == "inclusionai/ling-3.1-flash",
+        "Ling 3.1 Flash is OpenRouter's default model")
+
+# Bare env vars (OPENCODE_API_KEY / OPENROUTER_API_KEY) are honored, matching
+# the pattern already used for NVIDIA_API_KEY / OPENAI_API_KEY.
+saved_free = {k: os.environ.pop(k, None) for k in
+              ("NVIDIA_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY",
+               "OPENROUTER_API_KEY", "NEX_PROVIDERS_FILE")}
+try:
+    with tempfile.TemporaryDirectory() as td:
+        store_free = providers.SettingsStore(os.path.join(td, "none.json"))
+        os.environ["OPENCODE_API_KEY"] = "oc-live-key"
+        r_free = providers.build_router(store=store_free, load_dot_env=False)
+        _expect(r_free.specs["opencode"].key == "oc-live-key",
+                "OPENCODE_API_KEY alone configures the OpenCode Zen provider")
+        _expect(r_free.specs["opencode"].configured,
+                "…and it is now usable")
+
+        # With NIM/GPT both absent, hard work should fall through to the
+        # free OpenCode Zen gateway automatically — no routing edit needed.
+        h_free = FakeHTTP()
+        h_free.push("opencode.ai", "free nemotron answer")
+        r_free._transport = {"post": h_free.post, "get": h_free.get,
+                             "stream": h_free.stream}
+        text_free = r_free.chat(providers.ROLE_AGENT, MESSAGES,
+                                purpose="diagnosis")
+        _expect(text_free == "free nemotron answer",
+                "hard work reaches OpenCode Zen when NIM/GPT are unconfigured")
+        _expect(h_free.calls[-1][0] == "https://opencode.ai/zen/v1/chat/completions",
+                "the call actually hits OpenCode Zen's documented endpoint")
+        _expect(r_free.status()["agent"]["active"] == "opencode",
+                "status reports OpenCode Zen as the active hard-work provider")
+
+        os.environ["OPENROUTER_API_KEY"] = "or-live-key"
+        r_free2 = providers.build_router(store=store_free, load_dot_env=False)
+        _expect(r_free2.specs["openrouter"].key == "or-live-key",
+                "OPENROUTER_API_KEY alone configures the OpenRouter provider")
+        _expect(r_free2.chain("agent") ==
+                ["nim", "gpt", "opencode", "openrouter", "local"],
+                "OpenRouter sits after OpenCode Zen, before the local terminal "
+                "fallback: %s" % r_free2.chain("agent"))
+finally:
+    for k, v in saved_free.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 print("\nAll provider-layer tests passed.")
