@@ -77,13 +77,13 @@ construction against hostile MCP metadata) with no code changes needed.
    check on nonzero exit. No build step, no external services, nothing to
    maintain.
 
-## Tier 2/3 — DONE (items 3, 4, 6)
+## Tier 2/3 — ALL DONE (items 3, 4, 5, 6)
 
-All three are complete (commit `81f485c` + follow-up): frontend smoke tests,
-API rate limiting, and a minimal `pyproject.toml`. Item 5 (structured
-`logging`) was deliberately skipped — the plan itself calls it discretionary
-and "not recommended as current work," and nothing in this pass changed
-that assessment.
+Items 3, 4, and 6 (commit `81f485c` + follow-up): frontend smoke tests, API
+rate limiting, and a minimal `pyproject.toml`. Item 5 (structured `logging`,
+commit `3615631`) was initially skipped as discretionary/"not recommended as
+current work" per the plan's own framing, then done anyway once explicitly
+requested — see Tier 3 below for what changed.
 
 Writing the very first frontend tests immediately found two real, severe
 bugs, not just gaps in coverage:
@@ -164,14 +164,24 @@ package required zero changes to any existing import statement.
 
 ## Tier 3 — low priority / discretionary
 
-5. **Structured `logging` instead of `print`/`stderr.write`.** No
-   `logging` module usage anywhere in the codebase — only ~6 legitimate
-   CLI startup-banner `print()`s and a handful of `stderr.write()` calls for
-   error reporting (`capability.py`, `transport.py`, `server.py`). This is a
-   deliberate-looking simplicity choice for a small, local-first, stdlib-only
-   tool, not a bug. Worth revisiting only if there's ever a desire for log
-   levels, filtering, or shipping logs somewhere — not recommended as
-   current work.
+5. **DONE** (commit `3615631`). **Structured `logging` instead of
+   `print`/`stderr.write`.** No `logging` module usage anywhere in the
+   codebase — only ~6 legitimate CLI startup-banner `print()`s and a
+   handful of `stderr.write()` calls for error reporting (`capability.py`,
+   `transport.py`, `server.py`). This was a deliberate-looking simplicity
+   choice for a small, local-first, stdlib-only tool, not a bug — the
+   maintainer asked for it anyway, so it's done: `server.py` now
+   configures `logging.basicConfig()` once at import time, respecting a
+   new `NEX_LOG_LEVEL` env var (default INFO, invalid values fall back to
+   INFO), with three per-area loggers (`server.http`/`server.chat`/
+   `server.api`) replacing the old `[http]`/`[chat]`/`[api]` bracket-tag
+   stderr writes; `capability.py`'s registry-corruption warning does the
+   same. The ~6 startup-banner prints and `transport.py`'s raw child-MCP-
+   stderr passthrough were deliberately left as-is (see the inline
+   comments at each site for why) — they are not log records this process
+   produces. Covered by `nex/tests/test_logging.py` (subprocess-based:
+   level filtering, format, invalid-value fallback) and a new test in
+   `test_capability.py`. 24/24 suites pass.
 6. **A minimal `pyproject.toml`** purely for metadata/versioning (no
    dependencies) if `pip install -e .`-style ergonomics are ever wanted.
    Fully optional — the project explicitly has no packaging today and that
