@@ -380,6 +380,20 @@ class Upstream:
         import subprocess
         if self._stdio_proc is not None and self._stdio_proc.poll() is None:
             return
+        if self._stdio_proc is not None:
+            # The previous child exited on its own (crash, OOM-kill, the
+            # user closing it, ...). `poll()` already reaped it, but its
+            # stdin/stdout/stderr pipe fds are still open Python file
+            # objects — close them now instead of leaving that to GC, so a
+            # server that crash-loops over a long Nex session doesn't slowly
+            # leak file descriptors.
+            for stream in (self._stdio_proc.stdin, self._stdio_proc.stdout,
+                           self._stdio_proc.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except OSError:
+                    pass
         if not self.stdio_command:
             raise UpstreamError(
                 "stdio server %s has no command configured" % self.name)
@@ -667,6 +681,27 @@ class Upstream:
 
     # ---------- handshake ----------------------------------------------------
 
+    def _ensure_initialized(self) -> None:
+        """Reconnect if never initialized, OR if a stdio child died (and was
+        lazily respawned) since the last call.
+
+        `_ensure_stdio_proc()` silently spawns a replacement process when the
+        old one exited — that keeps a crashed server from staying dead
+        forever, but the FRESH process has never seen `initialize`. Without
+        this check, `_initialized` stays True from the OLD process and every
+        caller (call/tools/resources/prompts/...) would send it a
+        `tools/call` or `tools/list` before any handshake — a protocol
+        violation most servers simply reject. Checking liveness here, before
+        the real request goes out, means the respawn is invisible to the
+        caller: one fresh `connect()` happens first, same call succeeds.
+        """
+        if (isinstance(self.url, str) and self.url.startswith("stdio://")
+                and self._stdio_proc is not None
+                and self._stdio_proc.poll() is not None):
+            self._initialized = False
+        if not self._initialized:
+            self.connect()
+
     def connect(self) -> Dict[str, Any]:
         """Run the MCP `initialize` handshake + `notifications/initialized`.
 
@@ -792,8 +827,7 @@ class Upstream:
     # ---------- tools/list / tools/call --------------------------------------
 
     def _fetch_tools(self) -> List[Dict[str, Any]]:
-        if not self._initialized:
-            self.connect()
+        self._ensure_initialized()
         out: List[Dict[str, Any]] = []
         cursor: Optional[str] = None
         seen_cursors = set()
@@ -852,10 +886,17 @@ class Upstream:
         raise UpstreamError("tools/list exceeded %d pagination pages"
                             % _MAX_LIST_PAGES)
 
-    def tools(self) -> List[Dict[str, Any]]:
-        """Cached tool list, refreshed every `_tools_cache_ttl_s`."""
+    def tools(self, force: bool = False) -> List[Dict[str, Any]]:
+        """Cached tool list, refreshed every `_tools_cache_ttl_s`.
+
+        ``force=True`` bypasses the TTL and always does a real round-trip.
+        The health monitor relies on this: its probe interval (20s default)
+        is shorter than the tools cache TTL (30s), so an un-forced refresh
+        would often return stale cached data and silently skip checking
+        whether the server is actually still alive.
+        """
         with self._lock:
-            if (not self._tools_cache
+            if (force or not self._tools_cache
                     or time.monotonic() - self._tools_fetched_at
                     > self._tools_cache_ttl_s):
                 try:
@@ -873,8 +914,7 @@ class Upstream:
              arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Invoke a tool on this server. Returns the raw JSON-RPC reply."""
         with self._lock:
-            if not self._initialized:
-                self.connect()
+            self._ensure_initialized()
             t0 = time.monotonic()
             try:
                 resp = self._rpc("tools/call",
@@ -924,8 +964,7 @@ class Upstream:
     def resources(self) -> List[Dict[str, Any]]:
         """List MCP resources exposed by this server (cached)."""
         with self._lock:
-            if not self._initialized:
-                self.connect()
+            self._ensure_initialized()
             if not self._resources_cache:
                 self._resources_cache = self._safe_list("resources")
             return list(self._resources_cache)
@@ -933,8 +972,7 @@ class Upstream:
     def prompts(self) -> List[Dict[str, Any]]:
         """List MCP prompts exposed by this server (cached)."""
         with self._lock:
-            if not self._initialized:
-                self.connect()
+            self._ensure_initialized()
             if not self._prompts_cache:
                 self._prompts_cache = self._safe_list("prompts")
             return list(self._prompts_cache)
@@ -948,8 +986,7 @@ class Upstream:
         if not isinstance(uri, str) or not uri or len(uri) > 1024:
             raise UpstreamError("invalid resource uri")
         with self._lock:
-            if not self._initialized:
-                self.connect()
+            self._ensure_initialized()
             resp = self._rpc("resources/read", {"uri": uri})
             if "error" in resp:
                 raise UpstreamError(
@@ -987,8 +1024,7 @@ class Upstream:
         if not isinstance(name, str) or not name or len(name) > 256:
             raise UpstreamError("invalid prompt name")
         with self._lock:
-            if not self._initialized:
-                self.connect()
+            self._ensure_initialized()
             resp = self._rpc("prompts/get",
                              {"name": name, "arguments": arguments or {}})
             if "error" in resp:

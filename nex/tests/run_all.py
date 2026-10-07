@@ -18,6 +18,7 @@ SUITES = [
     "test_architecture.py",   # dependency direction, no local tools, no MC
     "test_capability.py",     # tool classification + policy gates
     "test_transport.py",      # MCP framing, stdio children, HTTP upstreams
+    "test_schema.py",         # bounded JSON-Schema argument validator
     "test_manager.py",        # server lifecycle, calls, approvals, audit
     "test_agent_loop.py",     # plan → act → observe → evaluate → adapt
     "test_quality.py",        # game production gates + bounded polish pass

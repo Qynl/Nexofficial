@@ -916,6 +916,21 @@ one flaky server elsewhere never resets a truly dead one's own backoff. An
 operator-triggered reconnect from the UI is never throttled by any of this —
 only the unattended monitor loop paces itself.
 
+A stdio child that crashes between calls is lazily respawned on the next
+request — but the fresh process has never run the `initialize` handshake.
+`Upstream` now detects that liveness change before issuing the real
+request (not after), so a crashed-and-restarted stdio server is
+transparently re-initialized first instead of being sent a `tools/call` or
+`tools/list` out of protocol order; the old process's pipe handles are
+closed immediately rather than left for the garbage collector. The
+background health monitor's probe also forces a real round-trip
+(`tools(force=True)`) instead of reusing the tools cache, which is fresh
+for 30s — longer than the monitor's own ~20s tick — so a server that died
+moments ago can no longer keep reporting "connected" off a stale cache hit.
+The bounded argument validator (`mcp/schema.py`) now also honors `allOf`
+composition, not just `anyOf`/`oneOf`: a tool contract expressed across
+multiple `allOf` branches used to have those branches silently skipped.
+
 ### 7. The browser is authenticated and hardened
 
 - generated server token stored `0600` under `~/.nex`;

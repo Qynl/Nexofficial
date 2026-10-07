@@ -108,6 +108,55 @@ for line in sys.stdin:
 """
 
 
+# A child that answers ONE tools/call and then exits — simulating a crash —
+# so the respawn-must-reinitialize behavior can be tested deterministically.
+# Every received method is logged as "<pid>:<method>" to a side-channel file
+# since each process instance can't otherwise be told apart from outside.
+CRASH_AFTER_ONE_CALL_SERVER = r'''
+import json, os, sys
+log_path = sys.argv[1]
+def log(method):
+    with open(log_path, "a") as f:
+        f.write("%d:%s\n" % (os.getpid(), method))
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+    except ValueError:
+        continue
+    method = req.get("method")
+    rid = req.get("id")
+    log(method)
+    if method == "initialize":
+        result = {"protocolVersion": "2025-06-18",
+                  "capabilities": {"tools": {}},
+                  "serverInfo": {"name": "crashy", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [
+            {"name": "upper", "description": "uppercase text",
+             "inputSchema": {"type": "object",
+                             "properties": {"text": {"type": "string"}}}}]}
+    elif method == "tools/call":
+        p = req.get("params") or {}
+        text = (p.get("arguments") or {}).get("text", "").upper()
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid,
+                                     "result": {"content": [
+                                         {"type": "text", "text": text}]}})
+                         + "\n")
+        sys.stdout.flush()
+        sys.exit(0)          # "crash" right after answering
+    elif method == "notifications/initialized":
+        continue
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid,
+                                 "result": result}) + "\n")
+    sys.stdout.flush()
+'''
+
+
 class FrameCodecTests(unittest.TestCase):
     def test_ndjson_frames(self):
         d = StdioDecoder()
@@ -227,6 +276,51 @@ class StdioTransportTests(unittest.TestCase):
             time.sleep(0.05)
         expect(proc.poll() is not None,
                "disconnect must terminate the child process")
+
+    def test_respawned_stdio_child_is_reinitialized_before_next_call(self):
+        # A stdio child that crashes is lazily respawned (_ensure_stdio_proc)
+        # on the NEXT request — but the fresh process has never seen
+        # `initialize`. Without _ensure_initialized()'s liveness check, the
+        # respawned child would be sent `tools/call` as its very first
+        # message, which violates the MCP handshake and most real servers
+        # would simply reject it.
+        work_dir = tempfile.mkdtemp(prefix="nex-crashy-")
+        script = os.path.join(work_dir, "server.py")
+        log_path = os.path.join(work_dir, "log.txt")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(CRASH_AFTER_ONE_CALL_SERVER)
+        up = Upstream("crashy", "stdio://local", call_timeout=5)
+        up.stdio_command = (sys.executable, [script, log_path])
+        try:
+            up.connect()
+            resp1 = up.call("upper", {"text": "first"})
+            text1 = resp1["result"]["content"][0]["text"]
+            expect(text1 == "FIRST", "first call (first process): %r" % text1)
+
+            # The child answered and exited ("crashed"). This call must
+            # transparently respawn AND re-run the handshake before
+            # retrying the actual tool call — all inside one call().
+            resp2 = up.call("upper", {"text": "second"})
+            text2 = resp2["result"]["content"][0]["text"]
+            expect(text2 == "SECOND",
+                   "call after an underlying crash must still succeed: %r"
+                   % text2)
+
+            with open(log_path, encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            by_pid = {}
+            for ln in lines:
+                pid_s, method = ln.split(":", 1)
+                by_pid.setdefault(int(pid_s), []).append(method)
+            pids = sorted(by_pid)
+            expect(len(pids) == 2,
+                   "two distinct child processes must have run: %r" % pids)
+            if len(pids) == 2:
+                expect(by_pid[pids[1]][0] == "initialize",
+                       "the RESPAWNED child's very first message must be "
+                       "initialize, not a tool call: %r" % by_pid[pids[1]])
+        finally:
+            up.disconnect()
 
     def test_lsp_framed_child_also_handled(self):
         # Some non-conforming children answer with LSP frames; the
@@ -420,6 +514,61 @@ class _FlakyHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+class ToolsCacheTests(unittest.TestCase):
+    """tools(force=True) must bypass the TTL cache — the health monitor
+    depends on this to actually probe the connection instead of just
+    re-reading a stale cached list."""
+
+    def test_force_bypasses_the_ttl_cache(self):
+        up = Upstream("x", "http://127.0.0.1:1/mcp")
+        up._initialized = True
+        calls = {"n": 0}
+
+        def fake_fetch():
+            calls["n"] += 1
+            return [{"name": "t%d" % calls["n"]}]
+
+        up._fetch_tools = fake_fetch
+        first = up.tools()
+        expect(calls["n"] == 1, "first call must fetch: %r" % calls)
+        expect(first[0]["name"] == "t1", "first result: %r" % first)
+
+        # Cache is fresh (TTL is 30s, no time passed) — an un-forced call
+        # must NOT hit the network again.
+        second = up.tools()
+        expect(calls["n"] == 1,
+               "fresh cache must be reused without forcing: %r" % calls)
+        expect(second[0]["name"] == "t1", "cached result: %r" % second)
+
+        # force=True must re-fetch even though the cache is still fresh —
+        # this is what the health monitor relies on every probe tick.
+        third = up.tools(force=True)
+        expect(calls["n"] == 2,
+               "force=True must bypass the TTL cache: %r" % calls)
+        expect(third[0]["name"] == "t2", "forced result: %r" % third)
+
+    def test_force_failure_is_reported_even_with_a_fresh_cache(self):
+        up = Upstream("x", "http://127.0.0.1:1/mcp")
+        up._initialized = True
+        up._tools_cache = [{"name": "stale-but-cached"}]
+        up._tools_fetched_at = time.monotonic()
+
+        def fail_fetch():
+            raise UpstreamError("server went away")
+
+        up._fetch_tools = fail_fetch
+        with self.assertRaises(UpstreamError):
+            up.tools(force=True)
+        # An un-forced call right after must still see the TTL honored and
+        # NOT raise (same recent fetch timestamp as before the forced
+        # attempt was reverted by the failure — the cache itself was left
+        # untouched by the failed forced refresh).
+        cached = up.tools()
+        expect(cached[0]["name"] == "stale-but-cached",
+               "a failed forced refresh must not corrupt the existing "
+               "cache: %r" % cached)
 
 
 class CircuitBreakerTests(unittest.TestCase):

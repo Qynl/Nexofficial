@@ -91,6 +91,15 @@ def validate_arguments(schema: Any, arguments: Any) -> List[str]:
         if not isinstance(spec, dict):
             return
 
+        # allOf: every branch must hold, AND it never excludes the rest of
+        # this spec (type/properties/etc. below still apply) — unlike
+        # anyOf/oneOf, a branch's errors are real errors, not a dead end
+        # we might recover from in another branch.
+        all_of = spec.get("allOf")
+        if isinstance(all_of, list):
+            for branch in all_of[:16]:
+                walk(branch, value, path, depth + 1)
+
         # Common composition keywords.  Branch errors stay private; report
         # only the useful top-level fact when no branch accepts the value.
         for keyword in ("anyOf", "oneOf"):

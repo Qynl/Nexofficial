@@ -1039,9 +1039,14 @@ class ServerManager:
             name = e["name"]
             up = self.upstream(name)
             if up is not None:
-                # Connected: light health check via cached tools refresh.
+                # Connected: light health check via a FORCED tools refresh.
+                # Plain up.tools() is TTL-cached (30s) and this loop's own
+                # interval can be shorter (20s default) — without forcing,
+                # most ticks would just return stale cached data and never
+                # actually touch the network, silently failing to detect a
+                # server that died since the last real call.
                 try:
-                    up.tools()
+                    up.tools(force=True)
                     after = ST_CONNECTED
                     err = None
                 except UpstreamError as exc:

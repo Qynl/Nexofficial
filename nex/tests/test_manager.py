@@ -388,6 +388,42 @@ class ReconnectBackoffTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_probe_all_forces_a_real_check_not_a_stale_cache_hit(self):
+        # tools() is TTL-cached for 30s; the monitor's own tick interval
+        # can be shorter. If _probe_all() called the un-forced tools(), a
+        # server that died moments ago could keep reporting "connected"
+        # for up to 30s just because the last successful fetch is still
+        # "fresh" by the cache's clock. The monitor must always force a
+        # real round-trip.
+        clock = _FakeClock()
+        mgr = ServerManager(clock=clock)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), echo.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            mgr.add({"name": "echo2", "trusted": True,
+                     "url": "http://127.0.0.1:%d/mcp" % port})
+            up = mgr.upstream("echo2")
+            self.assertIsNotNone(up)
+            real_tools = up.tools
+            seen = []
+
+            def spy_tools(force=False):
+                seen.append(force)
+                return real_tools(force=force)
+            up.tools = spy_tools
+
+            mgr._probe_all()
+            self.assertEqual(seen, [True],
+                             "the health monitor must call tools(force=True)"
+                             " — an un-forced call could silently reuse a "
+                             "stale cached result instead of checking "
+                             "whether the server is actually still alive")
+        finally:
+            mgr.close()
+            httpd.shutdown()
+            httpd.server_close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
