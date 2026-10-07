@@ -152,16 +152,40 @@ class TaskGraph:
         t.error_signature = signature
         # Dependency-aware failure propagation: dependents are skipped,
         # not re-executed.
-        for dep in self._dependents.get(tid, []):
-            dt = self._tasks[dep]
-            if dt.status == PENDING:
-                dt.status = SKIPPED
-                dt.notes = "skipped: dependency '%s' failed" % tid
+        self._propagate_skip(tid)
 
     def mark_skipped(self, tid: str, reason: str) -> None:
         t = self._tasks[tid]
         t.status = SKIPPED
         t.notes = reason
+        self._propagate_skip(tid)
+
+    def _propagate_skip(self, tid: str) -> None:
+        """Skip every PENDING task downstream of `tid`, transitively.
+
+        A single-hop walk is not enough: in a chain A -> B -> C, failing A
+        must also skip C, not just B. Without this, C stays PENDING
+        forever (deps_met() can never see B reach SUCCESS once B is
+        SKIPPED), is_terminal() never becomes true, and the run's final
+        report would misreport C as never having run instead of correctly
+        showing it as skipped. BFS with a seen-set keeps this O(n) even
+        on a diamond-shaped graph where a task has multiple paths back to
+        the one that failed.
+        """
+        queue: List[tuple] = [(tid, dep)
+                              for dep in self._dependents.get(tid, [])]
+        seen = set()
+        while queue:
+            cause, dep = queue.pop(0)
+            if dep in seen:
+                continue
+            seen.add(dep)
+            dt = self._tasks.get(dep)
+            if dt is None or dt.status != PENDING:
+                continue
+            dt.status = SKIPPED
+            dt.notes = "skipped: dependency '%s' failed" % cause
+            queue.extend((dep, nxt) for nxt in self._dependents.get(dep, []))
 
     # ----- serialization ----------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:

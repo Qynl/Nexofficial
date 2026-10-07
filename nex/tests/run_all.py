@@ -21,6 +21,7 @@ SUITES = [
     "test_schema.py",         # bounded JSON-Schema argument validator
     "test_manager.py",        # server lifecycle, calls, approvals, audit
     "test_agent_loop.py",     # plan → act → observe → evaluate → adapt
+    "test_task_graph.py",     # dependency graph: transitive skip propagation
     "test_context.py",        # bounded run memory: truncation, retention cap
     "test_quality.py",        # game production gates + bounded polish pass
     "test_production.py",     # multi-stage studio program + MCP readiness
