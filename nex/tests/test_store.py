@@ -71,6 +71,27 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.s.get_conversation(c["id"])["title"],
                          "My project")
 
+    def test_renaming_before_the_first_message_is_not_clobbered(self):
+        # A user can rename an empty conversation (the sidebar's Rename
+        # action) before ever sending a message. Auto-titling the first
+        # message must not silently overwrite that explicit choice.
+        c = self.s.create_conversation()
+        self.s.rename_conversation(c["id"], "Important Project Alpha")
+        self.s.add_message(c["id"], "user", "hello world")
+        self.assertEqual(self.s.get_conversation(c["id"])["title"],
+                         "Important Project Alpha")
+        # Renaming AFTER messages already exist is unaffected either way.
+        self.s.rename_conversation(c["id"], "Renamed later")
+        self.assertEqual(self.s.get_conversation(c["id"])["title"],
+                         "Renamed later")
+
+    def test_auto_title_still_applies_when_never_renamed(self):
+        c = self.s.create_conversation()
+        self.s.add_message(c["id"], "user", "what is the weather today")
+        title = self.s.get_conversation(c["id"])["title"]
+        self.assertNotEqual(title, "New chat")
+        self.assertIn("weather", title)
+
     def test_delete(self):
         c = self.s.create_conversation()
         self.s.add_message(c["id"], "user", "x")
@@ -86,6 +107,25 @@ class StoreTests(unittest.TestCase):
         hits = self.s.search_conversations("blender")
         self.assertTrue(any(h["id"] == c["id"] for h in hits))
         self.assertEqual(self.s.search_conversations("zzz-unfindable"), [])
+
+    def test_search_finds_a_renamed_conversation_with_no_messages_yet(self):
+        # The search query used an INNER JOIN against messages, so a
+        # brand-new, renamed-but-still-empty conversation was invisible
+        # to search no matter what its title said.
+        c = self.s.create_conversation()
+        self.s.rename_conversation(c["id"], "Important Project Alpha")
+        hits = self.s.search_conversations("Important")
+        self.assertTrue(any(h["id"] == c["id"] for h in hits),
+                        "a renamed conversation must be findable by title "
+                        "even before it has any messages")
+
+    def test_search_does_not_duplicate_a_conversation_with_many_hits(self):
+        c = self.s.create_conversation()
+        self.s.rename_conversation(c["id"], "dup test")
+        self.s.add_message(c["id"], "user", "dup test one")
+        self.s.add_message(c["id"], "assistant", "dup test two")
+        hits = [h["id"] for h in self.s.search_conversations("dup")]
+        self.assertEqual(hits.count(c["id"]), 1)
 
     def test_truncate_after_for_regenerate(self):
         c = self.s.create_conversation()

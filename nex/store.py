@@ -75,6 +75,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+DEFAULT_TITLE = "New chat"
 DEFAULT_MAX_CONVERSATIONS = _env_int("NEX_MAX_CONVERSATIONS", 300)
 DEFAULT_MAX_MESSAGES_PER_CONVERSATION = _env_int(
     "NEX_MAX_MESSAGES_PER_CONVERSATION", 3000)
@@ -157,7 +158,7 @@ class Store:
 
     # ----- conversations ----------------------------------------------------
 
-    def create_conversation(self, title: str = "New chat") -> Dict[str, Any]:
+    def create_conversation(self, title: str = DEFAULT_TITLE) -> Dict[str, Any]:
         cid = "c-" + uuid.uuid4().hex[:12]
         now = time.time()
         with self._lock:
@@ -239,7 +240,7 @@ class Store:
                 "  WHERE m3.conversation_id = c.id"
                 "  ORDER BY m3.created_at DESC, m3.rowid DESC LIMIT 1) AS preview"
                 " FROM conversations c"
-                " JOIN messages m ON m.conversation_id = c.id"
+                " LEFT JOIN messages m ON m.conversation_id = c.id"
                 " WHERE c.title LIKE ? OR m.content LIKE ?"
                 " ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?",
                 (q, q, limit)).fetchall()
@@ -272,15 +273,25 @@ class Store:
             self._db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, cid))
-            # Auto-title from the first user message.
+            # Auto-title from the first user message -- but only while the
+            # conversation still has its untouched default title. A user
+            # can rename an empty conversation (the sidebar's Rename
+            # action) before ever sending a message; without this guard,
+            # sending that first message would silently clobber their
+            # explicit rename with an auto-generated one, with no
+            # indication anything happened.
             row = self._db.execute(
                 "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
                 (cid,)).fetchone()
             if role == "user" and row[0] <= 1:
-                title = _title_from(content)
-                self._db.execute(
-                    "UPDATE conversations SET title = ? WHERE id = ?",
-                    (title, cid))
+                current = self._db.execute(
+                    "SELECT title FROM conversations WHERE id = ?",
+                    (cid,)).fetchone()
+                if current is not None and current[0] == DEFAULT_TITLE:
+                    title = _title_from(content)
+                    self._db.execute(
+                        "UPDATE conversations SET title = ? WHERE id = ?",
+                        (title, cid))
             # Retention: a conversation that is never closed must still not
             # grow this conversation's row count without bound.
             removed = 0
@@ -539,5 +550,5 @@ class Store:
 def _title_from(content: str) -> str:
     text = re.sub(r"\s+", " ", (content or "").strip())
     if len(text) <= 48:
-        return text or "New chat"
+        return text or DEFAULT_TITLE
     return text[:45].rstrip() + "…"
