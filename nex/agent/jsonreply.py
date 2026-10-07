@@ -12,18 +12,27 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
-def _balanced_object(text: str, start: int) -> Optional[str]:
-    """The substring of `text` from `start` holding one balanced {...}."""
-    depth = 0
+def _scan_objects(reply: str) -> Iterator[Dict[str, Any]]:
+    """Every balanced {...} object in `reply`, in a single O(n) pass.
+
+    A stack of open-brace positions (outside of string literals) is walked
+    once; each closing '}' resolves the innermost still-open '{', yielding
+    one candidate object per close. A '{' that never closes — stray prose
+    mentioning a brace, a truncated object the model got cut off mid-way
+    through — just sits on the stack and is never revisited: it cannot
+    hide a valid object that follows it, and it cannot turn a long reply
+    with many stray braces into quadratic work the way re-scanning from
+    every '{' in turn would.
+    """
+    stack = []
     in_str = False
     esc = False
-    for i in range(start, len(text)):
-        c = text[i]
+    for i, c in enumerate(reply):
         if in_str:
             if esc:
                 esc = False
@@ -35,12 +44,17 @@ def _balanced_object(text: str, start: int) -> Optional[str]:
         if c == '"':
             in_str = True
         elif c == "{":
-            depth += 1
+            stack.append(i)
         elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-    return None
+            if not stack:
+                continue
+            start = stack.pop()
+            try:
+                obj = json.loads(reply[start:i + 1])
+                if isinstance(obj, dict):
+                    yield obj
+            except json.JSONDecodeError:
+                pass
 
 
 def extract_json(reply: str) -> Optional[Dict[str, Any]]:
@@ -55,18 +69,8 @@ def extract_json(reply: str) -> Optional[Dict[str, Any]]:
                 return obj
         except json.JSONDecodeError:
             pass
-    idx = reply.find("{")
-    while idx >= 0:
-        chunk = _balanced_object(reply, idx)
-        if chunk is None:
-            break
-        try:
-            obj = json.loads(chunk)
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            pass
-        idx = reply.find("{", idx + 1)
+    for obj in _scan_objects(reply):
+        return obj
     return None
 
 
@@ -82,16 +86,7 @@ def extract_json_with_key(reply: str, key: str) -> Optional[Dict[str, Any]]:
                 return obj
         except json.JSONDecodeError:
             pass
-    idx = reply.find("{")
-    while idx >= 0:
-        chunk = _balanced_object(reply, idx)
-        if chunk is None:
-            break
-        try:
-            obj = json.loads(chunk)
-            if isinstance(obj, dict) and key in obj:
-                return obj
-        except json.JSONDecodeError:
-            pass
-        idx = reply.find("{", idx + 1)
+    for obj in _scan_objects(reply):
+        if key in obj:
+            return obj
     return None
