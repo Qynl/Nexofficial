@@ -30,7 +30,7 @@ class MockMCPServer:
     def connect(self) -> None:
         pass
 
-    def tools(self) -> List[Dict[str, Any]]:
+    def tools(self, force: bool = False) -> List[Dict[str, Any]]:
         return [dict(t) for t in self._tools]
 
     def resources(self) -> List[Dict[str, Any]]:
@@ -47,7 +47,8 @@ class MockMCPServer:
                          "text": str(item.get("text", ""))}]
         raise ValueError("no such resource: %s" % uri)
 
-    def call(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def call(self, tool: str, args: Dict[str, Any],
+             timeout: Optional[float] = None) -> Dict[str, Any]:
         # Failure injection.
         spec = self._fail.get(tool)
         if spec and spec.get("count", 0) > 0:

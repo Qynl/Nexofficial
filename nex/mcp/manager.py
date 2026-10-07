@@ -45,7 +45,9 @@ from urllib.parse import urlsplit
 
 from mcp.audit import AuditLog
 from mcp.registry import CapabilityRegistry
-from mcp.capability import capability_for_tool, apply_capability_registry
+from mcp.capability import (
+    BUILD, capability_for_tool, apply_capability_registry,
+)
 from mcp.policy import authorize, current_policy
 from mcp.schema import (
     tool_contract_fingerprint, validate_arguments, validate_tool_output,
@@ -57,6 +59,15 @@ ST_CONNECTED = "connected"
 ST_CONNECTING = "connecting"
 ST_DISCONNECTED = "disconnected"
 ST_ERROR = "error"
+
+# Real engine work in the BUILD category (compiling, packaging, cooking,
+# baking lighting) can legitimately run minutes, not seconds. A single flat
+# `call_timeout` per server (default 60s, operator-tunable 1s-3600s) forces
+# a choice between failing every real build outright or making ordinary
+# reads/writes wait just as long before a truly hung call is noticed. BUILD
+# calls get at least this floor; it only ever RAISES the effective timeout
+# for that one call, never lowers an operator's own larger setting.
+_BUILD_CALL_TIMEOUT_FLOOR_S = 900.0
 
 # A stdio command must be ONE executable token; anything from
 # this set means someone is smuggling shell syntax where a
@@ -953,8 +964,16 @@ class ServerManager:
                         "decision": public_decision}
 
         t0 = time.monotonic()
+        call_timeout = None
+        # decision.category is the DISPATCH-RESOLVED category — for a
+        # generic dispatcher (Unreal's call_tool) this is the real inner
+        # action's category, not the wrapper's own (usually UNKNOWN)
+        # classification, so a BUILD action routed through a dispatcher
+        # still gets the longer floor.
+        if decision.category == BUILD:
+            call_timeout = max(up.call_timeout, _BUILD_CALL_TIMEOUT_FLOOR_S)
         try:
-            resp = up.call(tool, args or {})
+            resp = up.call(tool, args or {}, timeout=call_timeout)
         except UpstreamError as exc:
             self.audit.record("call", server=server, tool=tool, args=args,
                               ok=False,

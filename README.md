@@ -726,6 +726,22 @@ planner, not a script Nex executes.
 | `resources/*` | at connect | top-ranked few, per run, audited | untrusted block, char budget |
 | `prompts/*` | at connect | names only, argument-free | hint list, never auto-run |
 
+### 8. Real build/bake/cook calls get a realistic clock
+
+A single flat per-server `call_timeout` (60s default) treats a quick
+`get_actor_details` and a full lighting bake the same way. Real BUILD-category
+work (`compile_blueprint`, `package_project`, `cook_content`, `bake_lighting`,
+and the like) routinely takes minutes; a short timeout could not distinguish
+"still compiling" from "hung," so it failed legitimate builds outright — and
+because a mutating call is never safely auto-retried on an unknown-outcome
+timeout (see the recovery ladder above), that false failure used to end the
+run instead of the actual build. BUILD calls now get a 15-minute timeout floor
+regardless of the server's configured default (never a *lower* one — an
+operator's own larger setting always wins), resolved through generic tool
+dispatchers too (Unreal's `call_tool` wrapper), so the category checked is the
+real action being invoked, not the wrapper's own classification. Every other
+call keeps using the server's configured timeout exactly as before.
+
 ### What an excellent engine MCP server should do
 
 | Contract property | Why Nex benefits |

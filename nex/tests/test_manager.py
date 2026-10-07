@@ -117,7 +117,7 @@ class ManagerTests(unittest.TestCase):
     def test_mcp_is_error_result_never_becomes_success(self):
         up = self.mgr.upstream("echo")
         original = up.call
-        up.call = lambda _tool, _args: {
+        up.call = lambda _tool, _args, timeout=None: {
             "result": {"isError": True,
                        "content": [{"type": "text",
                                     "text": "engine rejected the operation"}]}}
@@ -423,6 +423,108 @@ class ReconnectBackoffTests(unittest.TestCase):
             mgr.close()
             httpd.shutdown()
             httpd.server_close()
+
+
+class BuildCallTimeoutTests(unittest.TestCase):
+    """A BUILD-category call (compiling, packaging, baking lighting) must
+    get a much longer timeout than an ordinary call — real engine work
+    routinely takes minutes, and a single flat per-server timeout forces a
+    choice between failing every real build or making every quick call
+    wait just as long before a hang is noticed.
+
+    Uses its own NEX_HOME for the same reason as ReconnectBackoffTests.
+    """
+
+    def setUp(self):
+        self._old_home = os.environ.get("NEX_HOME")
+        os.environ["NEX_HOME"] = tempfile.mkdtemp(prefix="nex-buildtimeout-")
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), echo.Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        if self._old_home is None:
+            os.environ.pop("NEX_HOME", None)
+        else:
+            os.environ["NEX_HOME"] = self._old_home
+
+    def _mgr_with_fake_tool(self, tool_def):
+        mgr = ServerManager()
+        mgr.add({"name": "engine", "trusted": True,
+                 "url": "http://127.0.0.1:%d/mcp" % self.port})
+        up = mgr.upstream("engine")
+        self.assertIsNotNone(up)
+        up.tools = lambda force=False: [tool_def]
+        seen = {}
+
+        def fake_call(tool, args, timeout=None):
+            seen["timeout"] = timeout
+            return {"result": {"content": []}}
+        up.call = fake_call
+        return mgr, up, seen
+
+    def test_build_category_tool_gets_the_longer_floor(self):
+        mgr, up, seen = self._mgr_with_fake_tool({
+            "name": "compile_project",
+            "description": "compile the project",
+            "inputSchema": {"type": "object", "properties": {}}})
+        try:
+            result = mgr.call("engine", "compile_project", {})
+            self.assertNotIn("error", result)
+            self.assertNotIn("refused", result)
+            self.assertNotIn("needs_confirmation", result)
+            self.assertIsNotNone(seen.get("timeout"),
+                                 "a BUILD call must pass an explicit "
+                                 "(longer) timeout, not None")
+            self.assertGreaterEqual(
+                seen["timeout"], 900.0,
+                "a BUILD call must get at least the long-op floor")
+            self.assertGreaterEqual(seen["timeout"], up.call_timeout)
+        finally:
+            mgr.close()
+
+    def test_ordinary_tool_keeps_the_default_timeout(self):
+        mgr, up, seen = self._mgr_with_fake_tool({
+            "name": "get_status",
+            "description": "read current status",
+            "inputSchema": {"type": "object", "properties": {}}})
+        try:
+            result = mgr.call("engine", "get_status", {})
+            self.assertNotIn("error", result)
+            self.assertIsNone(
+                seen.get("timeout"),
+                "an ordinary (non-BUILD) call must NOT get an inflated "
+                "timeout override — it keeps using the server's own "
+                "call_timeout via the None default: %r" % seen)
+        finally:
+            mgr.close()
+
+    def test_build_action_behind_a_dispatcher_also_gets_the_floor(self):
+        # Some servers (Unreal MCP in "tool search" mode) expose one
+        # generic dispatcher instead of real tools. The dispatcher's OWN
+        # name/schema rarely says BUILD, so the timeout decision must use
+        # the dispatch-RESOLVED category (decision.category), not the
+        # wrapper's own classification.
+        mgr, up, seen = self._mgr_with_fake_tool({
+            "name": "call_tool",
+            "description": "invoke a named tool",
+            "inputSchema": {"type": "object",
+                            "properties": {"name": {"type": "string"},
+                                          "arguments": {"type": "object"}}}})
+        try:
+            result = mgr.call("engine", "call_tool",
+                              {"name": "bake_lighting", "arguments": {}})
+            self.assertNotIn("error", result)
+            self.assertNotIn("refused", result)
+            self.assertIsNotNone(
+                seen.get("timeout"),
+                "a BUILD action dispatched through a generic wrapper must "
+                "still get the longer floor: %r / %r" % (seen, result))
+            self.assertGreaterEqual(seen["timeout"], 900.0)
+        finally:
+            mgr.close()
 
 
 if __name__ == "__main__":

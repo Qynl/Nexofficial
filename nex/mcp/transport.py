@@ -571,7 +571,8 @@ class Upstream:
             pass
 
     def _rpc(self, method: str, params: Optional[Dict[str, Any]] = None,
-             id: Optional[int] = None) -> Dict[str, Any]:
+             id: Optional[int] = None,
+             timeout: Optional[float] = None) -> Dict[str, Any]:
         """Send a single JSON-RPC envelope and parse the SSE-or-JSON reply.
 
         This is the ONE chokepoint every call site uses (initialize, a tool
@@ -582,6 +583,13 @@ class Upstream:
         on every single tool call even while the breaker was tripped open —
         the breaker only ever protected a fresh `connect()`, never an
         ongoing, already-connected session that had started failing.
+
+        ``timeout`` overrides `self.call_timeout` for just this one
+        round-trip — real engine work (baking lighting, packaging a build,
+        cooking content) can legitimately run far longer than an ordinary
+        query, and a single flat timeout per server forces an operator to
+        choose between a long build failing outright or a hung/broken call
+        taking many minutes to be noticed.
         """
         if self._circuit_open():
             raise UpstreamError(
@@ -594,7 +602,7 @@ class Upstream:
         if params is not None:
             payload["params"] = params
         try:
-            status, headers, body = self._post(payload)
+            status, headers, body = self._post(payload, timeout=timeout)
         except UpstreamError as exc:
             self._on_failure(str(exc))
             raise
@@ -911,15 +919,23 @@ class Upstream:
             return list(self._tools_cache)
 
     def call(self, tool_name: str,
-             arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Invoke a tool on this server. Returns the raw JSON-RPC reply."""
+             arguments: Dict[str, Any],
+             timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Invoke a tool on this server. Returns the raw JSON-RPC reply.
+
+        ``timeout`` overrides the server's configured `call_timeout` for
+        this one call only (e.g. a known-slow BUILD-category operation);
+        it never changes the timeout any other call on this connection
+        uses.
+        """
         with self._lock:
             self._ensure_initialized()
             t0 = time.monotonic()
             try:
                 resp = self._rpc("tools/call",
                                  {"name": tool_name,
-                                  "arguments": arguments or {}})
+                                  "arguments": arguments or {}},
+                                 timeout=timeout)
             except UpstreamError as exc:
                 self._record_failure(exc)
                 raise

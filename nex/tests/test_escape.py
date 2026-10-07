@@ -404,7 +404,7 @@ class ToolDispatcherTests(unittest.TestCase):
                 def tools(self):
                     return [dispatcher]
 
-                def call(self, tool, args):
+                def call(self, tool, args, timeout=None):
                     return {"content": [{"type": "text", "text": "ok"}]}
 
             m = ServerManager()

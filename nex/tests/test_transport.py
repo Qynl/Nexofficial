@@ -157,6 +157,47 @@ for line in sys.stdin:
 '''
 
 
+class PerCallTimeoutTests(unittest.TestCase):
+    """call(..., timeout=X) must override call_timeout for that ONE call
+    only — other calls on the same connection keep using the configured
+    default. This is what lets a manager give a known-slow BUILD action
+    (baking lighting, packaging) more time without raising the timeout
+    for every ordinary call on that server."""
+
+    def _mk_fake(self, call_timeout=60.0):
+        up = Upstream("x", "http://127.0.0.1:1/mcp", call_timeout=call_timeout)
+        up._initialized = True
+        seen = []
+
+        def fake_post(payload, headers=None, timeout=None):
+            seen.append(timeout)
+            body = json.dumps({"jsonrpc": "2.0", "id": payload.get("id"),
+                               "result": {"content": []}})
+            return (200, {}, body)
+
+        up._post = fake_post
+        return up, seen
+
+    def test_explicit_timeout_overrides_just_this_call(self):
+        up, seen = self._mk_fake(call_timeout=60.0)
+        up.call("some_tool", {}, timeout=900.0)
+        expect(seen == [900.0],
+               "an explicit per-call timeout must reach _post: %r" % seen)
+        up.call("some_tool", {})
+        expect(seen == [900.0, None],
+               "the NEXT call without an override must not inherit the "
+               "previous call's timeout — None means 'use call_timeout', "
+               "not 'use whatever was passed last time': %r" % seen)
+
+    def test_default_call_has_no_override(self):
+        up, seen = self._mk_fake(call_timeout=45.0)
+        up.call("some_tool", {})
+        expect(seen == [None],
+               "an ordinary call must pass timeout=None through to _post "
+               "(self.call_timeout is the fallback already applied inside "
+               "_post/_post_stdio): %r" % seen)
+
+
 class FrameCodecTests(unittest.TestCase):
     def test_ndjson_frames(self):
         d = StdioDecoder()
