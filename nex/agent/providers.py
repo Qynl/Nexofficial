@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -123,6 +124,32 @@ FAILOVER_KINDS = (ERR_RATE_LIMIT, ERR_TIMEOUT, ERR_SERVER, ERR_AUTH,
 # resets on a one-minute cadence, so this is the honest assumption instead of
 # a token retry that would just get hammered by the same 429 again.
 _BLIND_RATE_LIMIT_BACKOFF_S = 60.0
+
+# How fast a cooldown grows when the SAME failure keeps recurring back to
+# back (consecutive 5xx/timeout/network hits, or consecutive blind 429s).
+# One blip is noise; three in a row is a real outage that deserves more
+# breathing room than hammering every few seconds would give it.
+_BACKOFF_MULTIPLIER = 1.6
+
+# Absolute ceiling for any single cooldown, regardless of how far the
+# escalation above has climbed — a provider is always retried within two
+# minutes, never parked indefinitely by this mechanism.
+_MAX_COOLDOWN_S = 120.0
+
+
+def _jittered(wait: float, spread: float = 0.1) -> float:
+    """Pad `wait` by 0-`spread` extra, never less. Keeps providers from all
+    coming back at the EXACT same instant (thundering herd) when several
+    workers/processes share a key and hit the same outage or quota wall at
+    once — a few hundred ms to a few seconds of spread costs nothing here
+    but avoids a synchronized retry storm. Never used on top of a provider's
+    own Retry-After: that figure is a promise, not a guess, and jittering it
+    would risk looking like Nex ignored it.
+    """
+    if wait <= 0:
+        return wait
+    return wait + random.uniform(0.0, wait * spread)
+
 
 # Machine-consumed agent jobs benefit from deterministic JSON. These purpose
 # names are attached by the loop (not guessed from user text) and are visible
@@ -931,10 +958,20 @@ class ProviderState:
     """Live state: sliding-window RPM budget, cooldown, counters."""
 
     def __init__(self, name: str, rpm: int = 0,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 cooldown_s: float = 20.0) -> None:
         self.name = name
         self.rpm = rpm
         self._clock = clock
+        # Base cooldown for a non-rate-limit hiccup (5xx / timeout / network),
+        # taken from the provider's own catalog/config entry (ProviderSpec
+        # .cooldown_s) instead of one hardcoded number for every provider —
+        # NIM, a free gateway and a local Ollama install do not fail the
+        # same way or recover at the same pace. Kept in sync with the spec
+        # by Router.resolve_states() whenever settings change. Named
+        # differently from the "cooldown_s" key in to_dict() below, which
+        # reports REMAINING seconds right now, not this configured base.
+        self.base_cooldown_s = max(1.0, cooldown_s)
         self._lock = threading.RLock()
         self._window: Deque[float] = deque()
         self.cooldown_until = 0.0
@@ -966,6 +1003,12 @@ class ProviderState:
         # room). That means the real quota is smaller than configured, or
         # shared with another process/key — see mark_error().
         self.blind_rate_limits = 0
+        # Consecutive non-rate-limit hiccups (timeout/network/5xx) with no
+        # successful call in between. A single blip and a real outage look
+        # identical on the first failure; this is what tells them apart so
+        # the SECOND and THIRD consecutive hit back off further instead of
+        # retrying at the same fixed interval forever. Reset by mark_ok().
+        self.consecutive_failures = 0
         # A rejected key is a CONFIG problem: it blocks the provider for much
         # longer than a rate limit and is only lifted by fixing the config.
         self.auth_blocked_until = 0.0
@@ -1068,9 +1111,10 @@ class ProviderState:
         self.last_error = ""
         self.last_error_kind = ""
         self.last_ok_ts = time.time()
-        # A real answer proves the quota is healthy again — any escalation
-        # from blind 429s no longer applies.
+        # A real answer proves the provider is healthy again — any
+        # escalation from blind 429s or repeated hiccups no longer applies.
         self.blind_rate_limits = 0
+        self.consecutive_failures = 0
 
     def mark_error(self, kind: str, message: str,
                    retry_after: Optional[float] = None) -> None:
@@ -1111,15 +1155,31 @@ class ProviderState:
                 self.blind_rate_limits = 0
             else:
                 self.blind_rate_limits += 1
-                wait = _BLIND_RATE_LIMIT_BACKOFF_S * (
-                    1.3 ** (self.blind_rate_limits - 1))
-            self.cooldown_until = now + min(max(wait, 2.0), 120.0)
+                wait = _jittered(_BLIND_RATE_LIMIT_BACKOFF_S * (
+                    _BACKOFF_MULTIPLIER ** (self.blind_rate_limits - 1)))
+            self.cooldown_until = now + min(max(wait, 2.0), _MAX_COOLDOWN_S)
         elif kind in (ERR_TIMEOUT, ERR_NETWORK):
+            # A lone timeout is usually just the network having a bad
+            # moment — retry soon. Several IN A ROW with no success between
+            # them means the provider (or the path to it) is actually down,
+            # so each consecutive hit waits longer instead of hammering a
+            # dead endpoint every five seconds for the life of the outage.
             self.status = ST_COOLING
-            self.cooldown_until = now + 5.0
+            self.consecutive_failures += 1
+            wait = _jittered(5.0 * (
+                _BACKOFF_MULTIPLIER ** (self.consecutive_failures - 1)))
+            self.cooldown_until = now + min(wait, _MAX_COOLDOWN_S)
         elif kind == ERR_SERVER:
+            # Base cooldown now comes from the provider's OWN configured
+            # cooldown_s (catalog default, or an operator override) instead
+            # of one flat number for every provider — NIM, a free gateway
+            # and a local Ollama install do not recover from a 5xx at the
+            # same pace. Escalates the same way as a timeout/network hit.
             self.status = ST_COOLING
-            self.cooldown_until = now + 10.0
+            self.consecutive_failures += 1
+            wait = _jittered(self.base_cooldown_s * (
+                _BACKOFF_MULTIPLIER ** (self.consecutive_failures - 1)))
+            self.cooldown_until = now + min(wait, _MAX_COOLDOWN_S)
         elif kind == ERR_AUTH:
             # Not a hiccup — a wrong/expired key. Stop hammering it entirely
             # until the configuration changes (clear_auth_block) and let the
@@ -1179,6 +1239,8 @@ class ProviderState:
             "last_finish_reason": self.last_finish_reason,
             "rate_limited": self.rate_limited,
             "blind_rate_limits": self.blind_rate_limits,
+            "consecutive_failures": self.consecutive_failures,
+            "base_cooldown_s": self.base_cooldown_s,
             "auth_failures": self.auth_failures,
             "batch_splits": self.batch_splits,
             "soft_cap": self.soft_cap(),
@@ -1211,7 +1273,7 @@ class Router:
         self.bus = bus
         self._clock = clock
         self.states: Dict[str, ProviderState] = {
-            name: ProviderState(name, spec.rpm, clock)
+            name: ProviderState(name, spec.rpm, clock, spec.cooldown_s)
             for name, spec in specs.items()
         }
         self._last_served: Dict[str, str] = {}
@@ -1230,10 +1292,11 @@ class Router:
     # -- configuration ----------------------------------------------------
     def resolve_states(self) -> None:
         for name, spec in self.specs.items():
-            st = self.states.setdefault(name, ProviderState(name, spec.rpm,
-                                                            self._clock))
+            st = self.states.setdefault(name, ProviderState(
+                name, spec.rpm, self._clock, spec.cooldown_s))
             st.rpm = spec.rpm
             st.reserve_ratio = spec.reserve
+            st.base_cooldown_s = max(1.0, spec.cooldown_s)
             if not spec.enabled:
                 st.status = ST_DISABLED
             elif not spec.configured:
@@ -1264,9 +1327,11 @@ class Router:
             # lifts an AUTH block, because that is a new credential.
             state = self.states.get(name)
             if state is None:
-                state = ProviderState(name, spec.rpm, self._clock)
+                state = ProviderState(name, spec.rpm, self._clock,
+                                      spec.cooldown_s)
             state.rpm = spec.rpm
             state.reserve_ratio = spec.reserve
+            state.base_cooldown_s = max(1.0, spec.cooldown_s)
             if current is not None and (
                     current.base_url != spec.base_url
                     or current.api_key != spec.api_key

@@ -1506,10 +1506,95 @@ _expect(blind_wait >= 59.0,
 _expect(r_blind.states["nim"].blind_rate_limits == 1,
         "the blind 429 is counted so repeat offenses can be told apart "
         "from one-off hiccups")
-cl_blind.advance(60)
+# A touch of random jitter is added on top of the 60s floor (thundering-herd
+# protection), so advance past the worst case rather than exactly 60s.
+cl_blind.advance(blind_wait + 1)
 _expect(r_blind.chat("agent", MESSAGES) == "nim ok again",
         "once the backoff elapses, NIM is tried again automatically")
 _expect(r_blind.states["nim"].blind_rate_limits == 0,
         "a real answer clears the blind-rate-limit escalation counter")
+
+# ===========================================================================
+# 15. non-rate-limit hiccups also escalate, and use the PROVIDER's own
+#     configured cooldown_s instead of one hardcoded number for everyone.
+# ===========================================================================
+
+print("=== 15. outage backoff is per-provider and escalates on repeats ===")
+
+cl5 = Clock()
+h5xx = FakeHTTP()
+h5xx.push("integrate.api.nvidia.com", http_error("n", 503, "gateway"))
+h5xx.push("integrate.api.nvidia.com", http_error("n", 503, "gateway"))
+h5xx.push("integrate.api.nvidia.com", http_error("n", 503, "gateway"))
+h5xx.push("integrate.api.nvidia.com", "nim recovered")
+h5xx.push("127.0.0.1:11434", "ollama")
+h5xx.push("127.0.0.1:11434", "ollama")
+h5xx.push("127.0.0.1:11434", "ollama")
+r5xx = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     # cooldown_s=20 here — NOT the old hardcoded 10s — must actually be
+     # honoured now that it is wired into ProviderState.
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x",
+                                   cooldown_s=20.0,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl5, transport={"post": h5xx.post, "get": h5xx.get})
+_expect(r5xx.chat("agent", MESSAGES) == "ollama",
+        "a 5xx still fails straight over to Ollama")
+wait1 = r5xx.states["nim"].to_dict()["cooldown_s"]
+_expect(19.0 <= wait1 <= 23.0,
+        "the FIRST 503 cools down around the provider's OWN configured "
+        "cooldown_s=20 (got %.1fs), not a hardcoded 10s for every provider"
+        % wait1)
+_expect(r5xx.states["nim"].consecutive_failures == 1,
+        "the hiccup is counted")
+
+# a second 503 before any success in between must back off FURTHER —
+# otherwise a real outage would be hammered every ~20s indefinitely.
+cl5.advance(wait1 + 1)
+_expect(r5xx.chat("agent", MESSAGES) == "ollama",
+        "still down — NIM is retried (not skipped) once its cooldown elapsed")
+wait2 = r5xx.states["nim"].to_dict()["cooldown_s"]
+_expect(wait2 > wait1,
+        "a SECOND consecutive 503 waits longer than the first (%.1fs -> "
+        "%.1fs) — a real outage is not hammered at a fixed interval forever"
+        % (wait1, wait2))
+_expect(r5xx.states["nim"].consecutive_failures == 2, "escalation is counted")
+
+# third strike, then recovery
+cl5.advance(wait2 + 1)
+_expect(r5xx.chat("agent", MESSAGES) == "ollama", "third 503, still routed")
+wait3 = r5xx.states["nim"].to_dict()["cooldown_s"]
+_expect(wait3 > wait2, "escalation keeps climbing (%.1fs)" % wait3)
+cl5.advance(wait3 + 1)
+_expect(r5xx.chat("agent", MESSAGES) == "nim recovered",
+        "NIM is tried again once its (longer) cooldown elapses")
+_expect(r5xx.states["nim"].consecutive_failures == 0,
+        "a real answer resets the escalation back to the base cooldown")
+
+# --- a lone timeout still recovers quickly (no false escalation) ---------
+cl6 = Clock()
+h_lone = FakeHTTP()
+h_lone.push("integrate.api.nvidia.com", urllib.error.URLError("timed out"))
+h_lone.push("integrate.api.nvidia.com", "nim ok")
+h_lone.push("127.0.0.1:11434", "ollama")
+r_lone = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x",
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl6, transport={"post": h_lone.post, "get": h_lone.get})
+r_lone.chat("agent", MESSAGES)
+lone_wait = r_lone.states["nim"].to_dict()["cooldown_s"]
+_expect(lone_wait <= 6.0,
+        "a single isolated timeout backs off briefly (~5s, got %.1fs), not "
+        "the escalated outage treatment" % lone_wait)
+cl6.advance(lone_wait + 1)
+_expect(r_lone.chat("agent", MESSAGES) == "nim ok",
+        "…and NIM is tried again right after")
 
 print("\nAll provider-layer tests passed.")

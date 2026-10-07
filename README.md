@@ -1135,6 +1135,20 @@ itself — "our best provider" is never left benched by a stale setting.
 Authentication failures are different: they stay parked until configuration
 changes instead of hammering a rejected key.
 
+Non-rate-limit hiccups (timeout, unreachable, 5xx) follow the same escalate-
+then-reset shape instead of a flat retry interval: each provider cools down
+using its OWN configured `cooldown_s` (NIM/OpenRouter default 20s, GPT/
+OpenCode 15s, local 5s — a free gateway and a production account do not fail
+or recover the same way), a SECOND consecutive hit without a success in
+between backs off further (×1.6 per repeat, capped at 120s), and one real
+answer resets it back to the base figure. A lone blip still recovers in
+seconds; a real outage is not hammered at a fixed interval for its whole
+duration. A small amount of random jitter is layered on top of every
+computed (non-`Retry-After`) cooldown so that several workers sharing one
+key do not all retry at the exact same instant. `ProviderState.to_dict()`
+exposes `blind_rate_limits`, `consecutive_failures` and `base_cooldown_s` so
+an operator can see which failure mode is in play.
+
 **9. It fails over the hands—not the plan.**  The exact message list is handed
 to the next provider. Completed MCP actions are not replayed, task IDs are not
 regenerated, and the UI emits `provider.fallback` / `provider.recovered` events
