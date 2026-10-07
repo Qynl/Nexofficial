@@ -285,7 +285,12 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "label": "OpenCode Zen",
         "kind": KIND_OPENAI,
         "base_url": "https://opencode.ai/zen/v1",
-        "model": "nemotron-3-ultra-free",
+        # Ling 3.1 Flash moved onto Zen's own free tier directly (reviewed
+        # 2026-10 against the live opencode.ai/zen/v1/models catalog) — no
+        # longer OpenRouter-only. Matches OpenRouter's own default below so
+        # both free gateways lead with the same strong, $0, 262K-context
+        # agentic model instead of two different ones.
+        "model": "ling-3.1-flash-free",
         "api_key_env": "OPENCODE_API_KEY",
         # No published per-model RPM; a conservative local ceiling avoids
         # hammering a free, no-card gateway into a hard 429/ban.
@@ -294,9 +299,10 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "cooldown_s": 15.0,
         "structured_outputs": False,
         "note": "Free, no-card gateway (opencode.ai/auth). Several models are "
-                "$0/token today — Nemotron 3 Ultra/Lightning, Ling 3.0 Flash "
-                "Fin, MiMo-V2.5, Big Pickle — but a free listing can change "
-                "or retire; Settings → Model pulls the live catalog.",
+                "$0/token today — Ling 3.1 Flash (default), Nemotron 3 "
+                "Ultra/Lightning, MiMo-V2.6 Flash, Big Pickle — but a free "
+                "listing can change or retire; Settings → Model pulls the "
+                "live catalog.",
     },
     "openrouter": {
         "label": "OpenRouter",
@@ -381,6 +387,12 @@ CATALOG: List[Dict[str, Any]] = [
     # Only the chat/completions-protocol models are listed: Zen also serves
     # GPT/Claude/Gemini/Qwen through Responses/Messages/native endpoints this
     # router does not speak, so those are left off even when free.
+    {"provider": "opencode", "id": "ling-3.1-flash-free",
+     "role": "agent", "label": "Ling 3.1 Flash (OpenCode Zen, free)",
+     "note": "The provider default. inclusionAI MoE, 560B total/25B active, "
+             "262K context, free directly on Zen now (previously "
+             "OpenRouter-only) — same strong, $0 agentic model as "
+             "OpenRouter's own default, one fewer thing to remember."},
     {"provider": "opencode", "id": "nemotron-3-ultra-free",
      "role": "agent", "label": "Nemotron 3 Ultra (OpenCode Zen, free)",
      "note": "Same 550B Nemotron Ultra family NIM charges for — free here. "
@@ -391,11 +403,13 @@ CATALOG: List[Dict[str, Any]] = [
              "loops when NIM's own Lightning is rate limited."},
     {"provider": "opencode", "id": "ling-3.0-flash-fin-free",
      "role": "agent", "label": "Ling 3.0 Flash Fin (OpenCode Zen, free)",
-     "note": "Ant Group / inclusionAI MoE flash model, free on Zen. The "
-             "newer Ling 3.1 Flash is free on OpenRouter instead."},
-    {"provider": "opencode", "id": "mimo-v2.5-free",
-     "role": "chat", "label": "MiMo V2.5 (OpenCode Zen, free)",
-     "note": "Xiaomi general-purpose model; free coding/chat generalist."},
+     "note": "Ant Group / inclusionAI MoE flash model, free on Zen. An "
+             "older sibling of the default Ling 3.1 Flash above — kept as "
+             "an alternate in case 3.1's free listing ever rotates off."},
+    {"provider": "opencode", "id": "mimo-v2.6-flash-free",
+     "role": "chat", "label": "MiMo V2.6 Flash (OpenCode Zen, free)",
+     "note": "Xiaomi general-purpose model; free coding/chat generalist. "
+             "Supersedes the retired MiMo V2.5 free listing."},
     {"provider": "opencode", "id": "big-pickle",
      "role": "chat", "label": "Big Pickle (OpenCode Zen, free)",
      "note": "OpenCode's rotating stealth eval model — quality varies by "

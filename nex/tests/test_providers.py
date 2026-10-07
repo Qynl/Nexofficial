@@ -1392,6 +1392,17 @@ _expect(any(c["id"] == "inclusionai/ling-3.1-flash" for c in catalog_or),
 _expect(providers.DEFAULT_PROVIDERS["openrouter"]["model"]
         == "inclusionai/ling-3.1-flash",
         "Ling 3.1 Flash is OpenRouter's default model")
+_expect(any(c["id"] == "ling-3.1-flash-free" for c in catalog_oc),
+        "Ling 3.1 Flash is in the curated OpenCode Zen catalog too — it "
+        "moved onto Zen's own free tier directly, not just OpenRouter's")
+_expect(providers.DEFAULT_PROVIDERS["opencode"]["model"]
+        == "ling-3.1-flash-free",
+        "Ling 3.1 Flash is OpenCode Zen's default model too, matching "
+        "OpenRouter's default so both free gateways lead with the same "
+        "strong $0 agentic model")
+_expect(not any(c["id"] == "mimo-v2.5-free" for c in catalog_oc),
+        "the retired MiMo V2.5 free listing must not linger in the "
+        "curated catalog once Zen moved to MiMo V2.6 Flash")
 
 # Bare env vars (OPENCODE_API_KEY / OPENROUTER_API_KEY) are honored, matching
 # the pattern already used for NVIDIA_API_KEY / OPENAI_API_KEY.
@@ -1411,12 +1422,12 @@ try:
         # With NIM/GPT both absent, hard work should fall through to the
         # free OpenCode Zen gateway automatically — no routing edit needed.
         h_free = FakeHTTP()
-        h_free.push("opencode.ai", "free nemotron answer")
+        h_free.push("opencode.ai", "free ling answer")
         r_free._transport = {"post": h_free.post, "get": h_free.get,
                              "stream": h_free.stream}
         text_free = r_free.chat(providers.ROLE_AGENT, MESSAGES,
                                 purpose="diagnosis")
-        _expect(text_free == "free nemotron answer",
+        _expect(text_free == "free ling answer",
                 "hard work reaches OpenCode Zen when NIM/GPT are unconfigured")
         _expect(h_free.calls[-1][0] == "https://opencode.ai/zen/v1/chat/completions",
                 "the call actually hits OpenCode Zen's documented endpoint")

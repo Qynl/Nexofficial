@@ -1042,7 +1042,7 @@ or OpenRouter is special-cased: they are all plain OpenAI-compatible
 | **Local (Ollama)** | free, your hardware | none | `http://127.0.0.1:11434` | `gpt-oss:20b` |
 | **NVIDIA NIM** | pay-as-you-go | `NVIDIA_API_KEY` | `integrate.api.nvidia.com/v1` | `nvidia/nemotron-3-super-120b-a12b` |
 | **GPT (OpenAI-compatible)** | pay-as-you-go | `OPENAI_API_KEY` | `api.openai.com/v1` | `gpt-5.1` |
-| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `nemotron-3-ultra-free` |
+| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `ling-3.1-flash-free` |
 | **OpenRouter** | **free, no card** | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | `inclusionai/ling-3.1-flash` |
 
 #### OpenCode Zen — free NIM-grade models with no credit card
@@ -1054,10 +1054,11 @@ models are listed at **$0 input/output**:
 
 | Model id | What it is |
 | --- | --- |
+| `ling-3.1-flash-free` | The default. inclusionAI MoE, 560B total/25B active, 262K context — the same strong $0 model OpenRouter defaults to, now free directly on Zen too |
 | `nemotron-3-ultra-free` | The same 550B Nemotron Ultra family NIM charges for, free here — slow, good for a careful plan |
 | `nemotron-3.5-lightning-free` | Free mirror of NIM's fast Lightning tier — low-latency agent loops |
-| `ling-3.0-flash-fin-free` | Ant Group / inclusionAI MoE flash model, finance-tuned variant |
-| `mimo-v2.5-free` | Xiaomi general-purpose model |
+| `ling-3.0-flash-fin-free` | Ant Group / inclusionAI MoE flash model, finance-tuned variant — an older sibling of the default |
+| `mimo-v2.6-flash-free` | Xiaomi general-purpose model |
 | `big-pickle` | OpenCode's rotating stealth eval model — quality varies week to week |
 
 Only the models served through Zen's `chat/completions` protocol are usable
@@ -1285,13 +1286,13 @@ OPENROUTER_API_KEY=your-openrouter-key
 NEX_CHAT_PROVIDER=local
 NEX_CHAT_FALLBACKS=opencode,openrouter
 NEX_AGENT_PROVIDER=opencode
-NEX_AGENT_MODEL=nemotron-3-ultra-free
 NEX_AGENT_FALLBACKS=openrouter,local
 ```
 
 Routine work still stays on Ollama; hard work gets real hosted model quality
-(free Nemotron Ultra, then free Ling 3.1 Flash) with zero recurring cost and
-no payment method on file anywhere in the chain.
+(free Ling 3.1 Flash on OpenCode Zen, then the same free Ling 3.1 Flash on
+OpenRouter if Zen is unavailable) with zero recurring cost and no payment
+method on file anywhere in the chain.
 
 #### Local routine + NIM → GPT → free gateways → Ollama hard-work chain
 
@@ -1339,7 +1340,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NVIDIA_API_KEY` | empty | NVIDIA NIM credential |
 | `OPENAI_API_KEY` | empty | OpenAI-compatible credential |
 | `OPENCODE_API_KEY` | empty | OpenCode Zen credential — **free, no card** (opencode.ai/auth) |
-| `NEX_OPENCODE_MODEL` | `nemotron-3-ultra-free` | OpenCode Zen model id |
+| `NEX_OPENCODE_MODEL` | `ling-3.1-flash-free` | OpenCode Zen model id |
 | `NEX_OPENCODE_RPM` | `20` | OpenCode Zen local safety ceiling (no published quota) |
 | `OPENROUTER_API_KEY` | empty | OpenRouter credential — **free, no card** (openrouter.ai/keys) |
 | `NEX_OPENROUTER_MODEL` | `inclusionai/ling-3.1-flash` | OpenRouter model id (append `:free` for zero-cost variants) |
