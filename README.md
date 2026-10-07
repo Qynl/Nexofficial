@@ -1113,10 +1113,26 @@ A 25% reserve moves lower-priority evaluation/batch jobs to a fallback while
 allowing complex plans and repairs to spend the protected slots when needed.
 Hosted limits can still vary by account, model, endpoint, and load.
 
-**8. It obeys real recovery signals.**  `Retry-After` works as either seconds or
-an HTTP date. A full local window waits briefly when useful, otherwise hands the
-same messages to the next provider. When cooldown expires, NIM automatically
-returns to service. Authentication failures stay parked until configuration
+**8. It obeys real recovery signals — and reclaims NIM the instant it can.**
+NIM is the preferred hard-work provider, so the chain always tries it FIRST on
+every call; nothing has to be re-enabled by hand. Recovery timing is trusted
+in order:
+
+1. `Retry-After` (seconds or an HTTP date) — the provider told us exactly;
+2. our own tracked 60-second window, when it already predicted the 429 (it
+   thought the window was full) — trust the math, no guessing;
+3. otherwise this is a **blind 429**: NVIDIA rate-limited the request even
+   though Nex's own accounting still looked like it had room — meaning the
+   real quota is smaller than `NEX_NIM_RPM` claims, or it is shared with
+   another process/key. Retrying in a couple of seconds would just get
+   hammered by the same 429 again, so Nex backs off a full rate-limit window
+   (60s) instead, escalating a little on repeated blind hits so a
+   persistently wrong RPM setting does not keep probing forever. One real
+   answer clears the escalation immediately.
+
+The moment that cooldown elapses, the very next call tries NIM again by
+itself — "our best provider" is never left benched by a stale setting.
+Authentication failures are different: they stay parked until configuration
 changes instead of hammering a rejected key.
 
 **9. It fails over the hands—not the plan.**  The exact message list is handed

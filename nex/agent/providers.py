@@ -117,6 +117,13 @@ ERR_CONFIG = "config_error"
 FAILOVER_KINDS = (ERR_RATE_LIMIT, ERR_TIMEOUT, ERR_SERVER, ERR_AUTH,
                   ERR_NETWORK, ERR_PARSE, ERR_BAD_REQUEST)
 
+# Default backoff for a "blind" 429 — a rate limit our own sliding-window
+# accounting did not predict and the provider did not explain with a
+# Retry-After header. Almost every provider's "requests per minute" quota
+# resets on a one-minute cadence, so this is the honest assumption instead of
+# a token retry that would just get hammered by the same 429 again.
+_BLIND_RATE_LIMIT_BACKOFF_S = 60.0
+
 # Machine-consumed agent jobs benefit from deterministic JSON. These purpose
 # names are attached by the loop (not guessed from user text) and are visible
 # in provider telemetry. Providers may opt out when a model lacks JSON mode.
@@ -954,6 +961,11 @@ class ProviderState:
         self.last_call_clock = 0.0
         self.chills = 0
         self.paced_skips = 0
+        # Consecutive 429s our OWN sliding-window accounting did not predict
+        # (no Retry-After, and our tracked window still looked like it had
+        # room). That means the real quota is smaller than configured, or
+        # shared with another process/key — see mark_error().
+        self.blind_rate_limits = 0
         # A rejected key is a CONFIG problem: it blocks the provider for much
         # longer than a rate limit and is only lifted by fixing the config.
         self.auth_blocked_until = 0.0
@@ -1056,6 +1068,9 @@ class ProviderState:
         self.last_error = ""
         self.last_error_kind = ""
         self.last_ok_ts = time.time()
+        # A real answer proves the quota is healthy again — any escalation
+        # from blind 429s no longer applies.
+        self.blind_rate_limits = 0
 
     def mark_error(self, kind: str, message: str,
                    retry_after: Optional[float] = None) -> None:
@@ -1067,14 +1082,38 @@ class ProviderState:
             self.rate_limited += 1
             self.status = ST_RATE_LIMITED
             self.last_retry_after = retry_after
-            # Retry when it can ACTUALLY work again: either the moment the
-            # provider asked for (Retry-After) or the moment our own window
-            # frees a slot — whichever is later. That is what makes "after
-            # the minute is over, NIM is tried again" true instead of
-            # hopeful: a fixed 20s cooldown would just hit the wall again.
+            # Retry when it can ACTUALLY work again — in order of trust:
+            #
+            #   1. the moment the provider asked for (Retry-After header);
+            #   2. the moment OUR OWN tracked window frees a slot, when our
+            #      accounting already predicted this 429 (it thought the
+            #      window was full);
+            #   3. otherwise this is a BLIND 429: the provider rate-limited
+            #      us even though our own sliding window still looked like
+            #      it had room. That means the real quota is smaller than
+            #      NEX_NIM_RPM (or similar) claims, or it is shared with
+            #      another process/key. Retrying in a couple of seconds would
+            #      just get hammered by the same 429 again, so back off a
+            #      full rate-limit window instead — almost every provider
+            #      resets per-minute — and escalate a little on repeated
+            #      blind hits so a persistently wrong RPM setting does not
+            #      keep probing every 60 seconds forever.
+            #
+            # This is what makes "after the minute is over, NIM is tried
+            # again" TRUE instead of hopeful: a fixed short cooldown would
+            # just hit the wall again when our own accounting is wrong.
             window_wait = self.seconds_until_slot()
-            wait = max(float(retry_after or 0.0), window_wait, 2.0)
-            self.cooldown_until = now + min(wait, 120.0)
+            if retry_after:
+                wait = max(float(retry_after), window_wait)
+                self.blind_rate_limits = 0
+            elif window_wait > 0:
+                wait = window_wait
+                self.blind_rate_limits = 0
+            else:
+                self.blind_rate_limits += 1
+                wait = _BLIND_RATE_LIMIT_BACKOFF_S * (
+                    1.3 ** (self.blind_rate_limits - 1))
+            self.cooldown_until = now + min(max(wait, 2.0), 120.0)
         elif kind in (ERR_TIMEOUT, ERR_NETWORK):
             self.status = ST_COOLING
             self.cooldown_until = now + 5.0
@@ -1139,6 +1178,7 @@ class ProviderState:
             "last_purpose": self.last_purpose,
             "last_finish_reason": self.last_finish_reason,
             "rate_limited": self.rate_limited,
+            "blind_rate_limits": self.blind_rate_limits,
             "auth_failures": self.auth_failures,
             "batch_splits": self.batch_splits,
             "soft_cap": self.soft_cap(),

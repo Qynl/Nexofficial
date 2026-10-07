@@ -1438,4 +1438,78 @@ finally:
         else:
             os.environ[k] = v
 
+# ===========================================================================
+# 14. "OUR BEST ONE COMES BACK" — NIM reclaims the hard-work lane the moment
+#     its 40-RPM minute is over, including when the 429 is a surprise.
+# ===========================================================================
+
+print("=== 14. NIM reclaims hard work once its window resets ===")
+
+# --- the documented case: our own window predicted the 429 -----------------
+# (same mechanism as section 12, restated against the literal 40-RPM default
+# so there is a test that reads exactly like the feature request: "NIM is
+# our best provider — once the minute is done, hand it back the work".)
+cl40 = Clock()
+h40 = FakeHTTP()
+h40.push("integrate.api.nvidia.com", ["nim #%d" % i for i in range(40)])
+h40.push("127.0.0.1:11434", "ollama covers the 41st")
+h40.push("integrate.api.nvidia.com", "nim is back on top")
+r40 = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=40,
+                                   min_interval_s=0.0, max_chill_s=0.0,
+                                   reserve=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl40, transport={"post": h40.post, "get": h40.get})
+for _ in range(40):
+    r40.chat("agent", MESSAGES)
+_expect(len([c for c in h40.calls if "integrate" in c[0]]) == 40,
+        "all 40 requests in the minute went to NIM — our best provider")
+_expect(r40.chat("agent", MESSAGES) == "ollama covers the 41st",
+        "request 41 inside the same minute is routed around NIM, not queued")
+_expect(r40.status()["agent"]["active"] == "local",
+        "status reflects Ollama as the active hard-work provider for now")
+cl40.advance(61)
+_expect(r40.chat("agent", MESSAGES) == "nim is back on top",
+        "the instant the 60s window rolls over, NIM reclaims the lane by "
+        "itself — no routing edit, no manual re-enable")
+_expect(r40.status()["agent"]["active"] == "nim",
+        "…and status immediately reports NIM as active again")
+
+# --- the harder case: NIM 429s with NO Retry-After and our own window     --
+# --- still thought there was room (a real quota smaller than configured). -
+cl_blind = Clock()
+h_blind = FakeHTTP()
+h_blind.push("integrate.api.nvidia.com",
+             http_error("n", 429, "no retry-after, surprise limit"))
+h_blind.push("127.0.0.1:11434", "ollama covers the surprise")
+h_blind.push("integrate.api.nvidia.com", "nim ok again")
+r_blind = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     # rpm=40 but our window has used only 1 slot — nothing in OUR
+     # accounting predicted this 429.
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=40,
+                                   min_interval_s=0.0, max_chill_s=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl_blind, transport={"post": h_blind.post, "get": h_blind.get})
+_expect(r_blind.chat("agent", MESSAGES) == "ollama covers the surprise",
+        "a surprise 429 still fails over to Ollama immediately")
+blind_wait = r_blind.states["nim"].to_dict()["cooldown_s"]
+_expect(blind_wait >= 59.0,
+        "an UNEXPLAINED 429 (no Retry-After, window looked fine) backs off "
+        "a full rate-limit window (~60s), not a quick retry that would just "
+        "get hammered again (got %.1fs)" % blind_wait)
+_expect(r_blind.states["nim"].blind_rate_limits == 1,
+        "the blind 429 is counted so repeat offenses can be told apart "
+        "from one-off hiccups")
+cl_blind.advance(60)
+_expect(r_blind.chat("agent", MESSAGES) == "nim ok again",
+        "once the backoff elapses, NIM is tried again automatically")
+_expect(r_blind.states["nim"].blind_rate_limits == 0,
+        "a real answer clears the blind-rate-limit escalation counter")
+
 print("\nAll provider-layer tests passed.")
