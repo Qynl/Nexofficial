@@ -1,0 +1,12 @@
+{
+  "name": "nex-web",
+  "private": true,
+  "description": "Smoke/unit tests for the Nex frontend (no build step, no framework — the app itself ships as plain ES modules, exactly as served).",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

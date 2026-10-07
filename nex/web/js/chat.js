@@ -4,7 +4,7 @@ import { renderMarkdown, renderStreaming } from './markdown.js';
 import { store } from './state.js';
 import { api } from './api.js';
 import { toast } from './toasts.js';
-import { RunCard } from './runview.js';
+import { buildRunCard } from './runview.js';
 import { face, faceStateFor } from './face.js';
 import { voice } from './voice.js';
 

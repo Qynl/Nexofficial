@@ -7,17 +7,12 @@
  * blockquotes, links (http/https only), hr, tables.
  */
 
-const CODE_FENCE = /^```([\w+#-]*)[ \t]*\n([\s\S]*?)(?:```|$)/;
 const HEADING = /^(#{1,4})\s+(.*)$/;
 const HR = /^ {0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const UL = /^(\s*)[-*+]\s+(.*)$/;
 const OL = /^(\s*)\d+[.)]\s+(.*)$/;
 const QUOTE = /^>\s?(.*)$/;
 const TABLE_ROW = /^\s*\|(.+)\|\s*$/;
-
-function escapeText(s) {
-  return s;
-}
 
 /* inline: `code`, **bold**, *italic*, [text](url) — built as DOM so no
    HTML injection is possible. */
@@ -111,19 +106,24 @@ export function renderMarkdown(source, doc = document) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // fenced code
-    const fence = line.match(CODE_FENCE);
-    if (fence || line.startsWith('```')) {
-      if (fence) {
-        addBlock(buildCode(fence[1], fence[2], doc));
-        i++;
-        continue;
-      }
-      // unterminated fence: treat rest as code
+    // fenced code — scan forward for the matching closing fence so content
+    // AFTER the block (very common: "here's the code: ```...``` and here's
+    // how it works") is not swallowed into the code body.
+    if (line.startsWith('```')) {
       const lang = line.slice(3).trim();
-      const body = lines.slice(i + 1).join('\n');
-      addBlock(buildCode(lang, body, doc));
-      i = lines.length;
+      let close = -1;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^```\s*$/.test(lines[j])) { close = j; break; }
+      }
+      if (close >= 0) {
+        addBlock(buildCode(lang, lines.slice(i + 1, close).join('\n'), doc));
+        i = close + 1;
+      } else {
+        // genuinely unterminated (e.g. the model was cut off mid-block):
+        // treat the rest of the message as code, same as before.
+        addBlock(buildCode(lang, lines.slice(i + 1).join('\n'), doc));
+        i = lines.length;
+      }
       continue;
     }
 
@@ -151,7 +151,12 @@ export function renderMarkdown(source, doc = document) {
 
     // table (header + separator + rows)
     if (TABLE_ROW.test(line) && i + 1 < lines.length
-        && /^\s*\|?[\s:-|]+\|[\s:-|]*$/.test(lines[i + 1])
+        // '-' is placed at the END of the class so it is literal, not a
+        // range operator: "[\s:-|]" (the original form) was parsed as
+        // \s plus the RANGE ':' through '|' (0x3A-0x7C) — which excludes
+        // a literal '-' entirely, so a standard "|---|---|" separator row
+        // never matched and tables never rendered as tables.
+        && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])
         && lines[i + 1].includes('-')) {
       const headCells = splitRow(line);
       i += 2;

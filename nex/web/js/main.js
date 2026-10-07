@@ -7,7 +7,7 @@
 import { store } from './state.js';
 import { api, connectEvents } from './api.js';
 import { toast } from './toasts.js';
-import { Face, faceStateFor } from './face.js';
+import { initFace, face, faceStateFor } from './face.js';
 import { voice } from './voice.js';
 import { initChatScroll, renderMessages, updateHero,
          onChatStarted, onChatDelta, onChatDone, onChatError,
@@ -18,14 +18,11 @@ import { initServers } from './servers.js';
 import { initSettings, applyMotionPreference } from './settings.js';
 import * as runview from './runview.js';
 
-let face = null;
-
 /* ─── boot ─────────────────────────────────────────────────────── */
 
 async function boot() {
   applyMotionPreference();
-  face = new Face(document.getElementById('face-canvas'));
-  window.__nexFace = face;   // for debugging
+  window.__nexFace = initFace(document.getElementById('face-canvas'));
 
   initChatScroll();
   initSidebar();

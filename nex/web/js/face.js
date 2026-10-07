@@ -106,6 +106,32 @@ export class Face {
   }
 }
 
+/* Shared singleton. main.js owns creation (it knows when the canvas
+   exists); every other module imports this one `face` object instead of
+   constructing its own Face. Calls made before initFace() runs are
+   silently ignored rather than throwing — the same "a missing capability
+   never crashes the UI" posture the rest of this file already has. */
+let _instance = null;
+
+export function initFace(canvas) {
+  _instance = new Face(canvas);
+  return _instance;
+}
+
+export const face = {
+  setMode(mode) {
+    // Only touches the DOM (no instance state), so this already works
+    // even before initFace() has run.
+    document.body.dataset.face = mode;
+  },
+  setState(state, params) {
+    if (_instance) _instance.setState(state, params);
+  },
+  attachAnalyser(analyser) {
+    if (_instance) _instance.attachAnalyser(analyser);
+  },
+};
+
 /* Map app-level intent to the face state vocabulary. */
 export function faceStateFor(intent) {
   switch (intent) {

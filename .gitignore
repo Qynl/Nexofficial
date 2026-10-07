@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 
+# Frontend test tooling (nex/web/package.json) — dev-only, not shipped.
+node_modules/
+
 # Provider keys live OUTSIDE the repo: copy nex/.env.example to nex/.env and
 # fill it in. Never commit a key.
 .env
