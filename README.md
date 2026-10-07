@@ -1427,7 +1427,7 @@ cd nex
 python3 tests/run_all.py
 ```
 
-Twenty-two suites run in isolated processes because several intentionally configure different state homes and policies:
+Twenty-three suites run in isolated processes because several intentionally configure different state homes and policies:
 
 | Suite | What it proves |
 | --- | --- |
@@ -1437,6 +1437,7 @@ Twenty-two suites run in isolated processes because several intentionally config
 | `test_schema` | Bounded JSON-Schema argument validator, including allOf/anyOf/oneOf composition |
 | `test_manager` | Server lifecycle, trust, input/output contract validation, policy path, approvals, audit, persistence |
 | `test_agent_loop` | Planning, DAG validation, references, retries, argument repair, replanning, budgets, cancellation, reports |
+| `test_task_graph` | Dependency graph: ready/deps_met, transitive skip propagation on failure (including diamond-shaped graphs), serialization round-trip |
 | `test_context` | Bounded run memory: truncation and the retention cap |
 | `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
