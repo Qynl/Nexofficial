@@ -420,7 +420,13 @@ class Upstream:
         ).start()
 
     def _drain_stderr(self, stream) -> None:
-        """Forward bounded child diagnostics, prefixed with the server name."""
+        """Forward bounded child diagnostics, prefixed with the server name.
+
+        Deliberately `sys.stderr.write`, not `logging`: this is a verbatim
+        byte-for-byte passthrough of a connected MCP server's own stderr
+        stream (arbitrary, unstructured, not a log record this process
+        produces), so it does not belong behind our log level/format.
+        """
         import sys
         try:
             while True:

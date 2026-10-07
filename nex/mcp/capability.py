@@ -24,11 +24,13 @@ Design rules (from the spec + audit hardening):
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-import sys
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
+
+_log = logging.getLogger(__name__)
 
 # --- category constants ----------------------------------------------------
 READ = "read"
@@ -467,8 +469,7 @@ def capability_registry() -> Dict[str, Dict[str, Dict[str, Any]]]:
         with open(path, "r", encoding="utf-8") as f:
             data = _json.load(f)
     except Exception as exc:  # noqa: BLE001
-        sys.stderr.write("[nex] capability registry %r ignored (%s)\n"
-                         % (path, exc))
+        _log.warning("capability registry %r ignored (%s)", path, exc)
         data = {}
     if not isinstance(data, dict):
         data = {}

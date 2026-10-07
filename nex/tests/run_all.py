@@ -36,6 +36,7 @@ SUITES = [
     "test_llm.py",            # purpose-aware model-call boundary
     "test_prompts.py",        # dynamic capability/system prompt construction
     "test_server_api.py",     # HTTP API: auth, CSRF, chat, SSE
+    "test_logging.py",        # structured logging: level filtering, format
     "test_escape.py",         # adversarial boundary: no hidden PC route
     "test_providers.py",      # model providers: routing, failover, roles
 ]

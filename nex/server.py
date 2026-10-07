@@ -23,17 +23,37 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import mimetypes
 import os
 import secrets
 import sys
 import threading
 import time
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Configured as early as possible -- before any nex-internal import gets a
+# chance to log anything during its own module-level setup. NEX_LOG_LEVEL
+# follows the same "0/unset/invalid falls back to a sane default" contract
+# as every other NEX_* knob in this codebase (see store.py's _env_int).
+# Destination is stderr, matching every print()/stderr.write() this file
+# used before -- operators piping/redirecting today's output see no change.
+_LOG_LEVEL_NAME = (os.environ.get("NEX_LOG_LEVEL") or "INFO").strip().upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL_NAME, logging.INFO),
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stderr,
+)
+# Per-area loggers, one per bracket tag the old stderr.write() calls used
+# ([http], [chat], [api]) -- enables exactly the per-area filtering the
+# improvement plan called out as the reason to ever bother with this.
+_log_http = logging.getLogger("server.http")
+_log_chat = logging.getLogger("server.chat")
+_log_api = logging.getLogger("server.api")
 
 from agent import providers as _providers
 
@@ -439,7 +459,7 @@ def _chat_turn(cid: str, user_text: str,
         _publish_chat(cid, "chat.error", code=code,
                       message=error_payload(code, detail)["error"]["message"],
                       detail=detail)
-        sys.stderr.write("[chat] %s\n" % detail)
+        _log_chat.warning(detail)
         return
 
     if not buffered.strip():
@@ -548,8 +568,7 @@ class NexHandler(BaseHTTPRequestHandler):
             return {}
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("[http] %s %s\n" % (
-            self.command, self.path.split("?")[0]))
+        _log_http.info("%s %s", self.command, self.path.split("?")[0])
 
     # ----- auth ------------------------------------------------------------
 
@@ -796,8 +815,7 @@ class NexHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(404, error_payload(ERR_USER, "not found"))
         except Exception as exc:  # noqa: BLE001
-            sys.stderr.write("[api] internal error on %s: %s\n%s"
-                             % (path, exc, traceback.format_exc()))
+            _log_api.exception("internal error on %s: %s", path, exc)
             self._send_json(500, error_payload(ERR_INTERNAL, str(exc)))
 
     def do_PATCH(self) -> None:  # noqa: N802
@@ -916,8 +934,7 @@ class NexHandler(BaseHTTPRequestHandler):
                 _publish_chat(cid, "chat.error", code=ERR_INTERNAL,
                               message=_FRIENDLY[ERR_INTERNAL],
                               detail=str(exc))
-                sys.stderr.write("[chat] turn crashed: %s\n%s"
-                                 % (exc, traceback.format_exc()))
+                _log_chat.exception("turn crashed: %s", exc)
             finally:
                 lock.release()
         threading.Thread(target=_worker, daemon=True,

@@ -12,8 +12,10 @@ model. It now actually exercises:
 """
 
 import importlib
-import sys
+import logging
 import os
+import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NEX = os.path.dirname(HERE)
@@ -303,5 +305,43 @@ for _n in ("build_game", "cook_content", "package_project",
     _c = cap.capability_for_tool({"name": _n, "description": ""})
     _expect(_c.category != cap.NETWORK,
             "%s is local build work, not shipping" % _n)
+
+# ---------- registry: a corrupt file fails safe and logs a warning --------
+# (used to be a raw sys.stderr.write; now goes through `logging` so an
+# operator can filter/ship it like everything else).
+
+class _CaptureHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+_handler = _CaptureHandler()
+_cap_logger = logging.getLogger("mcp.capability")
+_cap_logger.addHandler(_handler)
+_bad_path = None
+try:
+    with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False) as _f:
+        _f.write("{not valid json")
+        _bad_path = _f.name
+    os.environ["NEX_CAPABILITY_FILE"] = _bad_path
+    cap._reg_cache.update(path=None, mtime=None, data={})  # bust the cache
+    _result = cap.capability_registry()
+    _expect(_result == {}, "a corrupt registry file is ignored, not raised")
+    _expect(
+        any(r.levelno == logging.WARNING and r.name == "mcp.capability"
+            for r in _handler.records),
+        "a corrupt registry file logs a WARNING on the mcp.capability "
+        "logger (not a silent no-op, and not a bare print/stderr.write)")
+finally:
+    _cap_logger.removeHandler(_handler)
+    os.environ.pop("NEX_CAPABILITY_FILE", None)
+    if _bad_path:
+        os.unlink(_bad_path)
+    cap._reg_cache.update(path=None, mtime=None, data={})
 
 print("\nAll capability/policy tests passed.")
