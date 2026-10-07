@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -124,6 +125,121 @@ class StoreTests(unittest.TestCase):
     def test_bad_inputs(self):
         with self.assertRaises(Exception):
             self.s.add_message("no-such-convo", "user", "x")
+
+
+class RetentionTests(unittest.TestCase):
+    """The store must not grow without bound: a single long-lived
+    conversation, and the store as a whole, are both hard-capped."""
+
+    def _store(self, **kw):
+        path = os.path.join(TMP, "retention-%s-%s.db"
+                            % (self.id(), id(kw)))
+        return store.Store(path, **kw)
+
+    def test_default_retention_is_on_and_finite(self):
+        s = store.Store(os.path.join(TMP, "defaults-%s.db" % self.id()))
+        try:
+            self.assertGreater(s.max_conversations, 0)
+            self.assertGreater(s.max_messages_per_conversation, 0)
+        finally:
+            s.close()
+
+    def test_per_conversation_message_cap_trims_oldest(self):
+        s = self._store(max_messages_per_conversation=5,
+                        max_conversations=0, conversation_ttl_days=0)
+        try:
+            c = s.create_conversation()
+            for i in range(20):
+                s.add_message(c["id"], "user", "msg-%02d" % i)
+            msgs = s.get_messages(c["id"])
+            self.assertEqual(len(msgs), 5)
+            # the newest 5 survive, oldest are gone
+            self.assertEqual([m["content"] for m in msgs],
+                             ["msg-%02d" % i for i in range(15, 20)])
+        finally:
+            s.close()
+
+    def test_conversation_count_cap_evicts_least_recently_active(self):
+        s = self._store(max_conversations=3,
+                        max_messages_per_conversation=0,
+                        conversation_ttl_days=0)
+        try:
+            ids = []
+            for i in range(6):
+                c = s.create_conversation()
+                s.add_message(c["id"], "user", "hi %d" % i)
+                ids.append(c["id"])
+            all_convs = s.list_conversations(limit=100)
+            self.assertLessEqual(len(all_convs), 3)
+            # the most recently created/touched conversations must survive
+            surviving = {c["id"] for c in all_convs}
+            self.assertTrue(set(ids[-3:]).issubset(surviving))
+            self.assertFalse(set(ids[:3]) & surviving)
+            # their messages are gone too, not orphaned
+            for old_cid in ids[:3]:
+                self.assertEqual(s.get_messages(old_cid), [])
+        finally:
+            s.close()
+
+    def test_ttl_expires_old_conversations(self):
+        s = self._store(max_conversations=0,
+                        max_messages_per_conversation=0,
+                        conversation_ttl_days=1)
+        try:
+            c = s.create_conversation()
+            s.add_message(c["id"], "user", "old one")
+            # backdate it past the 1-day TTL
+            s._db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (time.time() - 2 * 86400, c["id"]))
+            s._db.commit()
+            removed = s.prune()
+            self.assertEqual(removed["conversations_removed"], 1)
+            self.assertIsNone(s.get_conversation(c["id"]))
+        finally:
+            s.close()
+
+    def test_retention_can_be_disabled(self):
+        s = self._store(max_conversations=0,
+                        max_messages_per_conversation=0,
+                        conversation_ttl_days=0)
+        try:
+            c = s.create_conversation()
+            for i in range(50):
+                s.add_message(c["id"], "user", "m%d" % i)
+            self.assertEqual(len(s.get_messages(c["id"])), 50)
+        finally:
+            s.close()
+
+    def test_stats_reports_retention_limits(self):
+        s = self._store(max_conversations=7,
+                        max_messages_per_conversation=9,
+                        conversation_ttl_days=3)
+        try:
+            limits = s.stats()["retention"]
+            self.assertEqual(limits["max_conversations"], 7)
+            self.assertEqual(limits["max_messages_per_conversation"], 9)
+            self.assertEqual(limits["conversation_ttl_days"], 3)
+        finally:
+            s.close()
+
+    def test_bounded_total_rows_even_under_heavy_use(self):
+        """With both count-based caps on, total message rows across the
+        whole store stay hard-bounded no matter how much is written."""
+        s = self._store(max_conversations=3, max_messages_per_conversation=4,
+                        conversation_ttl_days=0)
+        try:
+            for i in range(10):
+                c = s.create_conversation()
+                for j in range(10):
+                    s.add_message(c["id"], "user", "c%d-m%d" % (i, j))
+            total_messages = sum(
+                len(s.get_messages(c["id"]))
+                for c in s.list_conversations(limit=1000))
+            self.assertLessEqual(len(s.list_conversations(limit=1000)), 3)
+            self.assertLessEqual(total_messages, 3 * 4)
+        finally:
+            s.close()
 
 
 if __name__ == "__main__":

@@ -687,6 +687,7 @@ class NexHandler(BaseHTTPRequestHandler):
                 "ok": True, "version": "2.0",
                 "providers": ROUTER.status().get("roles"),
                 "servers": MANAGER.summary(),
+                "storage": STORE.stats(),
             })
         elif path == "/api/state":
             self._send_json(200, {

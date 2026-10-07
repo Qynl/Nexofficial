@@ -95,6 +95,19 @@ class APITests(unittest.TestCase):
                         auth=False)
         expect(s == 401, "API must never authenticate a secret in its URL")
 
+    def test_health_reports_storage_retention(self):
+        """/api/health surfaces the conversation store's size and its
+        retention limits, so an operator can see memory is bounded."""
+        s, body = self.req("GET", "/api/health")
+        expect(s == 200, "authenticated /api/health must 200, got %s" % s)
+        storage = body.get("storage") or {}
+        expect("conversations" in storage and "messages" in storage,
+               "storage stats expose conversation/message counts")
+        limits = storage.get("retention") or {}
+        expect("max_conversations" in limits
+               and "max_messages_per_conversation" in limits,
+               "storage stats expose the active retention limits")
+
     def test_post_without_csrf_rejected(self):
         s, _ = self.req("POST", "/api/conversations", csrf=False)
         expect(s == 403, "POST without X-Nex must 403, got %s" % s)

@@ -23,6 +23,15 @@ DEFAULT_RESULT_BUDGET = 1600     # chars per stored observation
 DEFAULT_KEEP_RECENT = 6          # full observations kept for prompts
 DEFAULT_PREVIEW_BUDGET = 280     # chars for the UI/event preview
 
+# evidence_block() never looks further back than `keep_recent + 8` entries
+# (the last `keep_recent` in full, plus up to 8 older ones compacted to one
+# line). Anything beyond that is dead weight sitting in RAM. This ceiling
+# bounds RunContext.observations independently of how many steps a run
+# actually takes, so even a misconfigured NEX_MAX_STEPS cannot make a single
+# run's working memory grow without bound.
+MAX_RETAINED_OBSERVATIONS = 200
+_TRIM_SLACK = 64                 # batch the trim; don't re-slice every call
+
 _SENSITIVE_KEYS = {
     "api_key", "apikey", "access_token", "refresh_token", "password",
     "secret", "authorization", "private_key", "credential", "credentials",
@@ -192,7 +201,17 @@ class RunContext:
         text, _ = result_to_text(result, self.result_budget)
         obs = Observation(step, tool, server, text, ok)
         self.observations.append(obs)
+        self._trim_observations()
         return text
+
+    def _trim_observations(self) -> None:
+        """Keep RunContext bounded for very long runs. Never trims below
+        what evidence_block() can actually show, so this never changes a
+        single prompt the model sees — it only caps idle memory."""
+        needed = self.keep_recent + 8
+        ceiling = max(needed, MAX_RETAINED_OBSERVATIONS)
+        if len(self.observations) > ceiling + _TRIM_SLACK:
+            self.observations = self.observations[-ceiling:]
 
     def record_failure(self, step: str, tool: str, error: str) -> None:
         line = "%s (%s): %s" % (step, tool or "?",

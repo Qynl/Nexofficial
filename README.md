@@ -701,6 +701,15 @@ Credential-shaped text and sensitive structured fields are redacted before MCP
 output enters provider context or UI previews. MCP images, resources, logs,
 schemas, and results remain untrusted data—never instructions.
 
+A run's working memory is bounded independently of how long the run goes:
+only the most recent 6 observations are kept in full for prompts, up to 8
+older ones are compacted to a one-line summary, and failures are capped at
+20 entries (deduplicated). A hard ceiling on the raw observation list itself
+(independent of `keep_recent`, `NEX_MAX_STEPS`, or anything else an operator
+tunes) means a very long or misconfigured run cannot grow a single run's
+memory without bound — and because that ceiling only discards history the
+model could never see anyway, it never changes a single prompt.
+
 ### 7. Resources and prompts are first-class, and just as untrusted
 
 Most MCP clients stop at `tools/list`. Nex also discovers `resources/list` and
@@ -991,6 +1000,27 @@ Alongside it, **MCP contract quality** reports how precisely Nex can plan agains
 ### Conversation
 
 Streaming markdown, fenced code, copy/listen/regenerate/edit-and-resend actions, search, automatic titles, SQLite persistence, and browser-native speech all run without a frontend framework.
+
+#### Long-term memory does not grow forever either
+
+`nex.db` (one SQLite file, stdlib only) is the durable record of every
+conversation and message. It prunes itself opportunistically on every write
+— no cron, no background job:
+
+| Knob | Default | What it bounds |
+| --- | --- | --- |
+| `NEX_MAX_MESSAGES_PER_CONVERSATION` | `3000` | One conversation left open forever cannot grow past this many messages — the oldest are dropped first. |
+| `NEX_MAX_CONVERSATIONS` | `300` | The whole store cannot exceed this many conversations — the least-recently-active ones (and all their messages) are evicted first. |
+| `NEX_CONVERSATION_TTL_DAYS` | `0` (off) | Optional: delete conversations untouched for longer than N days, ahead of the count-based caps above. |
+
+With the two count-based caps on by default, total message rows are
+hard-bounded at `max_conversations × max_messages_per_conversation`
+regardless of how long the app runs — "grows forever" is not possible even
+with the TTL left off. Any knob can be set to `0` to disable it, for an
+operator who wants unbounded local history on purpose. `GET /api/health`
+reports the live `conversations`/`messages`/`size_bytes` counts and the
+active limits under `storage`, and `Store.prune()` can be called any time to
+run retention immediately instead of waiting for the next write.
 
 ### Smart workload scheduler
 
@@ -1363,6 +1393,9 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_APPROVAL_TIMEOUT_S` | `600` | Approval wait budget |
 | `NEX_HOST` / `NEX_PORT` | `127.0.0.1` / `8787` | HTTP bind address. Loopback by default; any other value prints an exposure warning at startup |
 | `NEX_HOME` | `~/.nex` | Persistent state directory |
+| `NEX_MAX_MESSAGES_PER_CONVERSATION` | `3000` | Per-conversation message cap; oldest dropped first (`0` disables) |
+| `NEX_MAX_CONVERSATIONS` | `300` | Store-wide conversation cap; least-recently-active evicted first (`0` disables) |
+| `NEX_CONVERSATION_TTL_DAYS` | `0` (off) | Delete conversations untouched for longer than N days |
 | `NEX_AUTH_TOKEN` | generated | Fixed token override; minimum 32 characters |
 | `NEX_COOKIE_SECURE` | false | Secure cookie for HTTPS deployments |
 

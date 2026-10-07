@@ -12,6 +12,26 @@ scan honest, and FTS availability differs across builds.
 
 Thread model: one connection guarded by an RLock, WAL mode. Writes are
 cheap and rare relative to reads.
+
+Retention (so this file does not grow forever): every write opportunistically
+prunes under a lock, no cron needed.
+
+    * a single conversation is capped at NEX_MAX_MESSAGES_PER_CONVERSATION
+      messages (default 3000) — the oldest messages in that conversation are
+      dropped first. A conversation nobody ever closes still cannot grow the
+      database without bound.
+    * the whole store is capped at NEX_MAX_CONVERSATIONS conversations
+      (default 300) — the least-recently-active conversations (and all their
+      messages) are deleted first once the cap is exceeded.
+    * optionally, NEX_CONVERSATION_TTL_DAYS (default 0 = disabled) deletes
+      conversations untouched for longer than that many days, ahead of the
+      count-based caps.
+
+With the two count-based caps alone (defaults on), total message rows are
+hard-bounded at max_conversations * max_messages_per_conversation regardless
+of how long the app runs or how long any single chat goes on — "infinite
+growth" is not possible even with TTL left off. Any limit can be set to 0 to
+disable it for operators who want unbounded local history on purpose.
 """
 from __future__ import annotations
 
@@ -23,6 +43,24 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+
+
+def _env_int(name: str, default: int) -> int:
+    """0 (or unset/invalid) falls back to default; negative clamps to 0
+    (0 means "disabled" for every retention knob below)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
+DEFAULT_MAX_CONVERSATIONS = _env_int("NEX_MAX_CONVERSATIONS", 300)
+DEFAULT_MAX_MESSAGES_PER_CONVERSATION = _env_int(
+    "NEX_MAX_MESSAGES_PER_CONVERSATION", 3000)
+DEFAULT_CONVERSATION_TTL_DAYS = _env_int("NEX_CONVERSATION_TTL_DAYS", 0)
 
 
 def _db_path() -> str:
@@ -54,8 +92,27 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv
 
 
 class Store:
-    def __init__(self, path: Optional[str] = None) -> None:
+    def __init__(self, path: Optional[str] = None,
+                 max_conversations: Optional[int] = None,
+                 max_messages_per_conversation: Optional[int] = None,
+                 conversation_ttl_days: Optional[int] = None) -> None:
         self.path = path or _db_path()
+        # Retention knobs — explicit constructor args win (tests use this to
+        # verify pruning without needing thousands of fixtures); otherwise
+        # read live from the environment so an operator's env setting always
+        # applies, same pattern as every other Nex tunable.
+        self.max_conversations = (
+            max_conversations if max_conversations is not None
+            else _env_int("NEX_MAX_CONVERSATIONS", DEFAULT_MAX_CONVERSATIONS))
+        self.max_messages_per_conversation = (
+            max_messages_per_conversation
+            if max_messages_per_conversation is not None else _env_int(
+                "NEX_MAX_MESSAGES_PER_CONVERSATION",
+                DEFAULT_MAX_MESSAGES_PER_CONVERSATION))
+        self.conversation_ttl_days = (
+            conversation_ttl_days if conversation_ttl_days is not None
+            else _env_int("NEX_CONVERSATION_TTL_DAYS",
+                         DEFAULT_CONVERSATION_TTL_DAYS))
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -73,6 +130,7 @@ class Store:
             self._db.execute(
                 "INSERT INTO conversations (id, title, created_at, updated_at)"
                 " VALUES (?, ?, ?, ?)", (cid, title, now, now))
+            self._prune_conversations_locked()
             self._db.commit()
         return {"id": cid, "title": title, "created_at": now,
                 "updated_at": now, "preview": "", "messages": 0}
@@ -185,9 +243,72 @@ class Store:
                 self._db.execute(
                     "UPDATE conversations SET title = ? WHERE id = ?",
                     (title, cid))
+            # Retention: a conversation that is never closed must still not
+            # grow this conversation's row count without bound.
+            if self.max_messages_per_conversation and \
+                    row[0] > self.max_messages_per_conversation:
+                self._trim_conversation_messages_locked(
+                    cid, row[0] - self.max_messages_per_conversation)
+            self._prune_conversations_locked()
             self._db.commit()
         return {"id": mid, "conversation_id": cid, "role": role, "kind": kind,
                 "content": content, "meta": meta, "created_at": now}
+
+    # ----- retention (keeps the store from growing forever) -------------------
+
+    def _trim_conversation_messages_locked(self, cid: str, excess: int) -> int:
+        """Delete the oldest `excess` messages in one conversation. Caller
+        holds self._lock and will commit."""
+        if excess <= 0:
+            return 0
+        self._db.execute(
+            "DELETE FROM messages WHERE id IN ("
+            " SELECT id FROM messages WHERE conversation_id = ?"
+            " ORDER BY created_at ASC, id ASC LIMIT ?)", (cid, excess))
+        return excess
+
+    def _prune_conversations_locked(self) -> int:
+        """TTL expiry, then a hard cap on the number of conversations kept —
+        least-recently-active ones (and all their messages) go first. Caller
+        holds self._lock and will commit."""
+        removed = 0
+        if self.conversation_ttl_days:
+            cutoff = time.time() - self.conversation_ttl_days * 86400.0
+            stale = [r[0] for r in self._db.execute(
+                "SELECT id FROM conversations WHERE updated_at < ?",
+                (cutoff,)).fetchall()]
+            for old_cid in stale:
+                self._db.execute(
+                    "DELETE FROM messages WHERE conversation_id = ?",
+                    (old_cid,))
+                self._db.execute(
+                    "DELETE FROM conversations WHERE id = ?", (old_cid,))
+                removed += 1
+        if self.max_conversations:
+            total = self._db.execute(
+                "SELECT COUNT(*) FROM conversations").fetchone()[0]
+            if total > self.max_conversations:
+                excess = total - self.max_conversations
+                oldest = [r[0] for r in self._db.execute(
+                    "SELECT id FROM conversations ORDER BY updated_at ASC"
+                    " LIMIT ?", (excess,)).fetchall()]
+                for old_cid in oldest:
+                    self._db.execute(
+                        "DELETE FROM messages WHERE conversation_id = ?",
+                        (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM conversations WHERE id = ?", (old_cid,))
+                    removed += 1
+        return removed
+
+    def prune(self) -> Dict[str, int]:
+        """Run retention now and report what it removed. Safe to call any
+        time (e.g. from a maintenance endpoint or on startup); the same
+        pruning also runs opportunistically on every write."""
+        with self._lock:
+            convs_removed = self._prune_conversations_locked()
+            self._db.commit()
+        return {"conversations_removed": convs_removed}
 
     def get_messages(self, cid: str,
                      before: Optional[float] = None,
@@ -263,7 +384,13 @@ class Store:
         return {"conversations": convs, "messages": msgs,
                 "path": self.path,
                 "size_bytes": os.path.getsize(self.path)
-                if os.path.exists(self.path) else 0}
+                if os.path.exists(self.path) else 0,
+                "retention": {
+                    "max_conversations": self.max_conversations or None,
+                    "max_messages_per_conversation":
+                        self.max_messages_per_conversation or None,
+                    "conversation_ttl_days": self.conversation_ttl_days or None,
+                }}
 
     def export(self) -> Dict[str, Any]:
         return {
