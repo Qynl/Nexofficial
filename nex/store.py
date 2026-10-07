@@ -32,6 +32,24 @@ hard-bounded at max_conversations * max_messages_per_conversation regardless
 of how long the app runs or how long any single chat goes on — "infinite
 growth" is not possible even with TTL left off. Any limit can be set to 0 to
 disable it for operators who want unbounded local history on purpose.
+
+Two details that look minor but matter for not quietly corrupting what is
+kept:
+
+    * every "oldest N" eviction (per-conversation trim, store-wide eviction,
+      `truncate_after` for regenerate) breaks created_at/updated_at ties by
+      SQLite `rowid`, never by the text `id`. `id` is a random UUID — on a
+      timestamp tie (two writes in the same instant, which happens: fast
+      programmatic turns, batched imports, tests) sorting by it is sorting
+      by chance, not by age. `rowid` always reflects true insertion order,
+      so eviction and regenerate-truncation can never discard the wrong row.
+    * a database opened before retention shipped (or copied in from an
+      older build) is pruned down to the current caps immediately on open,
+      not just prospectively on the next write — and `PRAGMA
+      auto_vacuum=INCREMENTAL` plus an opportunistic `incremental_vacuum`
+      after any prune means deleted rows actually shrink the file on disk,
+      not just the logical row count SQLite would otherwise happily keep
+      as reusable-but-unreturned free pages forever.
 """
 from __future__ import annotations
 
@@ -88,6 +106,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv
     ON messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated
+    ON conversations(updated_at);
 """
 
 
@@ -115,11 +135,25 @@ class Store:
                          DEFAULT_CONVERSATION_TTL_DAYS))
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False)
+        # Must be set before any table exists to take effect without a
+        # VACUUM — see _migrate_auto_vacuum_locked() for the legacy-database
+        # path (a db that already had tables before this line ever ran).
+        self._db.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._db.executescript(_SCHEMA)
             self._db.commit()
+            self._migrate_auto_vacuum_locked()
+            # A database that existed before retention shipped (or was
+            # opened for a while with a higher/disabled cap) can already be
+            # over the configured limits. Enforce them immediately instead
+            # of waiting for the next write.
+            removed_convs = self._prune_conversations_locked()
+            removed_msgs = self._trim_all_conversations_over_cap_locked()
+            self._db.commit()
+            if removed_convs or removed_msgs:
+                self._reclaim_space_locked()
 
     # ----- conversations ----------------------------------------------------
 
@@ -130,8 +164,10 @@ class Store:
             self._db.execute(
                 "INSERT INTO conversations (id, title, created_at, updated_at)"
                 " VALUES (?, ?, ?, ?)", (cid, title, now, now))
-            self._prune_conversations_locked()
+            removed = self._prune_conversations_locked()
             self._db.commit()
+            if removed:
+                self._reclaim_space_locked()
         return {"id": cid, "title": title, "created_at": now,
                 "updated_at": now, "preview": "", "messages": 0}
 
@@ -177,9 +213,10 @@ class Store:
                 "  WHERE m.conversation_id = c.id) AS n,"
                 " (SELECT content FROM messages m"
                 "  WHERE m.conversation_id = c.id"
-                "  ORDER BY m.created_at DESC LIMIT 1) AS preview"
+                "  ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview"
                 " FROM conversations c"
-                " ORDER BY c.updated_at DESC LIMIT ?", (limit,)).fetchall()
+                " ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?",
+                (limit,)).fetchall()
         out = []
         for r in rows:
             preview = (r[5] or "").strip().replace("\n", " ")[:80]
@@ -200,11 +237,12 @@ class Store:
                 "  WHERE m2.conversation_id = c.id) AS n,"
                 " (SELECT content FROM messages m3"
                 "  WHERE m3.conversation_id = c.id"
-                "  ORDER BY m3.created_at DESC LIMIT 1) AS preview"
+                "  ORDER BY m3.created_at DESC, m3.rowid DESC LIMIT 1) AS preview"
                 " FROM conversations c"
                 " JOIN messages m ON m.conversation_id = c.id"
                 " WHERE c.title LIKE ? OR m.content LIKE ?"
-                " ORDER BY c.updated_at DESC LIMIT ?", (q, q, limit)).fetchall()
+                " ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?",
+                (q, q, limit)).fetchall()
         out = []
         for r in rows:
             preview = (r[5] or "").strip().replace("\n", " ")[:80]
@@ -245,12 +283,15 @@ class Store:
                     (title, cid))
             # Retention: a conversation that is never closed must still not
             # grow this conversation's row count without bound.
+            removed = 0
             if self.max_messages_per_conversation and \
                     row[0] > self.max_messages_per_conversation:
-                self._trim_conversation_messages_locked(
+                removed += self._trim_conversation_messages_locked(
                     cid, row[0] - self.max_messages_per_conversation)
-            self._prune_conversations_locked()
+            removed += self._prune_conversations_locked()
             self._db.commit()
+            if removed:
+                self._reclaim_space_locked()
         return {"id": mid, "conversation_id": cid, "role": role, "kind": kind,
                 "content": content, "meta": meta, "created_at": now}
 
@@ -258,14 +299,38 @@ class Store:
 
     def _trim_conversation_messages_locked(self, cid: str, excess: int) -> int:
         """Delete the oldest `excess` messages in one conversation. Caller
-        holds self._lock and will commit."""
+        holds self._lock and will commit.
+
+        Tiebreak is rowid, not the text `id` — a random UUID sorts by
+        chance, not by age, so on a created_at tie the old `id ASC`
+        tiebreak could delete a newer message and keep an older one.
+        rowid always reflects true insertion order.
+        """
         if excess <= 0:
             return 0
         self._db.execute(
-            "DELETE FROM messages WHERE id IN ("
-            " SELECT id FROM messages WHERE conversation_id = ?"
-            " ORDER BY created_at ASC, id ASC LIMIT ?)", (cid, excess))
+            "DELETE FROM messages WHERE rowid IN ("
+            " SELECT rowid FROM messages WHERE conversation_id = ?"
+            " ORDER BY created_at ASC, rowid ASC LIMIT ?)", (cid, excess))
         return excess
+
+    def _trim_all_conversations_over_cap_locked(self) -> int:
+        """Sweep every conversation currently over the per-conversation cap.
+        Used at startup (a database written under an older/looser limit can
+        already be over the current one) and by prune(); the targeted check
+        in add_message() handles the common one-conversation-at-a-time case
+        without needing this full sweep on every write."""
+        if not self.max_messages_per_conversation:
+            return 0
+        over = self._db.execute(
+            "SELECT conversation_id, COUNT(*) FROM messages"
+            " GROUP BY conversation_id HAVING COUNT(*) > ?",
+            (self.max_messages_per_conversation,)).fetchall()
+        removed = 0
+        for cid, n in over:
+            removed += self._trim_conversation_messages_locked(
+                cid, n - self.max_messages_per_conversation)
+        return removed
 
     def _prune_conversations_locked(self) -> int:
         """TTL expiry, then a hard cap on the number of conversations kept —
@@ -289,8 +354,13 @@ class Store:
                 "SELECT COUNT(*) FROM conversations").fetchone()[0]
             if total > self.max_conversations:
                 excess = total - self.max_conversations
+                # updated_at ties (e.g. a burst of conversations created in
+                # the same instant, common in tests and rapid use) are
+                # broken by rowid so eviction order matches true
+                # creation/activity order, not an arbitrary DB scan order.
                 oldest = [r[0] for r in self._db.execute(
-                    "SELECT id FROM conversations ORDER BY updated_at ASC"
+                    "SELECT id FROM conversations"
+                    " ORDER BY updated_at ASC, rowid ASC"
                     " LIMIT ?", (excess,)).fetchall()]
                 for old_cid in oldest:
                     self._db.execute(
@@ -301,14 +371,58 @@ class Store:
                     removed += 1
         return removed
 
+    def _migrate_auto_vacuum_locked(self) -> None:
+        """Make sure deleted rows actually shrink the file on disk, not just
+        the logical row count.
+
+        auto_vacuum only takes effect on a brand-new database (set before
+        the first CREATE TABLE, which __init__ already does) or after a
+        full VACUUM converts an existing file. This detects the second case
+        — a database that existed before retention shipped, or was copied
+        from a build that never set this — and migrates it exactly once.
+        Best-effort: a failure here must never block the app from starting.
+        """
+        try:
+            mode = self._db.execute("PRAGMA auto_vacuum").fetchone()[0]
+            if mode != 2:  # 2 == incremental
+                self._db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                # Also reclaims anything already wasted by pre-retention
+                # unbounded growth, not just future deletes.
+                self._db.execute("VACUUM")
+        except sqlite3.Error:
+            pass
+
+    def _reclaim_space_locked(self) -> None:
+        """Return freed pages from a prune to the OS. Cheap and incremental
+        (unlike a full VACUUM, it does not rewrite the whole file or need an
+        exclusive lock for long), so it is safe to call after any prune that
+        actually removed rows. Best-effort.
+
+        Deliberately `executescript`, not `execute`: `incremental_vacuum`
+        reclaims pages one step at a time, and Python's sqlite3 `execute()`
+        only drives a statement one step before handing back a cursor — it
+        silently reclaims just a single page and leaves the rest of the
+        freelist sitting in the file. `executescript()` runs through
+        `sqlite3_exec()`, which steps a statement to completion, so the
+        whole freelist is actually returned to the OS in one call.
+        """
+        try:
+            self._db.executescript("PRAGMA incremental_vacuum;")
+        except sqlite3.Error:
+            pass
+
     def prune(self) -> Dict[str, int]:
         """Run retention now and report what it removed. Safe to call any
         time (e.g. from a maintenance endpoint or on startup); the same
         pruning also runs opportunistically on every write."""
         with self._lock:
             convs_removed = self._prune_conversations_locked()
+            msgs_removed = self._trim_all_conversations_over_cap_locked()
             self._db.commit()
-        return {"conversations_removed": convs_removed}
+            if convs_removed or msgs_removed:
+                self._reclaim_space_locked()
+        return {"conversations_removed": convs_removed,
+                "messages_removed": msgs_removed}
 
     def get_messages(self, cid: str,
                      before: Optional[float] = None,
@@ -319,7 +433,11 @@ class Store:
         if before is not None:
             q += " AND created_at < ?"
             params.append(before)
-        q += " ORDER BY created_at ASC"
+        # rowid tiebreak: created_at is wall-clock time and can legitimately
+        # tie between two messages written in the same instant (fast
+        # programmatic turns, batched writes) — rowid is the one thing that
+        # always reflects true insertion order.
+        q += " ORDER BY created_at ASC, rowid ASC"
         with self._lock:
             rows = self._db.execute(q, params).fetchall()
         out = []
@@ -345,17 +463,24 @@ class Store:
 
     def truncate_after(self, mid: str) -> int:
         """Delete the given message and everything after it (used by
-        regenerate). Returns the number removed."""
+        regenerate). Returns the number removed.
+
+        Compares by rowid, not created_at: two messages can legitimately
+        share a timestamp (fast back-to-back writes), and a created_at-based
+        `>=` comparison could then delete an earlier sibling that should have
+        survived. rowid is monotonic with true insertion order, so this
+        cannot happen.
+        """
         with self._lock:
             row = self._db.execute(
-                "SELECT conversation_id, created_at FROM messages"
+                "SELECT conversation_id, rowid FROM messages"
                 " WHERE id = ?", (mid,)).fetchone()
             if row is None:
                 return 0
-            cid, ts = row
+            cid, rid = row
             cur = self._db.execute(
                 "DELETE FROM messages WHERE conversation_id = ? AND"
-                " created_at >= ?", (cid, ts))
+                " rowid >= ?", (cid, rid))
             self._db.commit()
             return cur.rowcount
 
@@ -404,6 +529,7 @@ class Store:
             self._db.executescript(
                 "DELETE FROM messages; DELETE FROM conversations;")
             self._db.commit()
+            self._reclaim_space_locked()
 
     def close(self) -> None:
         with self._lock:

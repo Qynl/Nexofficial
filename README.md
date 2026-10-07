@@ -1022,6 +1022,25 @@ reports the live `conversations`/`messages`/`size_bytes` counts and the
 active limits under `storage`, and `Store.prune()` can be called any time to
 run retention immediately instead of waiting for the next write.
 
+Two details that are easy to get subtly wrong when you bolt retention onto
+an existing store after the fact, so they got their own audit and tests:
+
+* **Eviction never trusts a timestamp alone.** Two writes can legitimately
+  share the exact same `created_at`/`updated_at` — fast programmatic turns,
+  batched writes, coarse clock resolution. Every "delete the oldest N" and
+  "delete from here on" query (trimming, eviction, and `regenerate`'s
+  truncate-after) breaks ties by SQLite `rowid`, which always reflects true
+  insertion order, instead of the message's public `id` — a random UUID
+  that sorts by chance, not age. Without this, a tie could have deleted a
+  message that should have survived.
+* **A database opened before retention shipped is caught up immediately,
+  not just going forward.** On open, Nex prunes any pre-existing
+  over-the-cap data right away (not only on the next write), migrates the
+  file to `PRAGMA auto_vacuum=INCREMENTAL` if it predates that setting, and
+  reclaims freed pages after every prune that actually removes something —
+  so deleted rows shrink the file on disk, not just the row count SQLite
+  would otherwise happily keep around as reusable-but-unreturned space.
+
 ### Smart workload scheduler
 
 Settings → Model is an operations panel rather than three disconnected API-key

@@ -242,5 +242,196 @@ class RetentionTests(unittest.TestCase):
             s.close()
 
 
+class TieBreakTests(unittest.TestCase):
+    """A timestamp is not a unique key: two writes can legitimately share
+    the same `created_at`/`updated_at` (fast programmatic turns, batched
+    writes, coarse clock resolution on some platforms). Every "oldest wins"
+    or "delete from here on" query must still land on the single row that
+    was actually written first/last, not an arbitrary one that happens to
+    win a lexical compare on a random UUID."""
+
+    def _store(self, **kw):
+        path = os.path.join(TMP, "tiebreak-%s-%s.db" % (self.id(), id(kw)))
+        return store.Store(path, **kw)
+
+    def test_truncate_after_does_not_delete_an_earlier_tied_sibling(self):
+        s = self._store(max_conversations=0, max_messages_per_conversation=0,
+                        conversation_ttl_days=0)
+        try:
+            c = s.create_conversation()
+            keep = s.add_message(c["id"], "user", "keep me")
+            target = s.add_message(c["id"], "assistant", "regenerate me")
+            # Force an exact timestamp tie between the two messages — this
+            # is the scenario a created_at-based ">=" comparison gets wrong.
+            tied_ts = 12345.0
+            s._db.execute("UPDATE messages SET created_at = ? WHERE id IN (?, ?)",
+                         (tied_ts, keep["id"], target["id"]))
+            s._db.commit()
+            removed = s.truncate_after(target["id"])
+            self.assertEqual(removed, 1, "only the target message, not its "
+                             "tied-timestamp predecessor, must be removed")
+            remaining = s.get_messages(c["id"])
+            self.assertEqual([m["id"] for m in remaining], [keep["id"]])
+        finally:
+            s.close()
+
+    def test_conversation_trim_evicts_true_insertion_order_on_tie(self):
+        s = self._store(max_conversations=0, max_messages_per_conversation=0,
+                        conversation_ttl_days=0)
+        try:
+            c = s.create_conversation()
+            ids = [s.add_message(c["id"], "user", "m%d" % i)["id"]
+                  for i in range(6)]
+            # Collapse every message onto the same timestamp so the only
+            # correct way to tell them apart is true insertion order.
+            s._db.execute("UPDATE messages SET created_at = 999.0"
+                         " WHERE conversation_id = ?", (c["id"],))
+            s._db.commit()
+            with s._lock:
+                removed = s._trim_conversation_messages_locked(c["id"], 4)
+                s._db.commit()
+            self.assertEqual(removed, 4)
+            remaining = {m["id"] for m in s.get_messages(c["id"])}
+            # the 4 *first-inserted* ids must be gone; the 2 last survive
+            self.assertEqual(remaining, set(ids[-2:]))
+        finally:
+            s.close()
+
+    def test_conversation_eviction_evicts_true_activity_order_on_tie(self):
+        # Cap starts at 0 (disabled) so all 5 conversations survive creation
+        # -- a cap set from the start would prune progressively as each one
+        # is created, never letting all 5 coexist to produce the tie.
+        s = self._store(max_conversations=0, max_messages_per_conversation=0,
+                        conversation_ttl_days=0)
+        try:
+            ids = [s.create_conversation()["id"] for _ in range(5)]
+            # Collapse every conversation onto the same updated_at so the
+            # only correct way to rank them is true creation/activity order.
+            s._db.execute("UPDATE conversations SET updated_at = 999.0")
+            s._db.commit()
+            s.max_conversations = 2
+            removed = s.prune()
+            self.assertEqual(removed["conversations_removed"], 3)
+            remaining = {c["id"] for c in s.list_conversations(limit=10)}
+            self.assertEqual(remaining, set(ids[-2:]))
+        finally:
+            s.close()
+
+
+class LegacyDatabaseTests(unittest.TestCase):
+    """A database that predates (or was opened with looser) retention caps
+    must be brought into line the moment it is opened, not left over-cap
+    until the next write happens to trigger pruning."""
+
+    def test_existing_over_cap_data_is_pruned_on_open(self):
+        path = os.path.join(TMP, "legacy-%s.db" % self.id())
+        # Open once with retention effectively off and write well past what
+        # a tighter cap would allow -- simulates a pre-retention database.
+        s1 = store.Store(path, max_conversations=0,
+                         max_messages_per_conversation=0,
+                         conversation_ttl_days=0)
+        conv_ids = []
+        for i in range(10):
+            c = s1.create_conversation()
+            for j in range(10):
+                s1.add_message(c["id"], "user", "c%d-m%d" % (i, j))
+            conv_ids.append(c["id"])
+        s1.close()
+
+        # Reopen the SAME file with tight caps -- pruning must happen
+        # immediately on open, without any add_message/create_conversation.
+        s2 = store.Store(path, max_conversations=3,
+                         max_messages_per_conversation=4,
+                         conversation_ttl_days=0)
+        try:
+            remaining = s2.list_conversations(limit=100)
+            self.assertLessEqual(len(remaining), 3)
+            for c in remaining:
+                self.assertLessEqual(len(s2.get_messages(c["id"])), 4)
+            # the most recently active conversations are the ones kept
+            self.assertTrue({c["id"] for c in remaining}.issubset(
+                set(conv_ids[-3:])))
+        finally:
+            s2.close()
+
+
+class VacuumTests(unittest.TestCase):
+    """Pruned rows must actually shrink the file on disk, not just the
+    logical row count — otherwise "capped" is a lie at the filesystem
+    level even though the database claims to be bounded."""
+
+    def test_auto_vacuum_is_enabled(self):
+        path = os.path.join(TMP, "vacuum-mode-%s.db" % self.id())
+        s = store.Store(path)
+        try:
+            mode = s._db.execute("PRAGMA auto_vacuum").fetchone()[0]
+            self.assertEqual(mode, 2, "auto_vacuum must be INCREMENTAL")
+        finally:
+            s.close()
+
+    def test_legacy_database_is_migrated_to_incremental_vacuum(self):
+        import sqlite3
+        path = os.path.join(TMP, "vacuum-legacy-%s.db" % self.id())
+        # Build a file the way Nex did before this feature existed: no
+        # auto_vacuum pragma ever set.
+        raw = sqlite3.connect(path)
+        raw.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        raw.commit()
+        raw.close()
+        s = store.Store(path)
+        try:
+            mode = s._db.execute("PRAGMA auto_vacuum").fetchone()[0]
+            self.assertEqual(mode, 2, "an existing database must be "
+                             "migrated to incremental auto_vacuum on open")
+        finally:
+            s.close()
+
+    def test_wipe_reclaims_space_too(self):
+        path = os.path.join(TMP, "vacuum-wipe-%s.db" % self.id())
+        s = store.Store(path)
+        try:
+            c = s.create_conversation()
+            big = "x" * 20000
+            for i in range(50):
+                s.add_message(c["id"], "user", big)
+            s._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            size_before = os.path.getsize(path)
+            s.wipe()
+            s._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            size_after = os.path.getsize(path)
+            self.assertEqual(s.stats()["conversations"], 0)
+            self.assertLess(size_after, size_before,
+                            "wiping everything must shrink the file too")
+        finally:
+            s.close()
+
+    def test_file_shrinks_after_a_heavy_prune(self):
+        """Compares WAL-checkpointed size on both sides: in WAL mode, an
+        un-checkpointed write can sit in the -wal sidecar file rather than
+        the main db file, which would make an apples-to-oranges size
+        comparison look like growth even though the main file genuinely
+        shrinks once everything is flushed to one place."""
+        path = os.path.join(TMP, "vacuum-shrink-%s.db" % self.id())
+        s = store.Store(path, max_conversations=0,
+                        max_messages_per_conversation=0,
+                        conversation_ttl_days=0)
+        try:
+            c = s.create_conversation()
+            big = "x" * 20000
+            for i in range(200):
+                s.add_message(c["id"], "user", big)
+            s._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            size_before = os.path.getsize(path)
+            s.max_messages_per_conversation = 5
+            result = s.prune()
+            self.assertGreater(result["messages_removed"], 0)
+            s._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            size_after = os.path.getsize(path)
+            self.assertLess(size_after, size_before,
+                            "pruned rows must shrink the file on disk")
+        finally:
+            s.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
