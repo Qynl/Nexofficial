@@ -69,7 +69,12 @@ class AuditLog:
             "kind": kind,
             "server": server,
             "tool": tool,
-            "args": _arg_summary(args) if args else None,
+            # `is not None`, not plain truthiness: a tool legitimately
+            # called with no parameters passes args={}, which is falsy but
+            # meaningfully different from "no args object was ever given"
+            # (e.g. connect/disconnect events, which never pass args at
+            # all). Both used to collapse to the same "args": None.
+            "args": _arg_summary(args) if args is not None else None,
             "ok": bool(ok),
             "detail": (detail or "")[:300],
             "duration_ms": duration_ms,

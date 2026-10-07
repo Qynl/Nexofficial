@@ -38,8 +38,11 @@ STATUS_CANCELLED = "cancelled"        # operator stopped the run
 
 
 def run_event(run_id: str, event_type: str, **payload: Any) -> Dict[str, Any]:
-    return {"type": event_type, "run_id": run_id, "ts": time.time(),
-            **payload}
+    # Core fields are applied AFTER the payload spread so a caller cannot
+    # — even by accident, e.g. forwarding a dict that happens to contain a
+    # "type"/"run_id"/"ts" key — spoof the event's real type, run, or time.
+    return {**payload, "type": event_type, "run_id": run_id,
+            "ts": time.time()}
 
 
 def emit(bus: Optional[Callable], run_id: str, event_type: str,

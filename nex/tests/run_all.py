@@ -29,6 +29,11 @@ SUITES = [
     "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
     "test_jsonreply.py",      # model-reply JSON extraction (ACT directive, plans)
+    "test_audit.py",          # structured audit log: redaction, bounded ring
+    "test_diagnose.py",       # LLM-driven failure recovery: validated escapes
+    "test_events.py",         # run-event taxonomy the UI renders
+    "test_llm.py",            # purpose-aware model-call boundary
+    "test_prompts.py",        # dynamic capability/system prompt construction
     "test_server_api.py",     # HTTP API: auth, CSRF, chat, SSE
     "test_escape.py",         # adversarial boundary: no hidden PC route
     "test_providers.py",      # model providers: routing, failover, roles

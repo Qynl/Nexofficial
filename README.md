@@ -1427,24 +1427,34 @@ cd nex
 python3 tests/run_all.py
 ```
 
-Thirteen suites run in isolated processes because several intentionally configure different state homes and policies:
+Twenty-two suites run in isolated processes because several intentionally configure different state homes and policies:
 
 | Suite | What it proves |
 | --- | --- |
 | `test_architecture` | Dependency direction; metadata-only registry; no local tool surface; subprocess use confined to MCP stdio transport; immutable MCP-only boundary |
 | `test_capability` | Severity-max classification, editor vocabulary, code-execution distinctions, confirmation gates |
 | `test_transport` | NDJSON/LSP framing, fragmented reads, limits, process lifecycle, HTTP round-trips, hostile responses |
+| `test_schema` | Bounded JSON-Schema argument validator, including allOf/anyOf/oneOf composition |
 | `test_manager` | Server lifecycle, trust, input/output contract validation, policy path, approvals, audit, persistence |
 | `test_agent_loop` | Planning, DAG validation, references, retries, argument repair, replanning, budgets, cancellation, reports |
+| `test_context` | Bounded run memory: truncation and the retention cap |
 | `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
 | `test_engine_profiles` | Unreal 5.8 / Roblox detection, readiness, description distrust, planning contracts, events, and report metadata |
 | `test_mcp_production` | Balanced capability portfolios, schema-signature fidelity, causal plan auditing with one bounded repair, contract pinning, empty-success rejection, structured dataflow, context redaction, MCP resource/prompt context priming, deterministic production DAGs, pre-flight consent manifests, and cross-server corroboration |
 | `test_reversal` | Inverse-tool discovery, structured identity resolution, LIFO compensation order, honest coverage reporting, and refusal to guess when no inverse or identifier exists |
-| `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state |
+| `test_store` | Conversations, messages, search, regeneration truncation, durable SQLite state, retention/vacuum correctness |
+| `test_jsonreply` | Model-reply JSON extraction used by the ACT directive, planner, and evaluator: fenced blocks, nesting, stray braces, bounded worst-case cost |
+| `test_audit` | Structured audit log: value/key redaction, never leaking secret content, bounded ring buffer |
+| `test_diagnose` | LLM-driven failure recovery: validated correct_args/switch_tool/give_up decisions, hallucinated- and policy-denied-tool rejection |
+| `test_events` | The run-event taxonomy the UI renders: event shape, a payload cannot spoof core fields, emit() never raises |
+| `test_llm` | The purpose-aware model-call boundary: purpose forwarded only when a callable opts in |
+| `test_prompts` | Dynamic capability/system prompt construction: bounded tool catalogs, graceful handling of missing/hostile MCP metadata |
 | `test_server_api` | Authentication, CSRF, login, static serving, traversal defenses, chat, SSE, real HTTP MCP integration |
 | `test_escape` | Malicious tools/results/config, prompt injection, sensitive payloads, approval replay, no second action route, generic tool dispatchers (Unreal `call_tool`) |
 | `test_providers` | Exact role-model dispatch, NIM JSON mode, purpose temperatures, usage telemetry, truncation rejection, failover, pacing, and key/host binding |
+
+A GitHub Actions workflow (`.github/workflows/tests.yml`) runs this same suite on every push and pull request.
 
 Useful development checks:
 
