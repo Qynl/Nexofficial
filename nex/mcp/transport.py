@@ -26,12 +26,13 @@ stdlib only.
 from __future__ import annotations
 
 import json
+import random
 import socket
 import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 
@@ -57,6 +58,28 @@ _MAX_LIST_PAGES = 50
 _MAX_RESOURCES = 2000
 _MAX_PROMPTS = 500
 _MAX_RESOURCE_CHARS = 64 * 1024          # bounded untrusted resource body
+
+# Circuit breaker: how many CONSECUTIVE failures (no success between them)
+# before a dead/hung server stops being hit for every call, and how long it
+# stays shut once it trips. A flat reopen time would mean a server that has
+# been down for ten minutes gets re-probed every ten seconds for the whole
+# ten minutes; escalating means the probing tapers off the longer the outage
+# lasts, while still trying again well within _CIRCUIT_MAX_S regardless.
+_CIRCUIT_TRIP_THRESHOLD = 3
+_CIRCUIT_BASE_S = 10.0
+_CIRCUIT_MULTIPLIER = 1.6
+_CIRCUIT_MAX_S = 120.0
+
+
+def _jittered(wait: float, spread: float = 0.1) -> float:
+    """Pad `wait` by 0-`spread` extra, never less — so several Upstreams that
+    broke at the same moment (one gateway process restarting, one network
+    blip touching several servers at once) do not all retry in the exact
+    same instant.
+    """
+    if wait <= 0:
+        return wait
+    return wait + random.uniform(0.0, wait * spread)
 
 
 def _origin(url: str) -> Tuple[str, str, int]:
@@ -229,12 +252,17 @@ class Upstream:
 
     def __init__(self, name: str, url: str, label: str = "",
                  probe_timeout: float = 1.0,
-                 call_timeout: float = 60.0) -> None:
+                 call_timeout: float = 60.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.name = name
         self.url = url
         self.label = label or name
         self.probe_timeout = float(probe_timeout)
         self.call_timeout = float(call_timeout)
+        # Injectable so circuit-breaker escalation can be tested without
+        # real sleeps — the rest of the transport keeps real wall-clock
+        # timeouts for actual I/O (those are not what is under test here).
+        self._clock = clock
         self._session_id: Optional[str] = None
         self._initialized = False
         self._tools_cache: List[Dict[str, Any]] = []
@@ -243,6 +271,9 @@ class Upstream:
         self._server_info: Dict[str, Any] = {}
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
+        # How many times the breaker has TRIPPED (gone from closed to open)
+        # without an intervening success — what the escalation is based on.
+        self._circuit_trips = 0
         self.stdio_command: Optional[Tuple[str, List[str]]] = None
         self._stdio_proc: Any = None
         self._stdio_lock: Any = None
@@ -281,7 +312,8 @@ class Upstream:
             "last_error": self._last_error,
             "failures": self._consecutive_failures,
             "circuit_open_seconds": max(
-                0, round(self._circuit_open_until - time.monotonic(), 2)),
+                0, round(self._circuit_open_until - self._clock(), 2)),
+            "circuit_trips": self._circuit_trips,
         }
 
     # ---------- low-level transport ----------------------------------------
@@ -526,7 +558,20 @@ class Upstream:
 
     def _rpc(self, method: str, params: Optional[Dict[str, Any]] = None,
              id: Optional[int] = None) -> Dict[str, Any]:
-        """Send a single JSON-RPC envelope and parse the SSE-or-JSON reply."""
+        """Send a single JSON-RPC envelope and parse the SSE-or-JSON reply.
+
+        This is the ONE chokepoint every call site uses (initialize, a tool
+        call, resources/prompts, …), so the circuit-breaker check lives here
+        rather than being repeated in each public method. Before this check
+        existed here, an already-`_initialized` session kept issuing full
+        network requests (and paying `call_timeout`, up to 60s by default)
+        on every single tool call even while the breaker was tripped open —
+        the breaker only ever protected a fresh `connect()`, never an
+        ongoing, already-connected session that had started failing.
+        """
+        if self._circuit_open():
+            raise UpstreamError(
+                "circuit breaker open: " + (self._last_error or "server down"))
         payload = {
             "jsonrpc": "2.0",
             "id": id if id is not None else int(time.time() * 1000) % 10**9,
@@ -600,16 +645,25 @@ class Upstream:
     def _on_success(self) -> None:
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
+        self._circuit_trips = 0
         self._last_error = None
 
     def _on_failure(self, why: str) -> None:
         self._consecutive_failures += 1
         self._last_error = why
-        if self._consecutive_failures >= 3:
-            self._circuit_open_until = time.monotonic() + 10.0
+        if self._consecutive_failures >= _CIRCUIT_TRIP_THRESHOLD:
+            # Each trip past the threshold waits LONGER than the last one —
+            # a server down for minutes is not re-probed every ten seconds
+            # for the whole outage, but one real success resets this to the
+            # base figure immediately (_on_success above).
+            self._circuit_trips += 1
+            wait = _jittered(min(
+                _CIRCUIT_BASE_S * (_CIRCUIT_MULTIPLIER ** (self._circuit_trips - 1)),
+                _CIRCUIT_MAX_S))
+            self._circuit_open_until = self._clock() + wait
 
     def _circuit_open(self) -> bool:
-        return time.monotonic() < self._circuit_open_until
+        return self._clock() < self._circuit_open_until
 
     # ---------- handshake ----------------------------------------------------
 

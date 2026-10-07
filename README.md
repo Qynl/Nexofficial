@@ -901,6 +901,21 @@ HTTP and stdio JSON-RPC implementations enforce framing and response limits, val
 
 Stdio commands are parsed without a shell, must begin with a single executable token, can be pinned with `NEX_STDIO_ALLOW`, and receive a minimal environment. Provider keys and Nex’s auth token are not inherited.
 
+Each `Upstream` also carries a per-server circuit breaker that now actually
+protects an ONGOING session, not just a fresh `connect()`: every JSON-RPC
+call (`initialize`, `tools/list`, `tools/call`, resources/prompts) shares one
+chokepoint, so three consecutive failures open the breaker and every call
+after that fails instantly — no network attempt, no paying a `call_timeout`
+(up to 60s) per try — until it closes again. Repeated trips with no success
+between them back off further each time (×1.6, capped at 120s) instead of
+reopening for the same flat window forever, and one real answer resets the
+escalation immediately. The health monitor that watches disconnected servers
+paces reconnection the same way, per server: a server that has been down for
+an hour is not redialed on every ~20s monitor tick for the whole hour, and
+one flaky server elsewhere never resets a truly dead one's own backoff. An
+operator-triggered reconnect from the UI is never throttled by any of this —
+only the unattended monitor loop paces itself.
+
 ### 7. The browser is authenticated and hardened
 
 - generated server token stored `0600` under `~/.nex`;

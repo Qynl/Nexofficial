@@ -34,6 +34,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import random
 import re
 import shlex
 import threading
@@ -294,10 +295,12 @@ class ServerManager:
     """Owns every MCP server Nex knows about."""
 
     def __init__(self, bus: Optional[Any] = None,
-                 audit: Optional[AuditLog] = None) -> None:
+                 audit: Optional[AuditLog] = None,
+                 clock: Any = time.monotonic) -> None:
         self._lock = threading.RLock()
         self._bus = bus
         self.audit = audit or AuditLog()
+        self._clock = clock
         self._config: List[Dict[str, Any]] = []
         self._live: Dict[str, Upstream] = {}
         self._status: Dict[str, Dict[str, Any]] = {}
@@ -307,6 +310,15 @@ class ServerManager:
         self._once_approvals: Dict[Tuple[str, str], Set[str]] = {}
         self._monitor_stop = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
+        # Per-server AUTOMATIC reconnect pacing (monitor-driven only — an
+        # operator explicitly clicking "reconnect" always runs immediately,
+        # never gated by this). Without it, a server that has been dead for
+        # an hour is re-dialed on every single monitor tick forever, UNLESS
+        # some unrelated server happens to be flapping and keeps the
+        # monitor's own global backoff reset to its fastest setting — this
+        # makes each server's own retry pace independent of its neighbors'.
+        self._reconnect_backoff: Dict[str, float] = {}
+        self._next_reconnect_at: Dict[str, float] = {}
         self._load()
 
     # ----- events -----------------------------------------------------------
@@ -431,6 +443,8 @@ class ServerManager:
             up = self._live.pop(name, None)
             self._status.pop(name, None)
             self._approvals.pop(name, None)
+            self._reconnect_backoff.pop(name, None)
+            self._next_reconnect_at.pop(name, None)
             for key in [k for k in self._once_approvals if k[0] == name]:
                 self._once_approvals.pop(key, None)
         if up is not None:
@@ -458,7 +472,14 @@ class ServerManager:
             return False, "no server named '%s'" % name
 
     def connect(self, name: str) -> Optional[str]:
-        """Connect one server. Returns an error string or None."""
+        """Connect one server. Returns an error string or None.
+
+        Always runs immediately — an explicit connect/reconnect is an
+        operator (or a one-time monitor-cleared) act and is never throttled.
+        Its OUTCOME still feeds the per-server automatic-reconnect backoff
+        (`_record_reconnect_result`) so a persistently dead server is not
+        hammered by the health monitor regardless of who else tried it.
+        """
         entry = self._entry(name)
         if entry is None:
             return "no server named '%s'" % name
@@ -474,6 +495,7 @@ class ServerManager:
                 old = self._live.pop(name, None)
                 self._status[name] = {"status": ST_ERROR,
                                       "error": str(exc)[:300]}
+            self._record_reconnect_result(name, ok=False)
             if old is not None:
                 try:
                     old.disconnect()
@@ -481,6 +503,7 @@ class ServerManager:
                     pass
             self._emit("mcp.status", self.server_status(name))
             return str(exc)
+        self._record_reconnect_result(name, ok=True)
         with self._lock:
             self._live[name] = up
             self._status[name] = {"status": ST_CONNECTED, "error": None}
@@ -513,6 +536,39 @@ class ServerManager:
             if e.get("enabled", True):
                 self.connect(e["name"])
 
+    # ----- per-server automatic-reconnect pacing ------------------------------
+    #
+    # A 20s (default) monitor tick that just keeps calling connect() on a
+    # server that has been dead for an hour would dial out to it ~180 times
+    # in that hour for nothing. This tracks, per server name, how long the
+    # AUTOMATIC path (never a manual click) should wait before trying again,
+    # escalating on repeated failures the same way transport.py's circuit
+    # breaker escalates — and independent of every OTHER configured server,
+    # so one flapping server elsewhere never resets a truly dead one's pace.
+
+    _RECONNECT_BASE_S = 15.0
+    _RECONNECT_MULTIPLIER = 1.7
+    _RECONNECT_MAX_S = 300.0
+
+    def _record_reconnect_result(self, name: str, ok: bool) -> None:
+        if ok:
+            self._reconnect_backoff.pop(name, None)
+            self._next_reconnect_at.pop(name, None)
+            return
+        prev = self._reconnect_backoff.get(name, 0.0)
+        nxt = (self._RECONNECT_BASE_S if prev <= 0
+               else min(prev * self._RECONNECT_MULTIPLIER,
+                        self._RECONNECT_MAX_S))
+        nxt = nxt + random.uniform(0.0, nxt * 0.1)   # avoid synchronized retries
+        self._reconnect_backoff[name] = nxt
+        self._next_reconnect_at[name] = self._clock() + nxt
+
+    def reconnect_backoff_s(self, name: str) -> float:
+        """Remaining seconds before the MONITOR will automatically retry
+        `name` again. Zero if it is connected, never failed, or due now.
+        A manual connect()/reconnect() call is never affected by this."""
+        return max(0.0, self._next_reconnect_at.get(name, 0.0) - self._clock())
+
     # ----- accessors -----------------------------------------------------------
 
     def _entry(self, name: str) -> Optional[Dict[str, Any]]:
@@ -524,11 +580,13 @@ class ServerManager:
     def _build_upstream(self, entry: Dict[str, Any]) -> Upstream:
         if entry["transport"] == "stdio":
             up = Upstream(entry["name"], "stdio://" + entry["name"],
-                          entry.get("label") or entry["name"])
+                          entry.get("label") or entry["name"],
+                          clock=self._clock)
             up.stdio_command = (entry["command"], list(entry.get("args") or []))
         else:
             up = Upstream(entry["name"], entry["url"],
-                          entry.get("label") or entry["name"])
+                          entry.get("label") or entry["name"],
+                          clock=self._clock)
         to = entry.get("timeout_s")
         if to is not None:
             try:
@@ -577,6 +635,11 @@ class ServerManager:
             out["protocol_version"] = s.get("protocol_version")
             out["latency_ms"] = s.get("latency_ms")
             out["last_error"] = s.get("last_error")
+            out["circuit_open_seconds"] = s.get("circuit_open_seconds", 0)
+        # Seconds until the HEALTH MONITOR will automatically retry a
+        # disconnected server — zero if connected, never failed, or due
+        # now. A manual reconnect from the UI is never affected by this.
+        out["auto_reconnect_in_s"] = round(self.reconnect_backoff_s(name), 1)
         return out
 
     def status(self) -> List[Dict[str, Any]]:
@@ -992,7 +1055,12 @@ class ServerManager:
                         changed = True
                     self._status[name] = {"status": after, "error": err}
             else:
-                # Not connected: try to (re)connect.
+                # Not connected: try to (re)connect, UNLESS this specific
+                # server's own automatic backoff says it is too soon —
+                # a persistently dead server is paced independently of
+                # whatever else on the config is flapping right now.
+                if self.reconnect_backoff_s(name) > 0:
+                    continue
                 err = self.connect(name)
                 if err is None:
                     changed = True

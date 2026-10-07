@@ -271,6 +271,124 @@ class ManagerTests(unittest.TestCase):
             self.mgr.remove("review-first")
 
 
+class _FakeClock:
+    """Deterministic monotonic stand-in — no real sleeps in these tests."""
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+class ReconnectBackoffTests(unittest.TestCase):
+    """A persistently dead server must be paced on its OWN escalating
+    schedule by the health monitor, independent of every other server and
+    never affecting an explicit, operator-triggered connect().
+
+    Uses its OWN NEX_HOME (not the module-wide one ManagerTests shares) so
+    `_probe_all()` only ever sees the one or two servers each test adds,
+    never ManagerTests' persisted "echo" fixture.
+    """
+
+    def setUp(self):
+        self._old_home = os.environ.get("NEX_HOME")
+        os.environ["NEX_HOME"] = tempfile.mkdtemp(prefix="nex-backoff-")
+
+    def tearDown(self):
+        if self._old_home is None:
+            os.environ.pop("NEX_HOME", None)
+        else:
+            os.environ["NEX_HOME"] = self._old_home
+
+    def _mgr(self):
+        clock = _FakeClock()
+        mgr = ServerManager(clock=clock)
+        return mgr, clock
+
+    def test_monitor_skips_a_dead_server_until_its_own_backoff_elapses(self):
+        mgr, clock = self._mgr()
+        try:
+            added, err = mgr.add({"name": "dead-a", "trusted": True,
+                                  "url": "http://127.0.0.1:1/mcp"})
+            self.assertEqual(err, "")
+            # add() already ran one connect() attempt, which failed —
+            # that is what seeds the automatic backoff.
+            self.assertGreater(mgr.reconnect_backoff_s("dead-a"), 0,
+                               "a failed connect must arm the automatic "
+                               "reconnect backoff")
+            calls = {"n": 0}
+            real_connect = mgr.connect
+
+            def spy_connect(name):
+                calls["n"] += 1
+                return real_connect(name)
+            mgr.connect = spy_connect
+
+            changed = mgr._probe_all()
+            self.assertFalse(changed)
+            self.assertEqual(calls["n"], 0,
+                             "the monitor must not even ATTEMPT a reconnect "
+                             "while this server's own backoff has not "
+                             "elapsed yet")
+
+            backoff1 = mgr.reconnect_backoff_s("dead-a")
+            clock.advance(backoff1 + 1)
+            mgr._probe_all()
+            self.assertEqual(calls["n"], 1,
+                             "once its own backoff elapses the monitor DOES "
+                             "try again")
+            backoff2 = mgr.reconnect_backoff_s("dead-a")
+            self.assertGreater(
+                backoff2, backoff1,
+                "a SECOND consecutive automatic failure must wait longer "
+                "than the first (%.1fs -> %.1fs) — a server dead for an "
+                "hour is not redialed every monitor tick for the whole hour"
+                % (backoff1, backoff2))
+        finally:
+            mgr.close()
+
+    def test_manual_connect_is_never_throttled_by_the_automatic_backoff(self):
+        mgr, clock = self._mgr()
+        try:
+            mgr.add({"name": "dead", "trusted": True,
+                     "url": "http://127.0.0.1:1/mcp"})
+            self.assertGreater(mgr.reconnect_backoff_s("dead"), 0)
+            # An operator clicking "reconnect" right away must still run —
+            # the backoff only ever gates the unattended monitor loop.
+            err = mgr.connect("dead")
+            self.assertIsNotNone(err, "still down, so still an error — but "
+                                      "it must have actually TRIED")
+        finally:
+            mgr.close()
+
+    def test_recovery_clears_the_automatic_backoff(self):
+        clock = _FakeClock()
+        mgr = ServerManager(clock=clock)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), echo.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            # Start pointed at a dead port so a backoff gets armed...
+            mgr.add({"name": "flaky", "trusted": True,
+                     "url": "http://127.0.0.1:1/mcp"})
+            self.assertGreater(mgr.reconnect_backoff_s("flaky"), 0)
+            # ...then "fix" it (operator edits the URL) and reconnect.
+            entry = mgr._entry("flaky")
+            entry["url"] = "http://127.0.0.1:%d/mcp" % port
+            err = mgr.connect("flaky")
+            self.assertIsNone(err, "the now-reachable server connects: %s" % err)
+            self.assertEqual(mgr.reconnect_backoff_s("flaky"), 0,
+                             "a real success clears the automatic backoff")
+        finally:
+            mgr.close()
+            httpd.shutdown()
+            httpd.server_close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
     if _FAILED:

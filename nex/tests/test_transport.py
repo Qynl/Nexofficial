@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NEX = os.path.dirname(HERE)
@@ -352,6 +353,149 @@ class HTTPTransportTests(unittest.TestCase):
                           httpd.server_address[1])
             with self.assertRaises(UpstreamError):
                 up.connect()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class _FakeClock:
+    """Deterministic monotonic stand-in — no real sleeps in these tests."""
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+class _FlakyHandler(BaseHTTPRequestHandler):
+    """initialize/resources/prompts always succeed; tools/list fails while
+    `fail` is True — enough to drive the circuit breaker on purpose."""
+
+    fail = True
+    hits = 0
+
+    def log_message(self, *a):  # noqa: D401 — quiet
+        pass
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        method = body.get("method")
+        rid = body.get("id")
+        type(self).hits += 1
+        if method == "initialize":
+            self._send(200, {"jsonrpc": "2.0", "id": rid, "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "flaky", "version": "1"}}})
+            return
+        if method == "notifications/initialized":
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if method == "tools/list" and type(self).fail:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if method == "tools/list":
+            self._send(200, {"jsonrpc": "2.0", "id": rid,
+                             "result": {"tools": []}})
+            return
+        if method in ("resources/list", "prompts/list"):
+            key = "resources" if method == "resources/list" else "prompts"
+            self._send(200, {"jsonrpc": "2.0", "id": rid, "result": {key: []}})
+            return
+        self._send(200, {"jsonrpc": "2.0", "id": rid, "result": {}})
+
+    def _send(self, status, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+class CircuitBreakerTests(unittest.TestCase):
+    """The breaker must protect an already-connected session too, and back
+    off FURTHER on each repeat trip instead of a flat reopen time forever."""
+
+    def _server(self):
+        from http.server import ThreadingHTTPServer
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd
+
+    def test_breaker_fast_fails_an_already_initialized_session(self):
+        _FlakyHandler.fail = True
+        _FlakyHandler.hits = 0
+        httpd = self._server()
+        try:
+            clock = _FakeClock()
+            up = Upstream("flaky", "http://127.0.0.1:%d/mcp"
+                          % httpd.server_address[1], clock=clock)
+            up.connect()
+            # connect() tolerates the tools/list failure and stays
+            # initialized; resources/prompts succeeded, so the failure
+            # counter is back at 0 — three FRESH failures are needed.
+            self.assertEqual(up._consecutive_failures, 0)
+            for _ in range(3):
+                with self.assertRaises(UpstreamError):
+                    up.tools()
+            self.assertGreaterEqual(up._circuit_trips, 1,
+                                    "three consecutive failures must trip "
+                                    "the breaker")
+            hits_before = _FlakyHandler.hits
+            with self.assertRaises(UpstreamError) as ctx:
+                up.tools()
+            self.assertIn("circuit breaker", str(ctx.exception))
+            self.assertEqual(
+                _FlakyHandler.hits, hits_before,
+                "a call while the breaker is OPEN must not touch the "
+                "network at all — this is what makes the breaker actually "
+                "protect an ongoing (already-initialized) session, not "
+                "just a fresh connect()")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_repeat_trips_back_off_further_each_time(self):
+        _FlakyHandler.fail = True
+        _FlakyHandler.hits = 0
+        httpd = self._server()
+        try:
+            clock = _FakeClock()
+            up = Upstream("flaky", "http://127.0.0.1:%d/mcp"
+                          % httpd.server_address[1], clock=clock)
+            up.connect()
+            for _ in range(3):
+                with self.assertRaises(UpstreamError):
+                    up.tools()
+            wait1 = up._circuit_open_until - clock()
+            self.assertGreaterEqual(wait1, 10.0)
+            self.assertLessEqual(wait1, 11.5)   # base 10s + <=10% jitter
+            clock.advance(wait1 + 0.1)
+            with self.assertRaises(UpstreamError):
+                up.tools()                       # breaker closed, retries, fails again
+            wait2 = up._circuit_open_until - clock()
+            self.assertGreater(wait2, wait1,
+                               "a SECOND consecutive trip must wait longer "
+                               "than the first (%.1fs -> %.1fs)"
+                               % (wait1, wait2))
+            # recovery: let the server start answering and advance past the
+            # (longer) second cooldown — one real success must reset both
+            # the failure streak and the trip escalation.
+            clock.advance(wait2 + 0.1)
+            _FlakyHandler.fail = False
+            up.tools()
+            self.assertEqual(up._consecutive_failures, 0)
+            self.assertEqual(up._circuit_trips, 0)
         finally:
             httpd.shutdown()
             httpd.server_close()
