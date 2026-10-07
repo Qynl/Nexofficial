@@ -155,6 +155,30 @@ def _note_auth_failure(peer: str) -> None:
         _auth_fails.setdefault(peer, []).append(now)
 
 
+# General API rate limit for ALREADY-AUTHENTICATED requests. The 256-bit
+# token is what actually keeps strangers out; this is cheap defense-in-depth
+# against OUR OWN bugs — e.g. a client-side retry loop with no backoff
+# hammering /api/chat against a real, metered provider and running up cost.
+# Generous on purpose: a single-operator, local-first tool should never see
+# its interactive traffic anywhere near this ceiling.
+_RATE_WINDOW_S = 60.0
+_RATE_LIMIT = 600
+_rate_lock = threading.Lock()
+_rate_hits: Dict[str, List[float]] = {}
+
+
+def _rate_limited(peer: str) -> bool:
+    now = time.time()
+    with _rate_lock:
+        hits = [t for t in _rate_hits.get(peer, ())
+                if now - t < _RATE_WINDOW_S]
+        hits.append(now)
+        _rate_hits[peer] = hits
+        if len(_rate_hits) > 1024:          # bounded memory
+            _rate_hits.clear()
+        return len(hits) > _RATE_LIMIT
+
+
 # ---------------------------------------------------------------------------
 # Event bus (SSE fan-out)
 # ---------------------------------------------------------------------------
@@ -586,6 +610,11 @@ class NexHandler(BaseHTTPRequestHandler):
             _note_auth_failure(peer)
             self._send_json(401, error_payload(ERR_USER, "authentication "
                                                 "required"))
+            return False
+        if _rate_limited(peer):
+            self.close_connection = True
+            self._send_json(429, error_payload(
+                ERR_USER, "too many requests; slow down"))
             return False
         if mutating and not self._mutating_origin_ok():
             self._send_json(403, error_payload(ERR_USER,

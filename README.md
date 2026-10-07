@@ -1456,6 +1456,25 @@ Twenty-two suites run in isolated processes because several intentionally config
 
 A GitHub Actions workflow (`.github/workflows/tests.yml`) runs this same suite on every push and pull request.
 
+### Frontend tests
+
+```bash
+cd nex/web
+npm install
+npm test
+```
+
+Eighteen tests, Node's built-in test runner plus `jsdom` as the only dev dependency — no bundler, no browser automation, nothing shipped to the app itself (it is still plain ES modules with zero build step).
+
+| Suite | What it proves |
+| --- | --- |
+| `imports.test.mjs` | Every named import across `nex/web/js` resolves to a real export — formalizes the exact bug class that once broke the whole chat UI (see below) |
+| `boot.test.mjs` | The real `index.html` + `main.js` boot end-to-end in jsdom without throwing or logging an uncaught error |
+| `markdown.test.mjs` | `renderMarkdown`/`renderStreaming` never produce a live `<script>`/`onerror`/`javascript:`/`data:` vector, and headings/lists/tables/fenced code render as real structural DOM |
+| `state.test.mjs` | `createStore`'s get/set/update/subscribe contract, including that a throwing subscriber cannot break the store or other subscribers |
+
+This same `npm test` runs in CI (`.github/workflows/tests.yml`, `frontend-tests` job) alongside the Python suite.
+
 Useful development checks:
 
 ```bash

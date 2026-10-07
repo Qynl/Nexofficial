@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nex"
+version = "0.1.0"
+description = "A local-first production operator for Unreal Engine 5.8 and Roblox Studio, orchestrated entirely over MCP."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+# Metadata/versioning only — Nex is deliberately a zero-dependency, pure
+# standard-library tool (see README) and is normally run in place with
+# `python3 server.py` from inside nex/, which is also how its own test
+# suite and CI invoke it. This file exists so tools that expect project
+# metadata (version, name) have something to read, and so `pip install -e .`
+# works for anyone who wants that instead. It intentionally declares no
+# [project.scripts] entry point, since the supported way to run Nex is
+# documented in the README's Quick start section.
+#
+# nex/ itself (not the repo root) is the import root: agent/ and mcp/ are
+# namespace packages (no __init__.py) imported as bare `agent`/`mcp`, and
+# server.py/store.py are plain top-level modules. The mapping below mirrors
+# that layout rather than introducing a new nex.* import path, so installing
+# this package does not require touching a single existing import statement.
+[tool.setuptools]
+package-dir = {"" = "nex"}
+py-modules = ["server", "store"]
+
+[tool.setuptools.packages.find]
+where = ["nex"]
+include = ["agent*", "mcp*"]
+namespaces = true

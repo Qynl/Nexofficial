@@ -449,6 +449,41 @@ class APITests(unittest.TestCase):
         finally:
             server_mod._auth_fails.pop(peer, None)
 
+    def test_rate_limiter_blocks_a_runaway_peer_but_not_normal_use(self):
+        peer = "203.0.113.88"
+        server_mod._rate_hits.pop(peer, None)
+        try:
+            for _ in range(server_mod._RATE_LIMIT):
+                expect(not server_mod._rate_limited(peer),
+                       "must not rate-limit a peer below the ceiling")
+            expect(server_mod._rate_limited(peer),
+                   "must rate-limit once a single peer exceeds the "
+                   "ceiling within the window (guards against a buggy "
+                   "retry loop running up cost against a metered "
+                   "provider)")
+        finally:
+            server_mod._rate_hits.pop(peer, None)
+
+    def test_rate_limiter_returns_429_over_real_http_once_tripped(self):
+        # Exercise the real dispatch path (_auth_gate), not just the pure
+        # counting function, so a wiring mistake would be caught too.
+        peer = "127.0.0.1"
+        server_mod._rate_hits.pop(peer, None)
+        try:
+            now = time.time()
+            server_mod._rate_hits[peer] = [now] * server_mod._RATE_LIMIT
+            s, body = self.req("GET", "/api/health")
+            expect(s == 429, "a request past the ceiling must get 429, "
+                             "got %r" % s)
+            expect(body.get("error", {}).get("code") == server_mod.ERR_USER,
+                  "rate-limit errors must use the user error code")
+        finally:
+            server_mod._rate_hits.pop(peer, None)
+        # Must recover immediately once the window's hits are cleared —
+        # this is a sliding window, not a lockout.
+        s, _b = self.req("GET", "/api/health")
+        expect(s == 200, "must recover once old hits age out/are cleared")
+
     def test_bad_token_eventually_returns_429(self):
         server_mod._auth_fails.clear()
         try:

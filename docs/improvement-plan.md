@@ -77,7 +77,62 @@ construction against hostile MCP metadata) with no code changes needed.
    check on nonzero exit. No build step, no external services, nothing to
    maintain.
 
-## Tier 2 — medium value
+## Tier 2/3 — DONE (items 3, 4, 6)
+
+All three are complete (commit `81f485c` + follow-up): frontend smoke tests,
+API rate limiting, and a minimal `pyproject.toml`. Item 5 (structured
+`logging`) was deliberately skipped — the plan itself calls it discretionary
+and "not recommended as current work," and nothing in this pass changed
+that assessment.
+
+Writing the very first frontend tests immediately found two real, severe
+bugs, not just gaps in coverage:
+
+- `chat.js` and `composer.js` both imported named exports (`RunCard`,
+  `face`) that did not exist in `runview.js`/`face.js`. ES module named
+  imports are resolved at *link time*, before any code runs — this was a
+  hard `SyntaxError` in any real browser, meaning the entire chat UI module
+  graph could never load. Fixed by correcting the `RunCard` import to the
+  `buildRunCard` function actually used, and by giving `face.js` a real
+  exported singleton (`initFace()` + a null-safe `face` proxy) instead of
+  main.js's unexported local variable. Locked in by
+  `nex/web/tests/imports.test.mjs` (checks every named import across all of
+  `nex/web/js` resolves to a real export) and `nex/web/tests/boot.test.mjs`
+  (loads the real `index.html` + `main.js` in jsdom and asserts it boots).
+- `markdown.js`'s fenced-code-block handling could never recognize a
+  *closing* fence (the per-line regex needed an embedded newline no single
+  line could contain), so any reply with a code block followed by more text
+  — an extremely common model-output shape — had everything after the
+  opening fence, including the real closing fence, swallowed into the code
+  block. Fixed with proper forward-scanning for the matching closing fence.
+- `markdown.js`'s table-separator regex used the character class
+  `[\s:-|]`, parsed as `\s` plus the *range* `':'`–`'|'` (0x3A–0x7C) —
+  covering most letters and punctuation while *excluding* the literal `-`
+  character outright. A standard `|---|---|` separator row never matched,
+  so markdown tables never rendered as tables at all. Fixed by moving `-`
+  to the end of the class so it's literal, not a range endpoint.
+
+The 18-test suite (`nex/web/tests/`, Node's built-in test runner + jsdom,
+`npm test` from `nex/web/`) runs in CI alongside the Python suite.
+
+Rate limiting: `server.py` now applies a generous (600 requests / 60s),
+per-peer sliding-window limit to all authenticated `/api/*` traffic, wired
+into the existing `_auth_gate` chokepoint right after the auth check. It's
+defense-in-depth against a buggy client-side retry loop running up cost
+against a real, metered provider, not an anti-abuse measure (the 256-bit
+token already keeps strangers out). Covered by two new tests in
+`test_server_api.py`, including one that trips the limiter over real HTTP
+and confirms it's a sliding window, not a lockout.
+
+`pyproject.toml`: metadata-only, zero dependencies, verified end-to-end with
+a real `pip install -e .` into a throwaway venv and importing `agent`,
+`mcp`, `server`, and `store` from an unrelated working directory. Nex's
+internal imports assume `nex/` itself (not the repo root) is the import
+root, with `agent`/`mcp` as namespace packages (no `__init__.py`) — the
+`[tool.setuptools]` mapping mirrors that layout exactly, so installing the
+package required zero changes to any existing import statement.
+
+## Tier 2 — medium value (original text, for reference)
 
 3. **Some minimal frontend testing.** `nex/web/` is 8,653 lines across 13 JS
    files, CSS, and HTML, with zero automated coverage of any kind. A spot
