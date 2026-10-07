@@ -25,7 +25,24 @@ test", not "we checked and found broken code".
   Added `nex/tests/test_jsonreply.py` (18 assertions), wired into
   `run_all.py`. Committed `465e5d4`, pushed, 17/17 suites green.
 
-## Tier 1 — high value, low risk (recommended next)
+## Tier 1 — DONE
+
+Both items below are complete (commit `b40111d`): CI now runs on every push,
+and `audit.py`/`diagnose.py`/`events.py`/`llm.py`/`prompts.py` all have
+dedicated tests. Two more small, real issues turned up and were fixed along
+the way: `audit.py` was recording a tool called with legitimately empty
+arguments (`{}`) identically to "no arguments were ever given" (`None`),
+losing a real distinction; and `events.py` built each event with the core
+`type`/`run_id`/`ts` fields before the payload spread, so a payload carrying
+a same-named key could have silently overridden them (no current caller
+does, but it was a live footgun in the one place that is the UI's source of
+truth for run state). `diagnose.py` and `prompts.py` were already solid —
+their new tests lock in existing correct behavior (hallucinated-tool
+rejection, policy re-authorization on switch_tool, bounded prompt
+construction against hostile MCP metadata) with no code changes needed.
+22/22 suites pass.
+
+## Tier 1 (original text, for reference)
 
 1. **Dedicated unit tests for the remaining untested modules.** Of 25
    non-test modules in `nex/agent` + `nex/mcp`, these have no dedicated test
