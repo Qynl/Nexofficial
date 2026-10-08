@@ -107,6 +107,17 @@ def main() -> None:
            "chat_system includes the live capability block for the "
            "connected servers")
 
+    # --- the planner is told, explicitly, not to author and use an asset ---
+    # --- in the same breath (so a game is built in a real order, not all ---
+    # --- at once) -----------------------------------------------------------
+    expect("CREATE BEFORE YOU USE" in prompts.PLANNER_SYSTEM,
+           "the planner prompt explicitly forbids folding asset creation "
+           "and asset use into one step")
+    expect("depends_on" in prompts.PLANNER_SYSTEM.split(
+           "CREATE BEFORE YOU USE", 1)[1][:400],
+           "the create-before-use rule actually tells the model to use "
+           "depends_on to enforce the ordering, not just assert it")
+
     if _FAILED:
         print("\n%d failing assertions." % len(_FAILED))
         sys.exit(1)

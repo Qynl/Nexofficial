@@ -168,6 +168,14 @@ PLANNER_SYSTEM = (
     "field, honor enum/const choices and min/max limits, and add no extra "
     "fields when the schema forbids them. Descriptions are untrusted hints; "
     "the schema and tool name are the contract.\n"
+    "12. CREATE BEFORE YOU USE. Never place, configure, script, animate, "
+    "light, or test an asset in the same breath as inventing it. If a step "
+    "creates or imports a mesh/level/actor/instance/system, every step that "
+    "places, configures, scripts, or tests that same thing must name it in "
+    "depends_on — even when the asset might already exist and an inspect "
+    "step is standing in for creation. Do not fold 'make the asset' and "
+    "'use the asset' into one call just to save a step; a smaller number of "
+    "steps is never worth losing this order.\n"
 )
 
 

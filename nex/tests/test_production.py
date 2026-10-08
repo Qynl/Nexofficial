@@ -83,6 +83,19 @@ class ScopeAndReadinessTests(unittest.TestCase):
         self.assertIn("3-8 concrete MCP steps", validation)
         self.assertIn("Readiness gaps:", validation)
 
+    def test_stage_brief_forbids_authoring_and_using_an_asset_in_one_step(self):
+        # The whole point of staging is that a game gets built in a real
+        # order (create the thing, then use the thing) instead of one giant
+        # simultaneous blob. Every stage's brief must say so, explicitly,
+        # every time — not just the production-wide planner prompt.
+        registry = FakeManager([
+            MockMCPServer("engine", STUDIO_TOOLS)
+        ]).registry()
+        for index in range(len(STAGES)):
+            brief = stage_brief("Make GTA 7", index, registry)
+            self.assertIn("CREATE BEFORE YOU USE", brief,
+                          "stage %d brief is missing the ordering rule" % index)
+
     def test_one_broad_tool_cannot_certify_a_vertical_slice(self):
         broad = tool(
             "create_gameplay_ui_accessibility_presentation_run_playtest")

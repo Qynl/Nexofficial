@@ -372,6 +372,12 @@ def stage_brief(goal: str, stage_index: int, registry: Any) -> str:
         "prefer reusable/data-driven systems over disconnected showcase props.",
         "Use successful historical $step references instead of recreating prior "
         "outputs. Inspect before changing unfamiliar state.",
+        "CREATE BEFORE YOU USE, even inside one stage. A step that places, "
+        "configures, scripts, animates, lights, or tests a mesh/level/actor/ "
+        "system must depend on the step that created, imported, or inspected "
+        "it first. Never collapse authoring and use into one call to save a "
+        "step; a stage that produces many assets at once but never proves any "
+        "one of them works is not progress.",
         "Available production disciplines: %s" %
         (", ".join(available) if available else "none identified"),
         "Readiness gaps: %s" %
