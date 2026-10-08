@@ -253,6 +253,71 @@ class ProgramLoopTests(unittest.TestCase):
                          ["discovery"])
         self.assertEqual(report["status"], "partial")
 
+    def test_large_program_gets_a_bigger_replan_budget_than_a_focused_goal(self):
+        # An 8-stage program is not one plan; sharing one small single-run
+        # replan budget across every stage would starve later stages just
+        # because an earlier one needed a correction. A large-scale goal
+        # must get its OWN, bigger budget — not silently fall back to the
+        # tiny single-run default — while still being bounded, not infinite.
+        mock = MockMCPServer("engine", STUDIO_TOOLS)
+        mgr = FakeManager([mock])
+
+        attempt = {"n": 0}
+
+        def llm(messages):
+            if "planning mind" in messages[0]["content"]:
+                # A new step name each attempt (a replan cannot shadow a
+                # historical step name — see test_agent_loop.py); the tool
+                # never satisfies "gate:inspection", so the stage never
+                # passes and every attempt gets corrected again.
+                attempt["n"] += 1
+                return json.dumps({"plan": {"title": "Discovery",
+                    "rationale": "never actually inspects anything",
+                    "steps": [{
+                        "name": "discovery-create-level-%d" % attempt["n"],
+                        "title": "Create Level",
+                        "tool": "engine.create_level", "args": {}}]}})
+            return "Discovery evidence reviewed."
+
+        report = AgentRun(
+            "studio-stuck", "Make GTA 7", mgr, llm=llm,
+            max_production_stages=1, max_steps=64,
+            max_replans=1, max_program_replans=4).run()
+        self.assertEqual(report["replans"], 4,
+                         "the large-scale program used its own budget of 4, "
+                         "not the focused-goal default of 1")
+        self.assertEqual(
+            report["production_program"]["completed_stages"], [],
+            "the stage never actually passed, so it must not be reported "
+            "as completed just because replans ran out")
+        self.assertEqual(report["status"], "partial")
+
+        # The same connected catalog and the same small max_replans, but for
+        # a FOCUSED (non-large-scale) goal, must still stop at the ordinary
+        # small budget — the bigger budget is specific to the program.
+        focused_attempt = {"n": 0}
+
+        def focused_llm(messages):
+            if "planning mind" in messages[0]["content"]:
+                focused_attempt["n"] += 1
+                return json.dumps({"plan": {"title": "Build",
+                    "rationale": "never actually inspects anything",
+                    "steps": [{
+                        "name": "build-create-level-%d" % focused_attempt["n"],
+                        "title": "Create Level",
+                        "tool": "engine.create_level", "args": {}}]}})
+            return json.dumps({"done": False, "adjust": "replan",
+                               "reason": "not good enough",
+                               "note": "try again"})
+
+        focused_report = AgentRun(
+            "focused-stuck", "Add one new weapon to my level", mgr,
+            llm=focused_llm, max_steps=64,
+            max_replans=1, max_program_replans=4).run()
+        self.assertLessEqual(focused_report["replans"], 1,
+                             "a focused goal must keep the small, "
+                             "single-run replan budget, not the program's")
+
     def test_stage_cap_reports_partial_instead_of_fake_completion(self):
         mock = MockMCPServer("engine", STUDIO_TOOLS)
         mgr = FakeManager([mock])

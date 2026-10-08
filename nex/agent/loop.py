@@ -96,6 +96,15 @@ DEFAULT_MAX_STEPS = _env_int("NEX_MAX_STEPS", 64)
 DEFAULT_MAX_REPLANS = _env_int("NEX_MAX_REPLANS", 3)
 DEFAULT_MAX_QUALITY_PASSES = _env_int("NEX_MAX_QUALITY_PASSES", 1)
 DEFAULT_MAX_PRODUCTION_STAGES = _env_int("NEX_MAX_PRODUCTION_STAGES", 8)
+# A large-scale production program (agent/production.py) spans up to 8
+# independently-corrected stages. Sharing one small single-run replan budget
+# across the WHOLE program would starve later stages of any chance to fix
+# missing evidence just because an earlier stage happened to need one first —
+# the opposite of what "aim for flagship quality" should mean for an
+# 8-stage build. Give the program its own, larger budget instead; an
+# ordinary focused goal keeps the small default untouched.
+DEFAULT_MAX_PROGRAM_REPLANS = _env_int(
+    "NEX_MAX_PROGRAM_REPLANS", 2 * len(PRODUCTION_STAGES))
 # A model evaluation after every dependency wave burns hosted RPM without
 # adding value when a validated plan is progressing normally. Evaluate at a
 # bounded checkpoint, and immediately on stalls/failures.
@@ -277,6 +286,7 @@ class AgentRun:
                  conversation_id: Optional[str] = None,
                  max_steps: int = DEFAULT_MAX_STEPS,
                  max_replans: int = DEFAULT_MAX_REPLANS,
+                 max_program_replans: int = DEFAULT_MAX_PROGRAM_REPLANS,
                  max_quality_passes: int = DEFAULT_MAX_QUALITY_PASSES,
                  max_production_stages: int = DEFAULT_MAX_PRODUCTION_STAGES,
                  eval_every_steps: int = DEFAULT_EVAL_EVERY_STEPS,
@@ -290,6 +300,7 @@ class AgentRun:
         self.conversation_id = conversation_id
         self.max_steps = max_steps
         self.max_replans = max_replans
+        self.max_program_replans = max(max_replans, max_program_replans)
         self.max_quality_passes = max(0, max_quality_passes)
         self.max_production_stages = max(
             1, min(max_production_stages, len(PRODUCTION_STAGES)))
@@ -330,6 +341,19 @@ class AgentRun:
     def _check_stop(self) -> bool:
         return (self._stop.is_set() or self._step_budget_hit or
                 (time.time() - self.started_at > self.budget_s))
+
+    @property
+    def _replan_budget(self) -> int:
+        """Total corrective replans this run may use.
+
+        A large-scale production program is not one plan, it is up to 8
+        independently-corrected stages; using it still is not worth less
+        correction opportunity than a single-plan goal would get. The
+        ordinary single-run budget is a floor, not a ceiling, so a short or
+        aborted program is never worse off than before this existed.
+        """
+        return self.max_program_replans if self._program_active \
+            else self.max_replans
 
     def cancel(self) -> None:
         self._stop.set()
@@ -1112,7 +1136,7 @@ class AgentRun:
                 (stage.label, missing))
             correctable = review.get("correctable") or []
             if (correctable and self.llm is not None and
-                    self._replans < self.max_replans and not self._check_stop()):
+                    self._replans < self._replan_budget and not self._check_stop()):
                 note = (
                     "Current production stage '%s' is not complete. Add only "
                     "work proving these missing machine-audited requirements: "
@@ -1222,7 +1246,7 @@ class AgentRun:
             return False
         if self.llm is None or self._quality_passes >= self.max_quality_passes:
             return False
-        if self._replans >= self.max_replans or self._check_stop():
+        if self._replans >= self._replan_budget or self._check_stop():
             return False
         note = quality_correction_note(scorecard)
         if not note:
@@ -1243,9 +1267,9 @@ class AgentRun:
     # ----- adaptation ------------------------------------------------------------
 
     def _replan(self, verdict: Dict[str, Any]) -> bool:
-        if self._replans >= self.max_replans:
+        if self._replans >= self._replan_budget:
             self.context.failures.append(
-                "replan budget exhausted (%d)" % self.max_replans)
+                "replan budget exhausted (%d)" % self._replan_budget)
             return False
         self._replans += 1
         self._emit("run.phase", phase="adapting",

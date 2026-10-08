@@ -1404,7 +1404,8 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_ALLOW_CONFIRMATIONS` | empty | Servers pre-approved for non-code confirmation categories |
 | `NEX_CAPABILITY_FILE` | `~/.nex/capabilities.json` | Operator classification pins; escalation only |
 | `NEX_MAX_STEPS` | `64` | Maximum executed tool steps per run |
-| `NEX_MAX_REPLANS` | `3` | Maximum structural replans |
+| `NEX_MAX_REPLANS` | `3` | Maximum structural replans for a focused (non-studio-scale) goal |
+| `NEX_MAX_PROGRAM_REPLANS` | `16` | Maximum structural replans for a studio-scale production program (shared across all 8 stages, not per stage) |
 | `NEX_MAX_QUALITY_PASSES` | `1` | Maximum final evidence/polish passes after game work |
 | `NEX_MAX_PRODUCTION_STAGES` | `8` | Milestone-plan cap for studio-scale game goals |
 | `NEX_EVAL_EVERY_STEPS` | `6` | Successful MCP steps between model evaluation checkpoints; failures evaluate immediately |
