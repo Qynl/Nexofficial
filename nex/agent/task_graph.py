@@ -38,6 +38,7 @@ class Task:
     result: Any = None
     error: Optional[str] = None
     error_signature: Optional[str] = None
+    failure_kind: str = ""        # agent/failures.py taxonomy, best-effort
     tried_alts: List[str] = field(default_factory=list)
     llm_diagnosed: bool = False   # bounded: LLM repair runs at most once/task
     expect: Optional[Any] = None  # what success should look like (from plan)
@@ -52,7 +53,8 @@ class Task:
             "server": self.server, "tool": self.tool,
             "contract_pinned": bool(self.contract_fingerprint),
             "why": self.why, "expect": self.expect, "phase": self.phase,
-            "error": self.error, "notes": self.notes,
+            "error": self.error, "failure_kind": self.failure_kind,
+            "notes": self.notes,
         }
 
 
@@ -145,11 +147,14 @@ class TaskGraph:
         self._tasks[tid].status = PENDING
 
     def mark_failed(self, tid: str, error: str,
-                    signature: Optional[str] = None) -> None:
+                    signature: Optional[str] = None,
+                    failure_kind: Optional[str] = None) -> None:
         t = self._tasks[tid]
         t.status = FAILED
         t.error = error
         t.error_signature = signature
+        if failure_kind is not None:
+            t.failure_kind = failure_kind
         # Dependency-aware failure propagation: dependents are skipped,
         # not re-executed.
         self._propagate_skip(tid)
@@ -198,6 +203,7 @@ class TaskGraph:
                     "attempts": t.attempts, "max_attempts": t.max_attempts,
                     "result": t.result, "error": t.error,
                     "error_signature": t.error_signature,
+                    "failure_kind": t.failure_kind,
                     "llm_diagnosed": t.llm_diagnosed,
                     "expect": t.expect, "why": t.why,
                     "phase": t.phase, "notes": t.notes,
@@ -219,6 +225,7 @@ class TaskGraph:
                 max_attempts=td.get("max_attempts", 3),
                 result=td.get("result"), error=td.get("error"),
                 error_signature=td.get("error_signature"),
+                failure_kind=td.get("failure_kind", "") or "",
                 llm_diagnosed=bool(td.get("llm_diagnosed", False)),
                 expect=td.get("expect"),
                 why=td.get("why", "") or "",

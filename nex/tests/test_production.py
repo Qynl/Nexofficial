@@ -83,6 +83,24 @@ class ScopeAndReadinessTests(unittest.TestCase):
         self.assertIn("3-8 concrete MCP steps", validation)
         self.assertIn("Readiness gaps:", validation)
 
+    def test_systems_and_world_content_get_a_dependency_order_advisory(self):
+        # "Scalable game systems" and "World, content & presentation" are
+        # exactly the two stages where building things in the wrong order
+        # (e.g. NPC spawning before navigation exists) silently produces
+        # broken content — only those stages should carry the advisory.
+        registry = FakeManager([
+            MockMCPServer("engine", STUDIO_TOOLS)
+        ]).registry()
+        systems = stage_brief("Make GTA 7", 3, registry)
+        world_content = stage_brief("Make GTA 7", 4, registry)
+        discovery = stage_brief("Make GTA 7", 0, registry)
+        foundation = stage_brief("Make GTA 7", 1, registry)
+        self.assertIn("Dependency-aware system order", systems)
+        self.assertIn("navigation/navmesh before AI", systems)
+        self.assertIn("Dependency-aware system order", world_content)
+        self.assertNotIn("Dependency-aware system order", discovery)
+        self.assertNotIn("Dependency-aware system order", foundation)
+
     def test_stage_brief_forbids_authoring_and_using_an_asset_in_one_step(self):
         # The whole point of staging is that a game gets built in a real
         # order (create the thing, then use the thing) instead of one giant

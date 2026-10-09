@@ -26,12 +26,35 @@ def tool(name, description=""):
 
 UE_TOOLS = [
     tool("inspect_uproject"),
+    tool("list_plugins"),
+    tool("list_assets"),
     tool("create_blueprint_actor"),
+    tool("modify_blueprint"),
     tool("compile_blueprint"),
+    tool("edit_source_file"),
+    tool("build_project"),
+    tool("spawn_actor"),
+    tool("edit_component"),
+    tool("edit_level"),
+    tool("world_partition"),
+    tool("pcg_graph"),
+    tool("create_material"),
+    tool("niagara_emitter"),
+    tool("anim_blueprint"),
+    tool("sound_cue"),
+    tool("package_project"),
+    tool("cook_content"),
+    tool("build_target_platform"),
     tool("start_pie"),
+    tool("launch_game"),
     tool("capture_viewport"),
+    tool("inspect_logs"),
+    tool("execute_console_command"),
     tool("run_automation_test"),
+    tool("functional_test"),
+    tool("gauntlet_test"),
     tool("capture_unreal_insights"),
+    tool("stat_gpu"),
 ]
 
 ROBLOX_TOOLS = [
@@ -92,6 +115,38 @@ class ReadinessTests(unittest.TestCase):
         self.assertTrue(report["ready"])
         self.assertTrue(report["checks"]["client_server"])
         self.assertTrue(report["checks"]["performance_streaming"])
+
+    def test_deep_matrix_tells_a_thin_bridge_apart_from_a_full_one(self):
+        # A server that only exposes the 7 coarse disciplines that used to
+        # be the entire Unreal matrix (inspect/author/compile/PIE/capture/
+        # automation/profile) must now score visibly below a server that
+        # genuinely supports World Partition, PCG, Niagara, animation,
+        # audio, packaging/cooking, console commands, and the finer
+        # Blueprint/C++ split — "can author something" is not the same
+        # claim as "can also compile, package, and ship it".
+        thin = FakeManager([MockMCPServer("engine", [
+            tool("inspect_uproject"), tool("create_blueprint_actor"),
+            tool("compile_blueprint"), tool("start_pie"),
+            tool("capture_viewport"), tool("run_automation_test"),
+            tool("capture_unreal_insights"),
+        ])]).registry()
+        thin_report = profile_readiness(thin, UNREAL_58.id)
+        full_report = profile_readiness(
+            FakeManager([MockMCPServer("engine", UE_TOOLS)]).registry(),
+            UNREAL_58.id)
+        self.assertLess(thin_report["score"], full_report["score"])
+        self.assertEqual(full_report["score"], 100)
+        # The granular disciplines the thin bridge cannot prove must show
+        # up explicitly, not be hidden behind a passing coarse umbrella.
+        for discipline in ("world_partition", "pcg", "niagara", "animation",
+                           "audio", "packaging", "cooking",
+                           "console_commands", "blueprint_modification"):
+            self.assertFalse(
+                thin_report["checks"][discipline],
+                "%s should be unproven for a thin bridge" % discipline)
+            self.assertTrue(
+                full_report["checks"][discipline],
+                "%s should be proven for a full bridge" % discipline)
 
     def test_untrusted_descriptions_are_not_capability_evidence(self):
         claims = " ".join(item for profile in (UNREAL_58, ROBLOX_STUDIO)

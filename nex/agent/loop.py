@@ -65,6 +65,8 @@ from agent.quality import (
     profile_for_goal,
     tool_gates,
 )
+from agent.failures import classify_failure, label as failure_label
+from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
 from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING,
@@ -404,6 +406,10 @@ class AgentRun:
         # (never a substitute for) the tool-evidence quality gates — see
         # `_maybe_visual_critique`.
         self.visual_critiques: List[Dict[str, Any]] = []
+        # Turns those critiques into a tracked, prioritized defect list that
+        # feeds back into the NEXT plan/replan instead of sitting unused in
+        # the final report — see agent/visual.py.
+        self._visual_board = VisualIssueBoard()
         self._program_active = is_large_game_goal(goal)
         self._engine_targets: List[Dict[str, Any]] = []
         self._context_block: Optional[str] = None
@@ -566,6 +572,7 @@ class AgentRun:
             parts.append(production_stage_brief(
                 self.goal, self._program_stage, registry))
         parts.append(engine_planning_brief(self.goal, registry))
+        parts.append(self._visual_board.planning_note())
         parts.append(self._project_context(registry))
         return "\n\n".join(p for p in parts if p)
 
@@ -826,7 +833,7 @@ class AgentRun:
         try:
             args = self._resolve_args(task)
         except ArgResolutionError as exc:
-            self.graph.mark_failed(task.id, str(exc),
+            self._mark_failed(task.id, str(exc),
                                    _error_signature(str(exc)))
             self.context.record_failure(task.name, task.tool, str(exc))
             self._emit("run.tool", step_id=task.id, tool=task.tool,
@@ -852,7 +859,7 @@ class AgentRun:
             if self._stop.is_set():
                 return
             if not approved:
-                self.graph.mark_failed(
+                self._mark_failed(
                     task.id, "user declined the confirmation",
                     _error_signature("user declined"))
                 self.context.record_failure(task.name, task.tool,
@@ -870,7 +877,7 @@ class AgentRun:
         # --- refusal (policy) -------------------------------------------------
         if "refused" in outcome:
             task.attempts += 1
-            self.graph.mark_failed(task.id, outcome["refused"],
+            self._mark_failed(task.id, outcome["refused"],
                                    _error_signature(outcome["refused"]))
             self.context.record_failure(task.name, task.tool,
                                         outcome["refused"])
@@ -946,10 +953,18 @@ class AgentRun:
             text = critique.strip()[:1200]
             entry["performed"] = True
             entry["critique"] = text
+            # Classify the critique into tracked defect categories so the
+            # NEXT plan/replan is told to actually go fix them, instead of
+            # the critique only ever appearing as prose in the final
+            # report. A critique that names no recognized defect pattern
+            # (e.g. genuine praise) adds nothing to the board.
+            categories = self._visual_board.record(task.name, text)
+            entry["defect_categories"] = sorted(categories)
             self.context.observe(
                 task.name + " (AI visual critique)", task.tool or "?",
                 task.server or "?", text, ok=True)
-            self._emit("run.visual_critique", step_id=task.id, critique=text)
+            self._emit("run.visual_critique", step_id=task.id, critique=text,
+                       defect_categories=sorted(categories))
         else:
             entry["performed"] = False
             entry["reason"] = "no vision-capable model is currently configured"
@@ -996,6 +1011,31 @@ class AgentRun:
         return bool(answer.get("approved"))
 
     # ----- recovery ------------------------------------------------------------
+
+    def _mark_failed(self, tid: str, error: str,
+                     signature: Optional[str] = None) -> None:
+        """graph.mark_failed(), plus a best-effort failure-kind label.
+
+        Classification (agent/failures.py) never changes recovery or
+        policy — it only tells apart a dropped connection from a missing
+        argument from a compile error from a runtime crash in the final
+        report, instead of lumping everything into one "failed" bucket.
+        A lookup failure degrades to classifying from the error text
+        alone; it never blocks marking the task failed.
+        """
+        task = self.graph.get(tid)
+        gates: set = set()
+        tool_name = (task.tool if task else "") or ""
+        if task is not None and task.server and task.tool:
+            try:
+                tv = self.manager.registry().by_name(
+                    "%s.%s" % (task.server, task.tool))
+                if tv is not None:
+                    gates = tool_gates(tv)
+            except Exception:  # noqa: BLE001 - classification is advisory
+                gates = set()
+        kind = classify_failure(error, tool_name, gates)
+        self.graph.mark_failed(tid, error, signature, failure_kind=kind)
 
     def _retry_is_safe(self, task: Task) -> bool:
         """Only repeat a call automatically when live policy says read-only.
@@ -1069,7 +1109,7 @@ class AgentRun:
             guarded = ("%s; outcome is unknown and Nex did not automatically "
                        "repeat the non-read-only MCP call" % error)
             self.context.record_failure(task.name, task.tool, guarded)
-            self.graph.mark_failed(task.id, guarded, sig)
+            self._mark_failed(task.id, guarded, sig)
             self._emit("run.tool", step_id=task.id, tool=task.tool,
                        server=task.server, phase="error",
                        preview="unknown outcome — unsafe retry prevented")
@@ -1081,7 +1121,7 @@ class AgentRun:
                        preview="transient read-only error — retrying")
             outcome = self._attempt(task)
             if outcome is None:
-                self.graph.mark_failed(
+                self._mark_failed(
                     task.id, "arguments could not be resolved", sig)
                 self._emit("run.step", step=task.to_public())
                 return
@@ -1098,7 +1138,7 @@ class AgentRun:
                        preview="adjusted arguments — retrying")
             outcome = self._attempt(task)
             if outcome is None:
-                self.graph.mark_failed(
+                self._mark_failed(
                     task.id, "arguments could not be resolved", sig)
                 self._emit("run.step", step=task.to_public())
                 return
@@ -1118,7 +1158,7 @@ class AgentRun:
                            preview="repaired arguments — retrying")
                 outcome = self._attempt(task)
                 if outcome is None:
-                    self.graph.mark_failed(
+                    self._mark_failed(
                         task.id, "arguments could not be resolved", sig)
                     self._emit("run.step", step=task.to_public())
                     return
@@ -1134,7 +1174,7 @@ class AgentRun:
                            preview="switched tool — retrying")
                 outcome = self._attempt(task)
                 if outcome is None:
-                    self.graph.mark_failed(
+                    self._mark_failed(
                         task.id, "arguments could not be resolved", sig)
                     self._emit("run.step", step=task.to_public())
                     return
@@ -1143,7 +1183,7 @@ class AgentRun:
                 error = outcome_error(outcome)
 
         # D. honest failure
-        self.graph.mark_failed(task.id, error, sig)
+        self._mark_failed(task.id, error, sig)
         self._emit("run.step", step=task.to_public())
 
     def _fix_args(self, task: Task, error: str) -> Optional[Dict[str, Any]]:
@@ -1540,9 +1580,13 @@ class AgentRun:
                            "preview": result_preview(t.result)}
                           for t in completed],
             "failed": ([{"name": t.name, "tool": t.tool,
-                         "error": (t.error or "")[:200]} for t in failed]
+                         "error": (t.error or "")[:200],
+                         "failure_kind": t.failure_kind or "unknown",
+                         "failure_label": failure_label(
+                             t.failure_kind or "unknown")} for t in failed]
                        + [{"name": t.name, "tool": t.tool,
-                           "error": "step was not executed (plan stalled)"}
+                           "error": "step was not executed (plan stalled)",
+                           "failure_kind": "", "failure_label": ""}
                           for t in unfinished]),
             "skipped": [{"name": t.name, "note": t.notes} for t in skipped],
             "reasons": out_reasons,
@@ -1553,6 +1597,7 @@ class AgentRun:
             "quality_passes": self._quality_passes,
             "quality": quality,
             "visual_critiques": list(self.visual_critiques),
+            "visual_issues": self._visual_board.to_public(),
             "mcp_production_review": plan_meta.get("production_review") or {},
             "reversal": self._reversal_plan(),
             "engine_targets": list(self._engine_targets),
@@ -1628,6 +1673,7 @@ class AgentRun:
             "waiting": (self._approval is not None),
             "quality": self._quality_scorecard(),
             "visual_critiques": list(self.visual_critiques),
+            "visual_issues": self._visual_board.to_public(),
             "mcp_production_review": dict(
                 (getattr(self.graph, "plan_meta", {}) or {}).get(
                     "production_review") or {}),
@@ -1721,6 +1767,22 @@ def _fallback_summary(report: Dict[str, Any]) -> str:
                      "visual evidence above reflects only that the "
                      "capture tool ran, not a genuine AI opinion of the "
                      "image.")
+    issues = report.get("visual_issues") or {}
+    open_issues = issues.get("open") or []
+    if open_issues:
+        lines.append("\nOpen visual defects (from that same real critique, "
+                     "fed back into planning — not yet resolved):")
+        for item in open_issues[:5]:
+            lines.append("- %s (seen %dx, last at '%s')" %
+                         (item.get("label", item.get("category", "?")),
+                          item.get("mentions", 1), item.get("last_seen_at", "?")))
+    resolved_issues = issues.get("likely_resolved") or []
+    if resolved_issues:
+        lines.append(
+            "\nLikely-resolved visual defects (a later critique stopped "
+            "mentioning them — a heuristic, not a verified fix): " +
+            ", ".join(i.get("label", i.get("category", "?"))
+                     for i in resolved_issues[:5]))
     return "\n".join(lines)
 
 

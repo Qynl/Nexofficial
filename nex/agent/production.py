@@ -345,6 +345,23 @@ def stage_evidence(stage: ProductionStage, registry: Any,
     }
 
 
+_SYSTEM_ORDER_ADVISORY = (
+    "Dependency-aware system order (advisory, not a hard gate — skip any "
+    "link the live tools cannot support, but do not build downstream "
+    "systems on top of an upstream one you have not actually verified): "
+    "1) world streaming/level structure before anything that queries it, "
+    "2) navigation/navmesh before AI or NPC movement, "
+    "3) NPC spawning before encounters, traffic, or crowds that reference "
+    "NPCs, "
+    "4) traffic/crowd systems before missions that stage inside them, "
+    "5) missions/quests before the economy/reward hooks they grant, "
+    "6) economy before persistence/save needs something stateful to store. "
+    "Building a later system before verifying the one it depends on tends "
+    "to produce content that looks done but silently breaks once the real "
+    "dependency is exercised."
+)
+
+
 def stage_brief(goal: str, stage_index: int, registry: Any) -> str:
     stage = STAGES[max(0, min(stage_index, len(STAGES) - 1))]
     state = readiness(registry)
@@ -363,6 +380,8 @@ def stage_brief(goal: str, stage_index: int, registry: Any) -> str:
     lines.append("Machine-audited minimum: %d distinct relevant successful "
                  "steps; one broad tool call cannot certify this milestone."
                  % _MIN_STAGE_EVIDENCE_STEPS.get(stage.id, 1))
+    if stage.id in ("systems", "world_content"):
+        lines.append(_SYSTEM_ORDER_ADVISORY)
     lines.extend([
         "Plan ONLY this stage in 3-8 concrete MCP steps. Prefix every step "
         "`name` with '%s-' so cross-stage references stay unambiguous. Do not "

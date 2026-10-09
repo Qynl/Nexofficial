@@ -240,6 +240,20 @@ def planning_brief(profile: QualityProfile, registry: Any) -> str:
         else:
             lines.append("- %s: UNAVAILABLE in the live MCP catalog; do not "
                          "invent it" % _GATE_LABELS[gate])
+    if "playtest" in profile.required_gates:
+        lines.append(
+            "A playtest step must be a concrete objective, not a vague "
+            "'play the game' call. Decompose it into: 1) approach the "
+            "specific system/area under test, 2) interact with it the way "
+            "a player would (input, trigger, dialogue, combat, etc.), "
+            "3) verify the resulting state actually changed (health, "
+            "inventory, mission state, score, position — whatever the "
+            "system is supposed to affect), 4) deliberately try a failure "
+            "case (wrong input, edge condition, early exit) and confirm it "
+            "is handled rather than silently ignored, 5) inspect logs/"
+            "console output for errors or warnings the visual result alone "
+            "would not reveal. A playtest that only confirms the game "
+            "launched is not evidence the feature under test works.")
     lines.extend([
         "Plan the smallest coherent playable slice first. Prefer inspecting "
         "before mutation and reuse existing project conventions/assets.",

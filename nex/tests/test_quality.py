@@ -90,6 +90,25 @@ class CatalogAndScoreTests(unittest.TestCase):
         self.assertIn("UNAVAILABLE", sparse_brief)
         self.assertNotIn("engine.capture_frame", sparse_brief)
 
+    def test_playtest_gate_adds_concrete_objective_decomposition(self):
+        # A planner told to just "playtest it" tends to launch the game
+        # and call that proof. The contract must spell out what a real
+        # playtest objective actually requires.
+        self.assertIn("playtest", self.profile.required_gates)
+        brief = planning_brief(self.profile, self.registry)
+        self.assertIn("approach the specific system/area under test", brief)
+        self.assertIn("verify the resulting state actually changed", brief)
+        self.assertIn("deliberately try a failure case", brief)
+        self.assertIn("inspect logs/console output", brief)
+
+        import dataclasses
+        base = profile_for_goal("Fix a visual bug in this level")
+        no_playtest = dataclasses.replace(
+            base, required_gates=tuple(
+                g for g in base.required_gates if g != "playtest"))
+        quiet_brief = planning_brief(no_playtest, self.registry)
+        self.assertNotIn("deliberately try a failure case", quiet_brief)
+
     def test_only_successful_tool_calls_count_as_evidence(self):
         tasks = []
         for i, spec in enumerate(GAME_TOOLS):

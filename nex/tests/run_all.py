@@ -27,6 +27,8 @@ SUITES = [
     "test_production.py",     # multi-stage studio program + MCP readiness
     "test_engine_profiles.py", # Unreal 5.8 + Roblox Studio contracts/readiness
     "test_mcp_production.py", # balanced catalog, plan proof, context safety
+    "test_visual.py",         # iterative visual-defect tracking + feedback
+    "test_failures.py",       # failure-taxonomy classification
     "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
     "test_jsonreply.py",      # model-reply JSON extraction (ACT directive, plans)

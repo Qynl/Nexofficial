@@ -54,6 +54,15 @@ UNREAL_58 = EngineProfile(
     signals=("unreal", "unreal_editor", "unrealeditor", "uproject",
              "blueprint", "start_pie", "pie_start", "unreal_insights",
              "world_outliner", "unrealbuildtool"),
+    # This matrix is deliberately granular. Earlier, coarser requirement ids
+    # (project_inspection, authoring, compile_build, runtime, observation,
+    # automation, performance) remain exactly as before for compatibility;
+    # the entries below them narrow each one into the actual disciplines an
+    # Unreal MCP bridge may or may not expose, so readiness/stage planning
+    # can tell "can create Blueprints" apart from "can also compile them",
+    # or "can start PIE" apart from "can launch a standalone build" — the
+    # planner must never assume a capability exists just because a
+    # same-sounding sibling does.
     requirements=(
         EngineRequirement(
             "project_inspection", "Project, assets, levels and plugins",
@@ -62,33 +71,141 @@ UNREAL_58 = EngineProfile(
              "list_assets", "list_levels", "list_modules", "list_plugins",
              "project_settings"), True),
         EngineRequirement(
+            "plugin_inspection", "Enabled/available plugin discovery",
+            ("list_plugins", "plugin_info", "enabled_plugins",
+             "plugin_status", "plugin_browser")),
+        EngineRequirement(
+            "asset_inspection", "Asset registry browsing and metadata",
+            ("asset_registry", "list_assets", "find_asset", "asset_info",
+             "content_browser", "asset_metadata")),
+        EngineRequirement(
             "authoring", "Actors, Blueprints, C++ and content authoring",
             ("blueprint", "actor", "component", "level", "material", "niagara",
              "pcg", "mesh_terrain", "source_file", "cpp", "cxx"), True),
+        EngineRequirement(
+            "blueprint_creation", "Creating new Blueprint classes/actors",
+            ("create_blueprint", "new_blueprint", "add_blueprint",
+             "blueprint_actor", "spawn_blueprint_class")),
+        EngineRequirement(
+            "blueprint_modification", "Editing existing Blueprint graphs",
+            ("modify_blueprint", "edit_blueprint", "set_blueprint_property",
+             "add_blueprint_node", "add_node", "blueprint_variable",
+             "blueprint_function")),
+        EngineRequirement(
+            "blueprint_compilation", "Compiling a Blueprint after edits",
+            ("compile_blueprint",)),
+        EngineRequirement(
+            "cpp_editing", "Writing or editing C++ source",
+            ("source_file", "edit_source", "write_cpp", "cpp_class",
+             "create_cpp_class", "edit_header", "edit_cpp")),
+        EngineRequirement(
+            "cpp_compilation", "Building a C++ module/target",
+            ("compile_project", "build_project", "build_game", "ubt",
+             "unrealbuildtool", "build_module", "hot_reload")),
+        EngineRequirement(
+            "actor_spawning", "Spawning/placing actors in a level",
+            ("spawn_actor", "create_actor", "place_actor", "add_actor")),
+        EngineRequirement(
+            "component_editing", "Adding/editing actor components",
+            ("add_component", "edit_component", "set_component",
+             "remove_component", "component_property")),
+        EngineRequirement(
+            "world_editing", "Level/world editing (outliner, placement)",
+            ("edit_level", "create_level", "load_level", "save_level",
+             "world_outliner", "level_editing", "open_level")),
+        EngineRequirement(
+            "world_partition", "World Partition / data layers / streaming",
+            ("world_partition", "data_layer", "streaming_source",
+             "partition_grid", "one_file_per_actor")),
+        EngineRequirement(
+            "pcg", "Procedural Content Generation graphs",
+            ("pcg", "procedural_content", "pcg_graph", "pcg_component")),
+        EngineRequirement(
+            "materials", "Material/material-instance authoring",
+            ("material", "create_material", "edit_material",
+             "material_instance", "material_graph")),
+        EngineRequirement(
+            "niagara", "Niagara VFX system authoring",
+            ("niagara", "vfx_system", "particle_system",
+             "niagara_emitter")),
+        EngineRequirement(
+            "animation", "Animation Blueprints, montages, Sequencer",
+            ("animation", "anim_blueprint", "sequencer", "montage",
+             "anim_graph", "skeletal_control")),
+        EngineRequirement(
+            "audio", "Sound cues, MetaSounds, audio placement",
+            ("audio", "sound_cue", "metasound", "sound_wave",
+             "audio_component")),
         EngineRequirement(
             "compile_build", "Blueprint compile, C++ build, cook or package",
             ("compile_blueprint", "compile_project", "build_project",
              "build_game", "ubt", "unrealbuildtool", "cook", "package",
              "commandlet"), True),
         EngineRequirement(
+            "packaging", "Packaging a build for a target platform",
+            ("package_project", "package_game", "package_build")),
+        EngineRequirement(
+            "cooking", "Cooking content for a target platform",
+            ("cook_content", "cook_project", "cook_game")),
+        EngineRequirement(
+            "target_platform_builds", "Building for a non-editor target platform",
+            ("target_platform", "build_target_platform", "platform_build",
+             "build_cooked_content")),
+        EngineRequirement(
             "runtime", "Play In Editor or standalone runtime",
             ("start_pie", "play_in_editor", "pie_start", "launch_game",
              "run_game", "standalone_game", "simulate_game",
              "runtime_session"), True),
+        EngineRequirement(
+            "pie", "Play In Editor specifically",
+            ("start_pie", "play_in_editor", "pie_start", "stop_pie")),
+        EngineRequirement(
+            "standalone_launch", "Standalone (non-editor) game launch",
+            ("launch_game", "run_game", "standalone_game",
+             "standalone_launch")),
         EngineRequirement(
             "observation", "Viewport capture and Output Log diagnostics",
             ("viewport_capture", "capture_viewport", "capture_frame",
              "screenshot", "output_log", "message_log", "runtime_log",
              "inspect_logs", "get_diagnostics", "console_output"), True),
         EngineRequirement(
+            "viewport_screenshots", "Capturing a viewport/frame image",
+            ("viewport_capture", "capture_viewport", "capture_frame",
+             "screenshot", "snapshot_view")),
+        EngineRequirement(
+            "logs", "Reading the Output/Message Log or crash reports",
+            ("output_log", "message_log", "runtime_log", "inspect_logs",
+             "get_diagnostics", "crash_report")),
+        EngineRequirement(
+            "console_commands", "Executing in-editor/runtime console commands",
+            ("console_command", "execute_console_command", "exec_command",
+             "run_console_command")),
+        EngineRequirement(
             "automation", "Automation or functional tests",
             ("automation_test", "functional_test", "gauntlet", "run_tests",
              "verify_game", "test_report", "session_frontend")),
+        EngineRequirement(
+            "automation_tests", "Unreal Automation Spec/test framework",
+            ("automation_test", "automation_spec", "run_automation_test")),
+        EngineRequirement(
+            "functional_tests", "Functional test actors/maps",
+            ("functional_test", "functional_test_actor")),
+        EngineRequirement(
+            "gauntlet_tests", "Gauntlet-style device/build test runs",
+            ("gauntlet", "gauntlet_test", "device_test")),
         EngineRequirement(
             "performance", "Unreal Insights, trace or frame profiling",
             ("unreal_insights", "insights_trace", "trace_capture", "stat_unit",
              "stat_gpu", "profilegpu", "memreport", "profiler_capture",
              "get_performance_metrics", "performance_profile")),
+        EngineRequirement(
+            "unreal_insights", "Unreal Insights trace capture/analysis",
+            ("unreal_insights", "insights_trace", "trace_capture",
+             "trace_analysis")),
+        EngineRequirement(
+            "profiling", "stat/profiler commands and frame/memory metrics",
+            ("stat_unit", "stat_gpu", "profilegpu", "memreport",
+             "profiler_capture", "get_performance_metrics")),
     ),
     workflow=(
         "Confirm the live project's EngineAssociation is 5.8 and inspect the "
