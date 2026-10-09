@@ -381,18 +381,19 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "label": "OpenCode Zen",
         "kind": KIND_OPENAI,
         "base_url": "https://opencode.ai/zen/v1",
-        # Big Pickle (reviewed 2026-10 against the live opencode.ai/zen/v1
-        # catalog and independent community reports): the strongest
-        # free-tier performer on complex coding/agentic tasks of Zen's
-        # current no-cost lineup. It is OpenCode's own rotating/stealth
-        # eval slot, so the identity behind it can change week to week —
-        # that is also why Settings → Model should be checked occasionally,
-        # and why model_supports_vision() never assumes it can see images
-        # (an anonymous slot's real capabilities are unverifiable). Ling
-        # 3.0 Flash Fin, Nemotron 3 Ultra/Lightning are named, stable
-        # alternatives in CATALOG if a predictable identity matters more
-        # than top raw score.
-        "model": "big-pickle",
+        # Ling 3.1 Flash (reviewed 2026-10 against the live opencode.ai/
+        # zen/v1 catalog): a named, stable model — 560B total/25B active,
+        # 262K context — free directly on Zen (also OpenRouter's own
+        # default below, so both free gateways lead with the same proven
+        # agentic model). Big Pickle tested stronger on raw coding
+        # benchmarks by community report, but it is OpenCode's rotating/
+        # anonymous stealth-eval slot: the identity behind it (and
+        # therefore its real quality and whether it can see images) can
+        # change week to week with no warning. For a default that ships
+        # to everyone, predictability wins over chasing the top score —
+        # Big Pickle remains in CATALOG for anyone who wants to opt into
+        # it anyway.
+        "model": "ling-3.1-flash-free",
         "api_key_env": "OPENCODE_API_KEY",
         # No published per-model RPM; a conservative local ceiling avoids
         # hammering a free, no-card gateway into a hard 429/ban.
@@ -401,11 +402,13 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "cooldown_s": 15.0,
         "structured_outputs": False,
         "note": "Free, no-card gateway (opencode.ai/auth). Several models are "
-                "$0/token today — Big Pickle (default, strongest free "
-                "coding performer, identity rotates), Ling 3.0 Flash Fin, "
-                "Nemotron 3 Ultra/Lightning — but a free listing can "
-                "change or retire; Settings → Model pulls the live catalog.",
+                "$0/token today — Ling 3.1 Flash (default, named and "
+                "stable), Nemotron 3 Ultra/Lightning, Ling 3.0 Flash Fin, "
+                "Big Pickle (rotating identity, unverifiable quality/"
+                "vision) — but a free listing can change or retire; "
+                "Settings → Model pulls the live catalog.",
     },
+
     "openrouter": {
         "label": "OpenRouter",
         "kind": KIND_OPENAI,
@@ -537,10 +540,13 @@ CATALOG: List[Dict[str, Any]] = [
     # router does not speak, so those are left off even when free.
     {"provider": "opencode", "id": "ling-3.1-flash-free",
      "role": "agent", "label": "Ling 3.1 Flash (OpenCode Zen, free)",
-     "note": "inclusionAI MoE, 560B total/25B active, 262K context, free "
-             "directly on Zen (previously OpenRouter-only) — same strong, "
-             "$0 agentic model as OpenRouter's own default. A named, "
-             "stable alternative to the rotating Big Pickle default."},
+     "note": "The provider default. inclusionAI MoE, 560B total/25B active, "
+             "262K context, free directly on Zen (previously OpenRouter-"
+             "only) — same strong, $0 agentic model as OpenRouter's own "
+             "default. Named and stable, chosen over the rotating Big "
+             "Pickle slot because a default that ships to everyone should "
+             "not have its real identity (and vision support) change "
+             "without warning."},
     {"provider": "opencode", "id": "nemotron-3-ultra-free",
      "role": "agent", "label": "Nemotron 3 Ultra (OpenCode Zen, free)",
      "note": "Same 550B Nemotron Ultra family NIM charges for — free here. "
@@ -559,15 +565,15 @@ CATALOG: List[Dict[str, Any]] = [
      "note": "Xiaomi general-purpose model; free coding/chat generalist. "
              "Supersedes the retired MiMo V2.5 free listing."},
     {"provider": "opencode", "id": "big-pickle",
-     "role": "agent", "label": "Big Pickle (OpenCode Zen, free)",
-     "note": "The provider default. OpenCode's rotating stealth eval slot "
-             "— reported by the community as the strongest free-tier "
-             "coding/agentic performer on Zen, but its identity (and "
-             "therefore its real quality and whether it can see images) "
-             "varies by the week since it is whatever they are currently "
-             "measuring. Prefer the named Ling 3.1/3.0 Flash or Nemotron "
-             "entries above if a predictable identity matters more than "
-             "chasing the top score."},
+     "role": "chat", "label": "Big Pickle (OpenCode Zen, free)",
+     "note": "OpenCode's rotating stealth eval slot — reported by the "
+             "community as the strongest free-tier coding/agentic "
+             "performer on Zen, but its identity (and therefore its real "
+             "quality and whether it can see images) varies by the week "
+             "since it is whatever they are currently measuring. Opt in "
+             "deliberately if you want to chase the top score; the "
+             "provider defaults to the named, stable Ling 3.1 Flash above "
+             "instead."},
     # --- OpenRouter (free, no card — 20+ ':free' models, reviewed 2026-10) -
     {"provider": "openrouter", "id": "inclusionai/ling-3.1-flash",
      "role": "agent", "label": "Ling 3.1 Flash (OpenRouter, free)",

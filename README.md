@@ -1127,7 +1127,7 @@ segment `openai` instead of `v1` and gets exactly one targeted exception in
 | **Local (Ollama)** | free, your hardware | none | `http://127.0.0.1:11434` | `gpt-oss:20b` |
 | **NVIDIA NIM** | pay-as-you-go (free endpoint for this model) | `NVIDIA_API_KEY` | `integrate.api.nvidia.com/v1` | `moonshotai/kimi-k3` |
 | **GPT (OpenAI-compatible)** | pay-as-you-go | `OPENAI_API_KEY` | `api.openai.com/v1` | `gpt-5.1` |
-| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `big-pickle` |
+| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `ling-3.1-flash-free` |
 | **OpenRouter** | **free, no card** | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | `inclusionai/ling-3.1-flash` |
 | **Groq** | **free, no card** | `GROQ_API_KEY` | `api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | **Google AI Studio (Gemini)** | **free, no card** | `GEMINI_API_KEY` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` |
@@ -1173,8 +1173,8 @@ models are listed at **$0 input/output**:
 
 | Model id | What it is |
 | --- | --- |
-| `big-pickle` | The default. OpenCode's rotating stealth eval slot — reported the strongest free coding/agentic performer on Zen, but its real identity (and whether it can see images) changes week to week |
-| `ling-3.1-flash-free` | inclusionAI MoE, 560B total/25B active, 262K context — the same strong $0 model OpenRouter defaults to, now free directly on Zen too. A named, stable alternative if Big Pickle's rotation is undesirable |
+| `ling-3.1-flash-free` | The default. inclusionAI MoE, 560B total/25B active, 262K context — the same strong $0 model OpenRouter defaults to, now free directly on Zen too. Named and stable, chosen over Big Pickle so the default's identity and vision support can't change without warning |
+| `big-pickle` | OpenCode's rotating stealth eval slot — reported the strongest free coding/agentic performer on Zen, but its real identity (and whether it can see images) changes week to week. Opt in deliberately if you want to chase the top score |
 | `nemotron-3-ultra-free` | The same 550B Nemotron Ultra family NIM charges for, free here — slow, good for a careful plan |
 | `nemotron-3.5-lightning-free` | Free mirror of NIM's fast Lightning tier — low-latency agent loops |
 | `ling-3.0-flash-fin-free` | Ant Group / inclusionAI MoE flash model, finance-tuned variant — an older sibling of Ling 3.1 |
@@ -1491,7 +1491,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NVIDIA_API_KEY` | empty | NVIDIA NIM credential |
 | `OPENAI_API_KEY` | empty | OpenAI-compatible credential |
 | `OPENCODE_API_KEY` | empty | OpenCode Zen credential — **free, no card** (opencode.ai/auth) |
-| `NEX_OPENCODE_MODEL` | `big-pickle` | OpenCode Zen model id |
+| `NEX_OPENCODE_MODEL` | `ling-3.1-flash-free` | OpenCode Zen model id |
 | `NEX_OPENCODE_RPM` | `20` | OpenCode Zen local safety ceiling (no published quota) |
 | `OPENROUTER_API_KEY` | empty | OpenRouter credential — **free, no card** (openrouter.ai/keys) |
 | `NEX_OPENROUTER_MODEL` | `inclusionai/ling-3.1-flash` | OpenRouter model id (append `:free` for zero-cost variants) |

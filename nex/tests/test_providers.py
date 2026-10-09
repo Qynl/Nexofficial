@@ -1406,10 +1406,13 @@ _expect(any(c["id"] == "ling-3.1-flash-free" for c in catalog_oc),
         "Ling 3.1 Flash is in the curated OpenCode Zen catalog too — it "
         "moved onto Zen's own free tier directly, not just OpenRouter's")
 _expect(any(c["id"] == "big-pickle" for c in catalog_oc),
-        "Big Pickle is in the curated OpenCode Zen catalog")
-_expect(providers.DEFAULT_PROVIDERS["opencode"]["model"] == "big-pickle",
-        "Big Pickle (the strongest reported free coding/agentic performer "
-        "on Zen) is OpenCode Zen's default model")
+        "Big Pickle is in the curated OpenCode Zen catalog as an opt-in "
+        "choice, even though it is not the default")
+_expect(providers.DEFAULT_PROVIDERS["opencode"]["model"]
+        == "ling-3.1-flash-free",
+        "Ling 3.1 Flash is OpenCode Zen's default model — named and "
+        "stable, matching OpenRouter's own default, rather than the "
+        "rotating/unverifiable Big Pickle slot")
 _expect(not any(c["id"] == "mimo-v2.5-free" for c in catalog_oc),
         "the retired MiMo V2.5 free listing must not linger in the "
         "curated catalog once Zen moved to MiMo V2.6 Flash")
