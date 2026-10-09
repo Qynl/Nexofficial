@@ -402,7 +402,7 @@ export OLLAMA_MODEL=gpt-oss:20b
 # NVIDIA NIM for hard work; routine chat/plans remain local
 export NVIDIA_API_KEY=nvapi-your-key
 export NEX_AGENT_PROVIDER=nim
-export NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
+export NEX_AGENT_MODEL=moonshotai/kimi-k3
 ```
 
 Then:
@@ -545,7 +545,7 @@ For game-authoring requests, `agent/quality.py` derives a production contract fr
 
 A normal production game-making run requires the first eight. A **flagship** request—terms such as “AAA-style,” “high-quality,” “professional,” “shippable,” or “cinematic”—also requires performance evidence. Visual capture and visual review are deliberately separate: pixels existing is not the same as those pixels being judged.
 
-The `visual`/`visual_review` **gates** above are still, honestly, just tool-name-and-evidence checks — they prove a capture/review tool ran and returned non-empty content, not that anything looked at the pixels. Separately from the score, when a screenshot step succeeds and returns real MCP image bytes, Nex makes one additional, additive call: if (and only if) the currently configured model for that work is known to accept image input (e.g. Gemini, GPT-4o/5-class, or a local vision model such as LLaVA — plain text-only models are skipped, never silently sent an image they cannot read), a vision-capable model is asked for an honest, specific critique of that exact screenshot against the stated goal. The critique is surfaced in the run's report (`visual_critiques`) and folded into the final summary when one was produced; it never changes a gate's pass/fail state, and when no vision-capable model is configured nothing is attempted or faked — the report says so plainly instead of implying a review happened.
+The `visual`/`visual_review` **gates** above are still, honestly, just tool-name-and-evidence checks — they prove a capture/review tool ran and returned non-empty content, not that anything looked at the pixels. Separately from the score, when a screenshot step succeeds and returns real MCP image bytes, Nex makes one additional, additive call: if (and only if) the currently configured model for that work is known to accept image input (e.g. Gemini, GPT-4o/5-class, NVIDIA NIM's default Kimi K3, or a local vision model such as LLaVA — plain text-only models are skipped, never silently sent an image they cannot read), a vision-capable model is asked for an honest, specific critique of that exact screenshot against the stated goal. The critique is surfaced in the run's report (`visual_critiques`) and folded into the final summary when one was produced; it never changes a gate's pass/fail state, and when no vision-capable model is configured nothing is attempted or faked — the report says so plainly instead of implying a review happened.
 
 The final report contains a score from `0–100`, gate-by-gate state, supporting step/tool evidence, missing gates, unavailable capabilities, and the number of corrective passes. A gate can be:
 
@@ -1125,20 +1125,24 @@ segment `openai` instead of `v1` and gets exactly one targeted exception in
 | Provider | Cost | Key | Base URL | Default model |
 | --- | --- | --- | --- | --- |
 | **Local (Ollama)** | free, your hardware | none | `http://127.0.0.1:11434` | `gpt-oss:20b` |
-| **NVIDIA NIM** | pay-as-you-go | `NVIDIA_API_KEY` | `integrate.api.nvidia.com/v1` | `nvidia/nemotron-3-super-120b-a12b` |
+| **NVIDIA NIM** | pay-as-you-go (free endpoint for this model) | `NVIDIA_API_KEY` | `integrate.api.nvidia.com/v1` | `moonshotai/kimi-k3` |
 | **GPT (OpenAI-compatible)** | pay-as-you-go | `OPENAI_API_KEY` | `api.openai.com/v1` | `gpt-5.1` |
-| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `ling-3.1-flash-free` |
+| **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `big-pickle` |
 | **OpenRouter** | **free, no card** | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | `inclusionai/ling-3.1-flash` |
 | **Groq** | **free, no card** | `GROQ_API_KEY` | `api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | **Google AI Studio (Gemini)** | **free, no card** | `GEMINI_API_KEY` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` |
 
-Of these defaults, only `gemini-2.5-flash` and `gpt-5.1` are recognised as
-vision-capable — that gates the real-screenshot AI critique described above
-in "The game-production quality protocol." `model_supports_vision()` in
-`agent/providers.py` matches known multimodal model-name families (`gemini`,
-`gpt-4o`/`gpt-5`, `claude-3`, `llava`, `pixtral`, `qwen*-vl`,
-`llama-4-scout`/`maverick`, and a few others) and is conservative on purpose:
-an unrecognised model name is always treated as text-only.
+Of these defaults, `gemini-2.5-flash`, `gpt-5.1`, and `moonshotai/kimi-k3`
+are recognised as vision-capable — that gates the real-screenshot AI
+critique described above in "The game-production quality protocol." NIM's
+default (Kimi K3) was deliberately chosen to be vision-capable so that a
+plain NVIDIA key, with nothing else configured, is already enough for that
+critique to actually run. `model_supports_vision()` in `agent/providers.py`
+matches known multimodal model-name families (`gemini`, `gpt-4o`/`gpt-5`,
+`claude-3`, `llava`, `pixtral`, `qwen*-vl`, `llama-4-scout`/`maverick`,
+`kimi-k3`/`kimi-k2.6`, and a few others) and is conservative on purpose: an
+unrecognised model name — including OpenCode Zen's rotating `big-pickle`,
+whose real identity is never disclosed — is always treated as text-only.
 
 #### Groq and Google AI Studio — two more zero-cost safety nets
 
@@ -1169,12 +1173,12 @@ models are listed at **$0 input/output**:
 
 | Model id | What it is |
 | --- | --- |
-| `ling-3.1-flash-free` | The default. inclusionAI MoE, 560B total/25B active, 262K context — the same strong $0 model OpenRouter defaults to, now free directly on Zen too |
+| `big-pickle` | The default. OpenCode's rotating stealth eval slot — reported the strongest free coding/agentic performer on Zen, but its real identity (and whether it can see images) changes week to week |
+| `ling-3.1-flash-free` | inclusionAI MoE, 560B total/25B active, 262K context — the same strong $0 model OpenRouter defaults to, now free directly on Zen too. A named, stable alternative if Big Pickle's rotation is undesirable |
 | `nemotron-3-ultra-free` | The same 550B Nemotron Ultra family NIM charges for, free here — slow, good for a careful plan |
 | `nemotron-3.5-lightning-free` | Free mirror of NIM's fast Lightning tier — low-latency agent loops |
-| `ling-3.0-flash-fin-free` | Ant Group / inclusionAI MoE flash model, finance-tuned variant — an older sibling of the default |
+| `ling-3.0-flash-fin-free` | Ant Group / inclusionAI MoE flash model, finance-tuned variant — an older sibling of Ling 3.1 |
 | `mimo-v2.6-flash-free` | Xiaomi general-purpose model |
-| `big-pickle` | OpenCode's rotating stealth eval model — quality varies week to week |
 
 Only the models served through Zen's `chat/completions` protocol are usable
 here (Zen also fronts GPT/Claude/Gemini/Qwen through Responses/Messages/native
@@ -1412,7 +1416,7 @@ NEX_CHAT_PROVIDER=local
 NEX_CHAT_MODEL=gpt-oss:20b
 NEX_CHAT_FALLBACKS=gpt,nim
 NEX_AGENT_PROVIDER=nim
-NEX_AGENT_MODEL=nvidia/nemotron-3-super-120b-a12b
+NEX_AGENT_MODEL=moonshotai/kimi-k3
 NEX_AGENT_FALLBACKS=gpt,local
 NEX_NIM_RPM=40
 ```
@@ -1487,7 +1491,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NVIDIA_API_KEY` | empty | NVIDIA NIM credential |
 | `OPENAI_API_KEY` | empty | OpenAI-compatible credential |
 | `OPENCODE_API_KEY` | empty | OpenCode Zen credential — **free, no card** (opencode.ai/auth) |
-| `NEX_OPENCODE_MODEL` | `ling-3.1-flash-free` | OpenCode Zen model id |
+| `NEX_OPENCODE_MODEL` | `big-pickle` | OpenCode Zen model id |
 | `NEX_OPENCODE_RPM` | `20` | OpenCode Zen local safety ceiling (no published quota) |
 | `OPENROUTER_API_KEY` | empty | OpenRouter credential — **free, no card** (openrouter.ai/keys) |
 | `NEX_OPENROUTER_MODEL` | `inclusionai/ling-3.1-flash` | OpenRouter model id (append `:free` for zero-cost variants) |

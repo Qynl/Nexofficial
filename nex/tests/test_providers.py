@@ -310,7 +310,7 @@ try:
                  "nim"],
                 "routine chain: Ollama -> free gateways -> GPT -> NIM (%s)"
                 % r2.chain("chat"))
-        _expect(r2.role_model("agent") == "nvidia/nemotron-3-super-120b-a12b",
+        _expect(r2.role_model("agent") == "moonshotai/kimi-k3",
                 "agent model resolves from the role config")
 
         os.environ.pop("NVIDIA_API_KEY", None)
@@ -914,6 +914,12 @@ except ValueError as exc:
 # --- 🟡 THE DEFAULT LOCAL MODEL IS gpt-oss:20b ---------------------------
 _expect(providers.DEFAULT_PROVIDERS["local"]["model"] == "gpt-oss:20b",
         "the shipped local default is gpt-oss:20b (the small brain)")
+_expect(providers.DEFAULT_PROVIDERS["nim"]["model"] == "moonshotai/kimi-k3",
+        "NIM's default is Kimi K3 — a vision-capable flagship model, so a "
+        "plain NVIDIA key is enough for the real-screenshot critique")
+_expect(providers.model_supports_vision(
+        providers.DEFAULT_PROVIDERS["nim"]["model"]) is True,
+        "NIM's shipped default model is recognised as vision-capable")
 with tempfile.TemporaryDirectory() as td:
     saved2 = {k: os.environ.pop(k, None) for k in
               ("OLLAMA_MODEL", "NVIDIA_API_KEY", "OPENAI_API_KEY")}
@@ -958,7 +964,7 @@ _expect(r_ex.chain("agent") == ["nim", "local"],
 _expect(set(r_ex.status()["roles"]) == {"chat", "agent"},
         "the status view still reports both roles")
 r_ex.set_role("chat", "nim")
-_expect(r_ex.role_model("chat") == "nvidia/nemotron-3-super-120b-a12b",
+_expect(r_ex.role_model("chat") == "moonshotai/kimi-k3",
         "switching a role's provider adopts the NEW provider's model "
         "(got %r)" % r_ex.role_model("chat"))
 
@@ -1399,11 +1405,11 @@ _expect(providers.DEFAULT_PROVIDERS["openrouter"]["model"]
 _expect(any(c["id"] == "ling-3.1-flash-free" for c in catalog_oc),
         "Ling 3.1 Flash is in the curated OpenCode Zen catalog too — it "
         "moved onto Zen's own free tier directly, not just OpenRouter's")
-_expect(providers.DEFAULT_PROVIDERS["opencode"]["model"]
-        == "ling-3.1-flash-free",
-        "Ling 3.1 Flash is OpenCode Zen's default model too, matching "
-        "OpenRouter's default so both free gateways lead with the same "
-        "strong $0 agentic model")
+_expect(any(c["id"] == "big-pickle" for c in catalog_oc),
+        "Big Pickle is in the curated OpenCode Zen catalog")
+_expect(providers.DEFAULT_PROVIDERS["opencode"]["model"] == "big-pickle",
+        "Big Pickle (the strongest reported free coding/agentic performer "
+        "on Zen) is OpenCode Zen's default model")
 _expect(not any(c["id"] == "mimo-v2.5-free" for c in catalog_oc),
         "the retired MiMo V2.5 free listing must not linger in the "
         "curated catalog once Zen moved to MiMo V2.6 Flash")
@@ -1870,6 +1876,23 @@ _expect(providers.model_supports_vision("gpt-4o-mini") is True,
         "gpt-4o* is recognised as vision-capable")
 _expect(providers.model_supports_vision("llava:13b") is True,
         "an Ollama-hosted llava model is recognised as vision-capable")
+_expect(providers.model_supports_vision("moonshotai/kimi-k3") is True,
+        "Kimi K3 (NIM's default) is recognised as vision-capable — it "
+        "natively accepts image input")
+_expect(providers.model_supports_vision("moonshotai/kimi-k2.6") is True,
+        "Kimi K2.6 (also natively multimodal) is recognised as vision-capable")
+_expect(providers.model_supports_vision("moonshotai/kimi-k2-thinking")
+        is False,
+        "Kimi K2 Thinking is a text-only reasoning model and must NOT be "
+        "mistaken for a vision-capable one just because it shares the "
+        "'kimi' family name")
+_expect(providers.model_supports_vision("moonshotai/kimi-k2.5") is False,
+        "Kimi K2.5 is likewise text-only and is not misdetected")
+_expect(providers.model_supports_vision("big-pickle") is False,
+        "OpenCode Zen's rotating 'big-pickle' slot never discloses its "
+        "real identity, so it is always treated as text-only — there is "
+        "no honest way to know if the current stealth model can see "
+        "images")
 _expect(providers.model_supports_vision("nvidia/nemotron-3-super-120b-a12b")
         is False,
         "a text-only reasoning model is NOT guessed to be vision-capable")

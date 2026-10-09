@@ -117,6 +117,10 @@ _VISION_MODEL_PATTERNS = (
     "llava", "bakllava", "pixtral", "qwen2-vl", "qwen2.5-vl", "qwen-vl",
     "llama-4-scout", "llama-4-maverick", "grok-4", "grok-vision",
     "phi-3.5-vision", "phi-4-multimodal", "moondream", "internvl",
+    # Kimi: only the generations Moonshot AI has actually documented as
+    # multimodal (K2 / K2 Thinking / K2.5 / K2.7 Code are text-only) —
+    # "kimi-k2" bare is deliberately NOT matched here.
+    "kimi-k3", "kimi-k2.6",
 )
 
 
@@ -340,13 +344,26 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "label": "NVIDIA NIM",
         "kind": KIND_OPENAI,
         "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        # Kimi K3 (reviewed 2026-10 against the live NIM catalog): a
+        # flagship, free-endpoint, 1M-context, NATIVELY MULTIMODAL model
+        # (text + image input) — it is strong agentic/coding work AND the
+        # thing that makes the real-screenshot AI critique (see
+        # agent/loop.py _maybe_visual_critique) actually fire for anyone
+        # with just an NVIDIA key configured, instead of only for
+        # operators who also happen to have a GPT/Gemini key. Nemotron 3
+        # Super (the previous default, text-only) is still in CATALOG as
+        # a fast, NVIDIA-native alternative.
+        "model": "moonshotai/kimi-k3",
         "api_key_env": "NVIDIA_API_KEY",
         "rpm": 40,            # Nex safety default; not a promised NIM quota
         "timeout": 240.0,
         "cooldown_s": 20.0,
         "structured_outputs": True,
-        "note": "Hard-work primary. Purpose-aware JSON, quota pacing, GPT/Ollama hand-off.",
+        "note": "Hard-work primary. Purpose-aware JSON, quota pacing, "
+                "GPT/Ollama hand-off. Default model (Kimi K3) is vision-"
+                "capable, so screenshot critique works out of the box "
+                "with just an NVIDIA key — no separate vision provider "
+                "needed.",
     },
     "gpt": {
         "label": "GPT (OpenAI-compatible)",
@@ -364,12 +381,18 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "label": "OpenCode Zen",
         "kind": KIND_OPENAI,
         "base_url": "https://opencode.ai/zen/v1",
-        # Ling 3.1 Flash moved onto Zen's own free tier directly (reviewed
-        # 2026-10 against the live opencode.ai/zen/v1/models catalog) — no
-        # longer OpenRouter-only. Matches OpenRouter's own default below so
-        # both free gateways lead with the same strong, $0, 262K-context
-        # agentic model instead of two different ones.
-        "model": "ling-3.1-flash-free",
+        # Big Pickle (reviewed 2026-10 against the live opencode.ai/zen/v1
+        # catalog and independent community reports): the strongest
+        # free-tier performer on complex coding/agentic tasks of Zen's
+        # current no-cost lineup. It is OpenCode's own rotating/stealth
+        # eval slot, so the identity behind it can change week to week —
+        # that is also why Settings → Model should be checked occasionally,
+        # and why model_supports_vision() never assumes it can see images
+        # (an anonymous slot's real capabilities are unverifiable). Ling
+        # 3.0 Flash Fin, Nemotron 3 Ultra/Lightning are named, stable
+        # alternatives in CATALOG if a predictable identity matters more
+        # than top raw score.
+        "model": "big-pickle",
         "api_key_env": "OPENCODE_API_KEY",
         # No published per-model RPM; a conservative local ceiling avoids
         # hammering a free, no-card gateway into a hard 429/ban.
@@ -378,10 +401,10 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "cooldown_s": 15.0,
         "structured_outputs": False,
         "note": "Free, no-card gateway (opencode.ai/auth). Several models are "
-                "$0/token today — Ling 3.1 Flash (default), Nemotron 3 "
-                "Ultra/Lightning, MiMo-V2.6 Flash, Big Pickle — but a free "
-                "listing can change or retire; Settings → Model pulls the "
-                "live catalog.",
+                "$0/token today — Big Pickle (default, strongest free "
+                "coding performer, identity rotates), Ling 3.0 Flash Fin, "
+                "Nemotron 3 Ultra/Lightning — but a free listing can "
+                "change or retire; Settings → Model pulls the live catalog.",
     },
     "openrouter": {
         "label": "OpenRouter",
@@ -450,7 +473,9 @@ CATALOG: List[Dict[str, Any]] = [
     # --- NVIDIA-native (best throughput on NIM, strong tool calling) -------
     {"provider": "nim", "id": "nvidia/nemotron-3-super-120b-a12b",
      "role": "agent", "label": "Nemotron 3 Super 120B",
-     "note": "Agentic workhorse: 1M context, planning and tool calling."},
+     "note": "Agentic workhorse: 1M context, planning and tool calling. "
+             "The previous default — still a fast, NVIDIA-native choice; "
+             "text-only, so screenshot critique needs a different model."},
     {"provider": "nim", "id": "nvidia/nemotron-3.5-lightning-30b-a3b",
      "role": "agent", "label": "Nemotron 3.5 Lightning 30B",
      "note": "Fast 3B-active long-running-agent model with 1M context."},
@@ -466,7 +491,10 @@ CATALOG: List[Dict[str, Any]] = [
     # --- Third-party on NIM ------------------------------------------------
     {"provider": "nim", "id": "moonshotai/kimi-k3",
      "role": "agent", "label": "Kimi K3",
-     "note": "Long-horizon multimodal coding and agentic tool use, 1M context."},
+     "note": "The provider default. Long-horizon multimodal coding and "
+             "agentic tool use, 1M context, native vision — the model "
+             "that makes real-screenshot AI critique work with just an "
+             "NVIDIA key."},
     {"provider": "nim", "id": "zhipuai/glm-5.1",
      "role": "agent", "label": "GLM-5.1",
      "note": "Function calling + long-context coding."},
@@ -509,10 +537,10 @@ CATALOG: List[Dict[str, Any]] = [
     # router does not speak, so those are left off even when free.
     {"provider": "opencode", "id": "ling-3.1-flash-free",
      "role": "agent", "label": "Ling 3.1 Flash (OpenCode Zen, free)",
-     "note": "The provider default. inclusionAI MoE, 560B total/25B active, "
-             "262K context, free directly on Zen now (previously "
-             "OpenRouter-only) — same strong, $0 agentic model as "
-             "OpenRouter's own default, one fewer thing to remember."},
+     "note": "inclusionAI MoE, 560B total/25B active, 262K context, free "
+             "directly on Zen (previously OpenRouter-only) — same strong, "
+             "$0 agentic model as OpenRouter's own default. A named, "
+             "stable alternative to the rotating Big Pickle default."},
     {"provider": "opencode", "id": "nemotron-3-ultra-free",
      "role": "agent", "label": "Nemotron 3 Ultra (OpenCode Zen, free)",
      "note": "Same 550B Nemotron Ultra family NIM charges for — free here. "
@@ -531,9 +559,15 @@ CATALOG: List[Dict[str, Any]] = [
      "note": "Xiaomi general-purpose model; free coding/chat generalist. "
              "Supersedes the retired MiMo V2.5 free listing."},
     {"provider": "opencode", "id": "big-pickle",
-     "role": "chat", "label": "Big Pickle (OpenCode Zen, free)",
-     "note": "OpenCode's rotating stealth eval model — quality varies by "
-             "the week since it is whatever they are currently measuring."},
+     "role": "agent", "label": "Big Pickle (OpenCode Zen, free)",
+     "note": "The provider default. OpenCode's rotating stealth eval slot "
+             "— reported by the community as the strongest free-tier "
+             "coding/agentic performer on Zen, but its identity (and "
+             "therefore its real quality and whether it can see images) "
+             "varies by the week since it is whatever they are currently "
+             "measuring. Prefer the named Ling 3.1/3.0 Flash or Nemotron "
+             "entries above if a predictable identity matters more than "
+             "chasing the top score."},
     # --- OpenRouter (free, no card — 20+ ':free' models, reviewed 2026-10) -
     {"provider": "openrouter", "id": "inclusionai/ling-3.1-flash",
      "role": "agent", "label": "Ling 3.1 Flash (OpenRouter, free)",
