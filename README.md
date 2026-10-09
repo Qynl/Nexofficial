@@ -1274,7 +1274,23 @@ A 25% reserve moves lower-priority evaluation/batch jobs to a fallback while
 allowing complex plans and repairs to spend the protected slots when needed.
 Hosted limits can still vary by account, model, endpoint, and load.
 
-**8. It obeys real recovery signals — and reclaims NIM the instant it can.**
+**8. It waits out its own window for real work, instead of guessing.**  Every
+provider tracks requests in a real rolling 60-second window — not a hopeful
+retry timer. When the configured ceiling (`NEX_NIM_RPM=40`, Groq's 30, etc.)
+is actually reached, Nex knows exactly how many seconds until the oldest
+request ages out and a slot opens, down to the millisecond. What happens next
+depends on who is waiting: a **live chat reply** still fails over to the next
+provider immediately — nobody should stare at a blocked reply for up to a
+minute. **Autonomous agent work** (planning, evaluation, diagnosis, batch
+repairs — run with hours of budget already approved) instead actually WAITS
+for its own quota to free up, up to `NEX_AGENT_RATE_LIMIT_CHILL_S` (default
+65s, just over the full window) before it would spend a request on a worse
+fallback. A few dozen extra seconds to keep using the best provider in the
+chain is a clear win over downgrading immediately — this is what makes "wait
+until the minute is over" literally true for the kind of sustained, serious
+work Nex's run budgets exist to support.
+
+**9. It obeys real recovery signals — and reclaims NIM the instant it can.**
 NIM is the preferred hard-work provider, so the chain always tries it FIRST on
 every call; nothing has to be re-enabled by hand. Recovery timing is trusted
 in order:
@@ -1310,18 +1326,18 @@ key do not all retry at the exact same instant. `ProviderState.to_dict()`
 exposes `blind_rate_limits`, `consecutive_failures` and `base_cooldown_s` so
 an operator can see which failure mode is in play.
 
-**9. It fails over the hands—not the plan.**  The exact message list is handed
+**10. It fails over the hands—not the plan.**  The exact message list is handed
 to the next provider. Completed MCP actions are not replayed, task IDs are not
 regenerated, and the UI emits `provider.fallback` / `provider.recovered` events
 so the operator can see the handoff.
 
-**10. It treats the endpoint as a credential boundary.**  Keys remain on the
+**11. It treats the endpoint as a credential boundary.**  Keys remain on the
 server, are stored `0600`, and are bound to the host for which they were entered.
 Changing the base URL makes the key go dark until it is re-entered. Redirects
 may not cross hosts. Metadata/link-local targets, URL credentials, oversized
 responses, oversized stream lines, and unbounded streams are rejected.
 
-**11. It budgets tokens for the job, not the provider maximum.**  Evaluations
+**12. It budgets tokens for the job, not the provider maximum.**  Evaluations
 are capped at 550 output tokens, diagnoses at 850, summaries at 700, routine
 plans at 1,800, and hard plans at 3,200 by default. OpenAI-compatible providers
 receive `max_tokens`; Ollama receives the equivalent `num_predict`. A tighter
@@ -1467,6 +1483,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `GEMINI_API_KEY` | empty | Google AI Studio (Gemini) credential — **free, no card** (aistudio.google.com/app/apikey) |
 | `NEX_GOOGLE_MODEL` | `gemini-2.5-flash` | Google AI Studio model id |
 | `NEX_GOOGLE_RPM` | `10` | Google AI Studio local safety ceiling (conservative; free-tier limits vary by account) |
+| `NEX_AGENT_RATE_LIMIT_CHILL_S` | `65` | How long autonomous agent work (not live chat) will wait for a provider's own rolling 60s RPM window to free a slot before downgrading to a fallback — see item 8 under "What Nex now does for NIM" above |
 | `NEX_PROVIDER_HOSTS` | empty | Optional strict exact-host allowlist for model endpoints |
 | `NEX_SERVERS` | empty | Startup MCP server definitions |
 | `NEX_HTTP_ALLOW` | loopback only | Pre-approved remote MCP hosts |

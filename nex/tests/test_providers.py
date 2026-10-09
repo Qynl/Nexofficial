@@ -1737,4 +1737,126 @@ cl6.advance(lone_wait + 1)
 _expect(r_lone.chat("agent", MESSAGES) == "nim ok",
         "…and NIM is tried again right after")
 
+# ===========================================================================
+# 16. autonomous agent work actually waits out a provider's own RPM window
+#     ("the minute is over") instead of giving up on an 8-second grace;
+#     a live chat reply never gets stuck waiting that long.
+# ===========================================================================
+
+print("=== 16. agent-role work waits out a rate-limit window; chat does not ===")
+
+
+def _patched_sleep(clock=None):
+    """Swap out time.sleep for the duration of one `with` block so a test
+    that deliberately drives _pace() into its real chill/wait path does not
+    actually block for up to a minute. Also advances the given fake `clock`
+    by the same amount, exactly like a real `time.sleep` would move a real
+    `time.monotonic`-backed clock forward — without this, the window re-check
+    right after the chill would still see the old (full) window and wrongly
+    fail the call over anyway. Returns the list of durations slept."""
+    calls: List[float] = []
+    real_sleep = time.sleep
+
+    def fake_sleep(s):
+        calls.append(s)
+        if clock is not None:
+            clock.advance(s)
+
+    class _Ctx:
+        def __enter__(self):
+            time.sleep = fake_sleep
+            return calls
+
+        def __exit__(self, *exc):
+            time.sleep = real_sleep
+            return False
+
+    return _Ctx()
+
+
+# Catalog default max_chill_s (8.0, not overridden here) with rpm=2 so the
+# hard ceiling is reached on the 3rd call within the same simulated minute —
+# `seconds_until_slot()` then reports close to the full ~60s window, far
+# past the old flat 8s grace.
+cl_wait = Clock()
+h_wait = FakeHTTP()
+h_wait.push("integrate.api.nvidia.com", "nim #1")
+h_wait.push("integrate.api.nvidia.com", "nim #2")
+h_wait.push("integrate.api.nvidia.com", "nim #3")
+h_wait.push("127.0.0.1:11434", "ollama (should not be needed)")
+r_wait = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=2,
+                                   min_interval_s=0.0, reserve=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": ["local"]},
+     "chat": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl_wait, transport={"post": h_wait.post, "get": h_wait.get})
+r_wait.chat("agent", MESSAGES)
+r_wait.chat("agent", MESSAGES)
+with _patched_sleep(cl_wait) as sleeps:
+    out_agent_wait = r_wait.chat("agent", MESSAGES)
+_expect(out_agent_wait == "nim #3",
+        "autonomous agent work waited out the window and reached NIM "
+        "itself on the 3rd call, instead of falling back to Ollama: %r"
+        % out_agent_wait)
+_expect(len(sleeps) == 1 and 55.0 <= sleeps[0] <= 61.0,
+        "the wait should cover close to the full ~60s window, well past "
+        "the provider's own 8s max_chill_s (got %r)" % sleeps)
+
+# Same provider, same catalog default max_chill_s, but a live CHAT reply:
+# the short 8s grace is NOT raised, so it must still fail over immediately
+# rather than block the user for up to a minute.
+cl_chat = Clock()
+h_chat = FakeHTTP()
+h_chat.push("integrate.api.nvidia.com", "nim #1")
+h_chat.push("integrate.api.nvidia.com", "nim #2")
+h_chat.push("127.0.0.1:11434", "ollama covers the interactive reply")
+r_chat_wait = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=1,
+                                   min_interval_s=0.0, reserve=0.0)},
+    {"chat": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl_chat, transport={"post": h_chat.post, "get": h_chat.get})
+r_chat_wait.chat("chat", MESSAGES)
+with _patched_sleep(cl_chat) as sleeps_chat:
+    out_chat_wait = r_chat_wait.chat("chat", MESSAGES)
+_expect(out_chat_wait == "ollama covers the interactive reply",
+        "a live chat reply must still fail over immediately on a full "
+        "window, never block the user for up to a minute: %r"
+        % out_chat_wait)
+_expect(sleeps_chat == [],
+        "chat must not have chilled/slept at all before failing over: %r"
+        % sleeps_chat)
+
+# An operator (or test) that explicitly disabled chilling entirely
+# (max_chill_s=0) means it for every role, including agent work — that
+# explicit choice is never silently raised.
+cl_off = Clock()
+h_off = FakeHTTP()
+h_off.push("integrate.api.nvidia.com", "nim #1")
+h_off.push("integrate.api.nvidia.com", "nim #2")
+h_off.push("127.0.0.1:11434", "ollama covers it, chill is OFF")
+r_off = providers.Router(
+    {"local": providers.ProviderSpec("local", kind=providers.KIND_OLLAMA,
+                                     base_url="http://127.0.0.1:11434",
+                                     min_interval_s=0.0, max_chill_s=0.0),
+     "nim": providers.ProviderSpec("nim", api_key="nvapi-x", rpm=1,
+                                   min_interval_s=0.0, max_chill_s=0.0,
+                                   reserve=0.0)},
+    {"agent": {"provider": "nim", "fallbacks": ["local"]}},
+    clock=cl_off, transport={"post": h_off.post, "get": h_off.get})
+r_off.chat("agent", MESSAGES)
+with _patched_sleep(cl_off) as sleeps_off:
+    out_off = r_off.chat("agent", MESSAGES)
+_expect(out_off == "ollama covers it, chill is OFF",
+        "max_chill_s=0 means never wait, even for agent-role work: %r"
+        % out_off)
+_expect(sleeps_off == [],
+        "an explicit max_chill_s=0 must never be silently raised: %r"
+        % sleeps_off)
+
 print("\nAll provider-layer tests passed.")

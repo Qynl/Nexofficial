@@ -1908,6 +1908,19 @@ class Router:
                     "purpose": purpose, "roles": self.role_snapshot()})
         time.sleep(seconds)
 
+    def _agent_rate_limit_chill_s(self) -> float:
+        """How long autonomous agent work (planning/evaluation/diagnosis/
+        batch, run with hours of budget by `_agent_llm`) will actually wait
+        out a provider's OWN rate-limit window rather than immediately spend
+        a request on a worse fallback. Just over 60s so it comfortably
+        covers the whole sliding window: a hard-ceiling hit can need to wait
+        up to (but never more than) a full minute for the oldest request to
+        age out. Live interactive chat never uses this value -- see
+        `_pace`.
+        """
+        return max(1.0, _as_float(
+            os.environ.get("NEX_AGENT_RATE_LIMIT_CHILL_S"), 65.0))
+
     def _pace(self, role: str, chain: List[str], index: int, name: str,
               spec: ProviderSpec, state: ProviderState, purpose: str) -> str:
         """Decide whether this provider may spend a request right now.
@@ -1923,15 +1936,38 @@ class Router:
             instead of hammering — and only calls when the window has room;
           * consecutive calls to the same provider keep a minimum spacing.
 
-        Returns "call" (go ahead, possibly after a short chill) or "skip".
+        The chill ceiling itself depends on `role`: a live chat reply
+        (ROLE_CHAT) keeps the provider's own `max_chill_s` exactly as
+        configured, so a user is never left staring at a blocked reply for
+        up to a minute. Autonomous agent work (ROLE_AGENT -- planning,
+        evaluation, diagnosis, batch repairs) raises it to the much longer
+        `_agent_rate_limit_chill_s()` instead: it has hours of run budget to
+        spend, and a few dozen extra seconds actually waiting out a
+        provider's 60-second RPM window is a clear win over immediately
+        downgrading to a lesser fallback model. This is what makes "wait
+        until the minute is over" literally true for real agent work,
+        instead of an 8-second token gesture before giving up on the best
+        provider in the chain. An operator (or test) that explicitly set
+        `max_chill_s` to 0 meant "never make this provider wait, ever" --
+        that explicit choice always wins, for every role, and is never
+        raised.
+
+        Returns "call" (go ahead, possibly after a chill) or "skip".
         """
         if state.rpm <= 0:
             return "call"
+        if spec.max_chill_s <= 0.0:
+            max_chill_s = 0.0
+        elif role == ROLE_CHAT:
+            max_chill_s = spec.max_chill_s
+        else:
+            max_chill_s = max(spec.max_chill_s,
+                              self._agent_rate_limit_chill_s())
         used = state.used_in_window()
         if used >= state.rpm:
             # Hard ceiling reached: the next request WOULD be a 429.
             wait = state.seconds_until_slot()
-            if wait <= spec.max_chill_s:
+            if wait <= max_chill_s:
                 self._chill(wait, name, state, purpose, "window full")
                 return "call"
             state.mark_error(ERR_RATE_LIMIT,
@@ -1956,7 +1992,7 @@ class Router:
                             "budget_left": state.rpm - used,
                             "roles": self.role_snapshot()})
                 return "skip"
-            wait = min(state.seconds_until_slot(), spec.max_chill_s)
+            wait = min(state.seconds_until_slot(), max_chill_s)
             self._chill(wait, name, state, purpose, "headroom, no fallback")
         # Minimum spacing between two calls to the same provider.
         gap = self._clock() - state.last_call_clock
