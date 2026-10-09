@@ -133,10 +133,15 @@ def budget_for_minutes(minutes: Optional[float]) -> Dict[str, Any]:
     is missing or not a usable positive number — this is the path every
     existing call site takes today, so nothing about default behavior moves.
     Otherwise every budget that gates how much real work a run may attempt
-    (wall-clock time, tool-call steps, production-program replans) scales by
-    the same factor, so a longer approved run is actually allowed to do
-    proportionally more, not just wait around longer before the same small
-    ceiling cuts it off.
+    (wall-clock time, tool-call steps, structural replans, production-program
+    replans, and quality/evidence passes) scales by the same factor, so a
+    longer approved run is actually allowed to do proportionally more, not
+    just wait around longer before the same small ceiling cuts it off. A
+    4-hour AAA-ambitious build that still only gets ONE polish pass and 3
+    corrective replans — the untouched defaults sized for a 30-minute run —
+    is exactly the same "fakes most of the time" failure mode this already
+    fixes for steps and program replans; quality passes and ordinary replans
+    were the two budgets that got left out of that fix.
     """
     try:
         value = float(minutes)
@@ -149,8 +154,11 @@ def budget_for_minutes(minutes: Optional[float]) -> Dict[str, Any]:
     return {
         "budget_s": clamped * 60.0,
         "max_steps": max(1, round(DEFAULT_MAX_STEPS * factor)),
+        "max_replans": max(1, round(DEFAULT_MAX_REPLANS * factor)),
         "max_program_replans": max(1, round(DEFAULT_MAX_PROGRAM_REPLANS * factor)),
+        "max_quality_passes": max(1, round(DEFAULT_MAX_QUALITY_PASSES * factor)),
     }
+
 
 _MAX_REPEAT = 2          # retries for the SAME error signature
 

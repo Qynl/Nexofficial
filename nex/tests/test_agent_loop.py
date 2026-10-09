@@ -31,7 +31,8 @@ os.environ.setdefault("NEX_HOME", "/tmp/nex-loop-tests")
 from agent.mock_mcp import MockMCPServer, server_view          # noqa: E402
 from agent.loop import (                                       # noqa: E402
     AgentRun, RunCoordinator, budget_for_minutes,
-    DEFAULT_BUDGET_S, DEFAULT_MAX_STEPS, DEFAULT_MAX_PROGRAM_REPLANS,
+    DEFAULT_BUDGET_S, DEFAULT_MAX_STEPS, DEFAULT_MAX_REPLANS,
+    DEFAULT_MAX_PROGRAM_REPLANS, DEFAULT_MAX_QUALITY_PASSES,
     MIN_RUN_MINUTES, MAX_RUN_MINUTES,
 )
 from agent.model_planner import plan_to_graph                   # noqa: E402
@@ -573,8 +574,11 @@ class BudgetForMinutesTests(unittest.TestCase):
         out = budget_for_minutes(DEFAULT_BUDGET_S / 60.0)
         self.assertEqual(out["budget_s"], DEFAULT_BUDGET_S)
         self.assertEqual(out["max_steps"], DEFAULT_MAX_STEPS)
+        self.assertEqual(out["max_replans"], DEFAULT_MAX_REPLANS)
         self.assertEqual(out["max_program_replans"],
                          DEFAULT_MAX_PROGRAM_REPLANS)
+        self.assertEqual(out["max_quality_passes"],
+                         DEFAULT_MAX_QUALITY_PASSES)
 
     def test_double_the_time_doubles_the_work_budgets_too(self):
         base = budget_for_minutes(DEFAULT_BUDGET_S / 60.0)
@@ -582,8 +586,31 @@ class BudgetForMinutesTests(unittest.TestCase):
         self.assertAlmostEqual(doubled["budget_s"], base["budget_s"] * 2)
         self.assertAlmostEqual(doubled["max_steps"], base["max_steps"] * 2,
                                delta=1)
+        self.assertAlmostEqual(doubled["max_replans"],
+                               base["max_replans"] * 2, delta=1)
         self.assertAlmostEqual(doubled["max_program_replans"],
                                base["max_program_replans"] * 2, delta=1)
+        self.assertAlmostEqual(doubled["max_quality_passes"],
+                               base["max_quality_passes"] * 2, delta=1)
+
+    def test_a_long_ambitious_build_gets_more_polish_passes_not_just_one(self):
+        # DEFAULT_MAX_QUALITY_PASSES is 1 — a 4-hour AAA-ambitious build
+        # must not be stuck doing exactly the same single polish pass a
+        # 30-minute run gets; that is "fakes most of the time" applied to
+        # quality work instead of step count.
+        out = budget_for_minutes(MAX_RUN_MINUTES)
+        self.assertGreater(out["max_quality_passes"], DEFAULT_MAX_QUALITY_PASSES,
+                           "the longest approved run must get MORE than "
+                           "the default single quality pass")
+
+    def test_a_long_run_also_gets_more_ordinary_replans(self):
+        # Program replans already scaled; the ordinary (non-program) replan
+        # budget for a focused goal must scale the same way, not stay fixed
+        # at the small default while everything else around it grows.
+        out = budget_for_minutes(MAX_RUN_MINUTES)
+        self.assertGreater(out["max_replans"], DEFAULT_MAX_REPLANS,
+                           "the longest approved run must get MORE "
+                           "corrective replans than the 30-minute default")
 
     def test_an_absurd_request_is_clamped_to_the_configured_ceiling(self):
         out = budget_for_minutes(10 ** 9)
@@ -609,6 +636,14 @@ class BudgetForMinutesTests(unittest.TestCase):
         self.assertGreater(run.max_steps, DEFAULT_MAX_STEPS,
                            "a 4x-longer approved run must get a bigger "
                            "step budget, not just a longer clock")
+        self.assertEqual(run.max_replans, opts["max_replans"])
+        self.assertGreater(run.max_replans, DEFAULT_MAX_REPLANS,
+                           "a 4x-longer approved run must get more "
+                           "corrective replans too")
+        self.assertEqual(run.max_quality_passes, opts["max_quality_passes"])
+        self.assertGreater(run.max_quality_passes, DEFAULT_MAX_QUALITY_PASSES,
+                           "a 4x-longer approved run must get more than "
+                           "the default single quality/polish pass")
 
 
 if __name__ == "__main__":

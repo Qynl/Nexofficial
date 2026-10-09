@@ -509,11 +509,16 @@ For a genuinely long session, Nex asks first instead of assuming: when a chat
 message asks for an ambitious, multi-hour build and has not already said how
 long you're willing to let it work, it replies in plain language asking for a
 time budget (a quick pass vs. a specific longer window, up to `NEX_MAX_RUN_MINUTES`
-— 4 hours by default). Once you answer, the wall clock **and** the step/replan
-budgets scale together for that run — approving 4x the time gets roughly 4x the
-tool-call and correction budget too, not just a longer silence before the same
-small ceiling ends it early. `NEX_MIN_RUN_MINUTES`/`NEX_MAX_RUN_MINUTES` bound
-what can be approved this way; an operator can always raise the plain defaults
+— 4 hours by default). Once you answer, the wall clock **and** the step,
+replan, **and quality/polish-pass budgets** all scale together for that run —
+approving 4x the time gets roughly 4x the tool-call budget, 4x the corrective
+replans (both the ordinary single-plan budget and the studio-program one),
+and 4x the evidence/polish passes too, not just a longer silence before the
+same small ceilings end it early. A run that was explicitly approved to run
+for hours and is aiming for real production quality should not still be
+capped at the single polish pass and 3 corrective replans sized for a
+30-minute default. `NEX_MIN_RUN_MINUTES`/`NEX_MAX_RUN_MINUTES` bound what can
+be approved this way; an operator can always raise the plain defaults
 further for unattended/scripted use.
 
 ## The game-production quality protocol
@@ -1493,10 +1498,10 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_ALLOW_CODE_EXECUTION` | empty | Servers explicitly approved for engine/language code tools |
 | `NEX_ALLOW_CONFIRMATIONS` | empty | Servers pre-approved for non-code confirmation categories |
 | `NEX_CAPABILITY_FILE` | `~/.nex/capabilities.json` | Operator classification pins; escalation only |
-| `NEX_MAX_STEPS` | `64` | Maximum executed tool steps per run |
-| `NEX_MAX_REPLANS` | `3` | Maximum structural replans for a focused (non-studio-scale) goal |
-| `NEX_MAX_PROGRAM_REPLANS` | `16` | Maximum structural replans for a studio-scale production program (shared across all 8 stages, not per stage) |
-| `NEX_MAX_QUALITY_PASSES` | `1` | Maximum final evidence/polish passes after game work |
+| `NEX_MAX_STEPS` | `64` | Base tool-step ceiling for the 30-minute default run; scales up with an explicitly approved longer run length (see "For a genuinely long session" above) |
+| `NEX_MAX_REPLANS` | `3` | Base structural-replan ceiling for a focused (non-studio-scale) goal; scales the same way |
+| `NEX_MAX_PROGRAM_REPLANS` | `16` | Base structural-replan ceiling for a studio-scale production program (shared across all 8 stages, not per stage); scales the same way |
+| `NEX_MAX_QUALITY_PASSES` | `1` | Base evidence/polish-pass ceiling after game work; scales the same way — a 4-hour approved run gets several, not just one |
 | `NEX_MAX_PRODUCTION_STAGES` | `8` | Milestone-plan cap for studio-scale game goals |
 | `NEX_EVAL_EVERY_STEPS` | `6` | Successful MCP steps between model evaluation checkpoints; failures evaluate immediately |
 | `NEX_RUN_BUDGET_S` | `1800` | Default run wall-clock budget (used when a chat run does not name an approved run length — see below) |
