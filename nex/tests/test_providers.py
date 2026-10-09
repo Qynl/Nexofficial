@@ -94,7 +94,8 @@ class FakeHTTP:
     @staticmethod
     def host_of(url):
         for h in ("integrate.api.nvidia.com", "api.openai.com",
-                  "opencode.ai", "openrouter.ai",
+                  "opencode.ai", "openrouter.ai", "api.groq.com",
+                  "generativelanguage.googleapis.com",
                   "127.0.0.1:11434", "localhost"):
             if h in url:
                 return h
@@ -300,11 +301,13 @@ try:
         _expect(r2.roles["agent"]["provider"] == "nim",
                 "…and NIM remains the hard-work primary")
         _expect(r2.chain("agent") ==
-                ["nim", "gpt", "opencode", "openrouter", "local"],
+                ["nim", "gpt", "opencode", "openrouter", "groq", "google",
+                 "local"],
                 "hard chain: NIM -> GPT -> free gateways -> Ollama (%s)"
                 % r2.chain("agent"))
         _expect(r2.chain("chat") ==
-                ["local", "opencode", "openrouter", "gpt", "nim"],
+                ["local", "opencode", "openrouter", "groq", "google", "gpt",
+                 "nim"],
                 "routine chain: Ollama -> free gateways -> GPT -> NIM (%s)"
                 % r2.chain("chat"))
         _expect(r2.role_model("agent") == "nvidia/nemotron-3-super-120b-a12b",
@@ -315,7 +318,8 @@ try:
         _expect(r_gpt.roles["agent"]["provider"] == "nim"
                 and r_gpt.status()["agent"]["active"] == "gpt"
                 and r_gpt.chain("agent") ==
-                ["nim", "gpt", "opencode", "openrouter", "local"],
+                ["nim", "gpt", "opencode", "openrouter", "groq", "google",
+                 "local"],
                 "without a NIM key, GPT serves hard work then free gateways "
                 "then Ollama")
         os.environ["NVIDIA_API_KEY"] = "nvapi-x"
@@ -1439,11 +1443,136 @@ try:
         _expect(r_free2.specs["openrouter"].key == "or-live-key",
                 "OPENROUTER_API_KEY alone configures the OpenRouter provider")
         _expect(r_free2.chain("agent") ==
-                ["nim", "gpt", "opencode", "openrouter", "local"],
+                ["nim", "gpt", "opencode", "openrouter", "groq", "google",
+                 "local"],
                 "OpenRouter sits after OpenCode Zen, before the local terminal "
                 "fallback: %s" % r_free2.chain("agent"))
 finally:
     for k, v in saved_free.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+# ===========================================================================
+# 13b. TWO MORE FREE CLOUD GATEWAYS — Groq + Google AI Studio (Gemini)
+#
+# Added so a build has four independent, zero-cost safety nets between
+# "NIM/GPT are down or rate limited" and "fall back to Ollama", not two.
+# ===========================================================================
+
+print("=== 13b. free gateways (Groq / Google AI Studio) ===")
+
+_expect(providers.DEFAULT_PROVIDERS["groq"]["kind"] == providers.KIND_OPENAI
+        and providers.DEFAULT_PROVIDERS["groq"]["base_url"]
+        == "https://api.groq.com/openai/v1",
+        "Groq is a plain OpenAI-compatible endpoint at api.groq.com/openai/v1")
+_expect(providers.DEFAULT_PROVIDERS["google"]["kind"] == providers.KIND_OPENAI
+        and providers.DEFAULT_PROVIDERS["google"]["base_url"]
+        == "https://generativelanguage.googleapis.com/v1beta/openai",
+        "Google AI Studio is OpenAI-compatible at .../v1beta/openai")
+
+spec_groq = providers.ProviderSpec("groq", api_key="gr-test")
+_expect(spec_groq.chat_url == "https://api.groq.com/openai/v1/chat/completions",
+        "Groq chat URL does not double the /v1 segment: %s" % spec_groq.chat_url)
+_expect(spec_groq.models_url == "https://api.groq.com/openai/v1/models",
+        "Groq models URL: %s" % spec_groq.models_url)
+
+spec_g = providers.ProviderSpec("google", api_key="g-test")
+_expect(spec_g.chat_url ==
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "Google's version segment is 'openai', not 'v1' — no separate /v1 "
+        "is ever appended: %s" % spec_g.chat_url)
+_expect(spec_g.models_url ==
+        "https://generativelanguage.googleapis.com/v1beta/openai/models",
+        "Google models URL does not insert a spurious /v1 either: %s"
+        % spec_g.models_url)
+
+_expect(not providers.ProviderSpec("groq").configured,
+        "Groq needs a key like any other hosted OpenAI-compatible provider")
+_expect(not providers.ProviderSpec("google").configured,
+        "Google AI Studio needs a key too")
+
+catalog_groq = [c for c in providers.CATALOG if c["provider"] == "groq"]
+catalog_g = [c for c in providers.CATALOG if c["provider"] == "google"]
+_expect(len(catalog_groq) >= 2, "Groq ships several curated free models")
+_expect(len(catalog_g) >= 2, "Google AI Studio ships several curated free models")
+_expect(providers.DEFAULT_PROVIDERS["groq"]["model"] ==
+        "llama-3.3-70b-versatile",
+        "Llama 3.3 70B Versatile is Groq's default model")
+_expect(providers.DEFAULT_PROVIDERS["google"]["model"] == "gemini-2.5-flash",
+        "Gemini 2.5 Flash is Google AI Studio's default model")
+_expect(any(c["id"] == providers.DEFAULT_PROVIDERS["groq"]["model"]
+           for c in catalog_groq),
+        "Groq's default model is itself in the curated catalog")
+_expect(any(c["id"] == providers.DEFAULT_PROVIDERS["google"]["model"]
+           for c in catalog_g),
+        "Google's default model is itself in the curated catalog")
+
+_expect(providers.ROLE_DEFAULT_FALLBACKS[providers.ROLE_AGENT][-3:-1] ==
+        ["groq", "google"],
+        "hard-work default chain tries Groq then Google right before the "
+        "guaranteed local terminal fallback: %s"
+        % providers.ROLE_DEFAULT_FALLBACKS[providers.ROLE_AGENT])
+_expect("groq" in providers.ROLE_DEFAULT_FALLBACKS[providers.ROLE_CHAT]
+        and "google" in providers.ROLE_DEFAULT_FALLBACKS[providers.ROLE_CHAT],
+        "routine chat's default fallback list also offers both new free "
+        "gateways once Ollama needs help")
+
+# Bare env vars (GROQ_API_KEY / GEMINI_API_KEY) are honored, matching the
+# pattern already used for the other three cloud providers.
+saved_gg = {k: os.environ.pop(k, None) for k in
+            ("NVIDIA_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY",
+             "OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY",
+             "GOOGLE_API_KEY", "NEX_PROVIDERS_FILE")}
+try:
+    with tempfile.TemporaryDirectory() as td:
+        store_gg = providers.SettingsStore(os.path.join(td, "none.json"))
+        os.environ["GROQ_API_KEY"] = "gr-live-key"
+        r_groq = providers.build_router(store=store_gg, load_dot_env=False)
+        _expect(r_groq.specs["groq"].key == "gr-live-key",
+                "GROQ_API_KEY alone configures the Groq provider")
+
+        # With NIM/GPT/OpenCode/OpenRouter all absent, hard work falls
+        # through to Groq automatically — no routing edit needed.
+        h_groq = FakeHTTP()
+        h_groq.push("api.groq.com", "fast groq answer")
+        r_groq._transport = {"post": h_groq.post, "get": h_groq.get,
+                             "stream": h_groq.stream}
+        text_groq = r_groq.chat(providers.ROLE_AGENT, MESSAGES,
+                                purpose="diagnosis")
+        _expect(text_groq == "fast groq answer",
+                "hard work reaches Groq once the free gateways ahead of it "
+                "are unconfigured")
+        _expect(h_groq.calls[-1][0] ==
+                "https://api.groq.com/openai/v1/chat/completions",
+                "the call actually hits Groq's documented endpoint")
+        _expect(r_groq.status()["agent"]["active"] == "groq",
+                "status reports Groq as the active hard-work provider")
+
+        os.environ["GEMINI_API_KEY"] = "g-live-key"
+        r_g = providers.build_router(store=store_gg, load_dot_env=False)
+        _expect(r_g.specs["google"].key == "g-live-key",
+                "GEMINI_API_KEY alone configures the Google provider")
+
+        h_g = FakeHTTP()
+        h_g.push("api.groq.com", http_error("groq-down", 429, "", retry_after=30))
+        h_g.push("generativelanguage.googleapis.com", "gemini answer")
+        r_g._transport = {"post": h_g.post, "get": h_g.get,
+                          "stream": h_g.stream}
+        text_g = r_g.chat(providers.ROLE_AGENT, MESSAGES, purpose="diagnosis")
+        _expect(text_g == "gemini answer",
+                "Google is reached as the NEXT free gateway once Groq is "
+                "rate limited, still before Ollama")
+        _expect(h_g.calls[-1][0] ==
+                "https://generativelanguage.googleapis.com/v1beta/openai/"
+                "chat/completions",
+                "the call hits Google's documented OpenAI-compatible "
+                "endpoint, not a doubled /v1: %s" % h_g.calls[-1][0])
+        _expect(r_g.status()["agent"]["active"] == "google",
+                "status reports Google as the active hard-work provider")
+finally:
+    for k, v in saved_gg.items():
         if v is None:
             os.environ.pop(k, None)
         else:

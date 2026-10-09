@@ -1085,23 +1085,27 @@ headroom. Dynamic provider/model text is inserted as text—not executable HTML.
 ## Model providers
 
 Each lane owns an explicit primary provider, exact model, and ordered fallback
-chain. Local Ollama, NVIDIA NIM, OpenAI, OpenCode Zen, OpenRouter, and any
-other custom OpenAI-compatible endpoint can be mixed. The shipped defaults
-deliberately keep routine traffic local while using the strongest configured
-cloud route for difficult work: NIM first, GPT when NIM is absent or
-unavailable, then the two free no-card gateways, and Ollama as the guaranteed
-local safety net.
+chain. Local Ollama, NVIDIA NIM, OpenAI, OpenCode Zen, OpenRouter, Groq,
+Google AI Studio (Gemini), and any other custom OpenAI-compatible endpoint can
+be mixed. The shipped defaults deliberately keep routine traffic local while
+using the strongest configured cloud route for difficult work: NIM first, GPT
+when NIM is absent or unavailable, then **four** free no-card gateways, and
+Ollama as the guaranteed local safety net. The more of those four gateways
+have a key, the rarer a build ever actually needs Ollama for hard work.
 
 A model produces text. It never receives an OS handle, shell, filesystem, or
 MCP transport. Provider failover can change the brain serving a request; it
 cannot bypass policy or invent another action path.
 
-### Five providers, one code path
+### Seven providers, one code path
 
 Every provider below is a `ProviderSpec` entry — same router, same pacing,
-same failover, same masked-key settings view. Nothing about NIM, OpenCode Zen
-or OpenRouter is special-cased: they are all plain OpenAI-compatible
-`/v1/chat/completions` endpoints, so adding one is a config entry, not new code.
+same failover, same masked-key settings view. Nothing about NIM, OpenCode
+Zen, OpenRouter, Groq, or Google is special-cased: they are all plain
+OpenAI-compatible `/chat/completions` endpoints, so adding one is a config
+entry, not new code (Google's compatibility shim names its own version
+segment `openai` instead of `v1` and gets exactly one targeted exception in
+`ProviderSpec._endpoint()` for that URL shape — nothing else about it differs).
 
 | Provider | Cost | Key | Base URL | Default model |
 | --- | --- | --- | --- | --- |
@@ -1110,6 +1114,28 @@ or OpenRouter is special-cased: they are all plain OpenAI-compatible
 | **GPT (OpenAI-compatible)** | pay-as-you-go | `OPENAI_API_KEY` | `api.openai.com/v1` | `gpt-5.1` |
 | **OpenCode Zen** | **free, no card** | `OPENCODE_API_KEY` | `opencode.ai/zen/v1` | `ling-3.1-flash-free` |
 | **OpenRouter** | **free, no card** | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | `inclusionai/ling-3.1-flash` |
+| **Groq** | **free, no card** | `GROQ_API_KEY` | `api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| **Google AI Studio (Gemini)** | **free, no card** | `GEMINI_API_KEY` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` |
+
+#### Groq and Google AI Studio — two more zero-cost safety nets
+
+[Groq](https://console.groq.com/keys) serves open-weight models on custom LPU
+hardware — very low latency, good for tight agent loops. Its free tier
+publishes per-model limits rather than one shared number; the default model,
+`llama-3.3-70b-versatile`, is **30 requests/minute, 1,000/day** (reviewed
+2026-10) — `NEX_GROQ_RPM=30` mirrors that as Nex's local safety ceiling. Its
+daily/token caps are tighter than the RPM number alone suggests, so treat it
+as one safety net among several, not a sole hard-work provider for a long run.
+
+[Google AI Studio](https://aistudio.google.com/app/apikey) is the highest
+raw free quality/volume of the four free gateways today — Gemini 2.5 Flash
+offers a 1M-token context window. Google cut free-tier limits significantly
+in late 2025; current reports put Flash between roughly 10 and 15
+requests/minute and ~1,500/day (reviewed 2026-10, check the account's own
+dashboard for the real numbers). `NEX_GOOGLE_RPM=10` is Nex's conservative
+default ceiling. Both gateways slot into the fallback chain the exact same
+way OpenCode Zen and OpenRouter do — a `base_url`, an `api_key_env`, a
+default model, and a few curated `CATALOG` rows.
 
 #### OpenCode Zen — free NIM-grade models with no credit card
 
@@ -1151,14 +1177,24 @@ Gemini 2.5 Flash Lite — but OpenRouter's free roster has fully turned over
 before, so treat the curated catalog as a starting point and press **list**
 in Settings to see what is free *today*.
 
-#### Why both
+#### Why four free gateways, in this order
 
-OpenCode Zen and OpenRouter solve different problems. Zen's free Nemotron
-models are drop-in upgrades of NIM's own paid tiers — a free *mirror* of the
-hard-work lane. OpenRouter is the widest single net of free third-party
-models (Ling, DeepSeek, Qwen, Llama, Gemini) behind one key, which is why it
-sits one hop further down the chain: try Zen's NIM-family free models first,
-then the broader OpenRouter catalog, before ever touching local compute.
+Each of the four solves a different problem, and the default chain
+(`opencode → openrouter → groq → google`, hard-work lane also leads with
+`gpt` before any of them) reflects that order of preference, not an
+arbitrary list:
+
+1. **OpenCode Zen** — free Nemotron models are drop-in upgrades of NIM's own
+   paid tiers, a free *mirror* of the hard-work lane.
+2. **OpenRouter** — the widest single net of free third-party models (Ling,
+   DeepSeek, Qwen, Llama, Gemini) behind one key.
+3. **Groq** — very low latency on custom hardware, good for a tight agent
+   loop once the two above are exhausted or absent.
+4. **Google AI Studio (Gemini)** — the highest raw free quality/volume of
+   the four, the last and widest safety net before local compute.
+
+A build only ever stops at Ollama for hard work if every one of NIM, GPT,
+and all four free gateways is unconfigured or down at once.
 
 ## NVIDIA NIM flight deck
 
@@ -1174,12 +1210,16 @@ graph LR
     G -->|yes| GPT[GPT fallback]
     G -->|no or GPT fails| Z[OpenCode Zen · free]
     Z -->|no key or fails| OR[OpenRouter · free]
-    OR -->|no key or fails| O[Ollama takeover]
+    OR -->|no key or fails| GR[Groq · free]
+    GR -->|no key or fails| GG[Google AI Studio · free]
+    GG -->|no key or fails| O[Ollama takeover]
     L -->|local unavailable| RF[configured routine fallbacks]
     N --> V[finish reason + JSON shape checks]
     GPT --> V
     Z --> V
     OR --> V
+    GR --> V
+    GG --> V
     O --> V
     V --> U[bounded usage + model telemetry]
 ```
@@ -1291,15 +1331,15 @@ starting point because catalog availability changes.
 
 ### More free cloud model APIs you can wire in the same way
 
-Every provider in Nex is one `DEFAULT_PROVIDERS` entry plus (optionally) a few
-`CATALOG` lines — adding another OpenAI-compatible free gateway is a config
-change, not new code, as long as it speaks `/v1/chat/completions`. Candidates
-worth adding next, roughly ordered by how generous the free tier is today:
+Groq and Google AI Studio (Gemini) are already wired in as of this version —
+see the table above. Every provider in Nex is one `DEFAULT_PROVIDERS` entry
+plus (optionally) a few `CATALOG` lines, so adding yet another OpenAI-compatible
+free gateway is still a config change, not new code, as long as it speaks a
+`.../chat/completions` endpoint. Further candidates, roughly ordered by how
+generous the free tier is today:
 
 | Provider | Free tier (no card unless noted) | Notes |
 | --- | --- | --- |
-| **Google AI Studio (Gemini)** | Generous: Gemini 2.5/3.x Flash + Pro variants, up to 1M context | Mostly OpenAI-compatible via `generativelanguage.googleapis.com/v1beta/openai/`; best raw free quality/volume today |
-| **Groq** | ~30 RPM / 1,000 req/day on Llama, Qwen3, GPT-OSS, Kimi K2 | Custom LPU hardware — extremely low latency, good for tight agent loops |
 | **Cloudflare Workers AI** | Daily free "neuron" budget, no card | Llama, Mistral, Qwen hosted on Cloudflare's edge; OpenAI-compatible endpoint |
 | **Mistral La Plateforme** | Free tier incl. Codestral (~1B tokens/month) | Strong for code-focused agent work |
 | **GitHub Models** | Free with a GitHub account, rate-limited | Multiple vendors (OpenAI, Llama, Mistral, Phi) behind one token |
@@ -1307,11 +1347,8 @@ worth adding next, roughly ordered by how generous the free tier is today:
 | **HuggingFace Inference** | Small free monthly credit | Useful as a long tail for open-weight models not on the others |
 | **Cerebras** | Was a generous free tier; now a $5 **paid** trial (card required) | Mention for completeness — no longer truly free, listed last on purpose |
 
-A sensible next hop in the fallback chain would be `gpt → opencode →
-openrouter → groq → google → local` — Groq for latency-sensitive loops,
-Google AI Studio as the single highest-volume free safety net before local
-compute. All of the no-card rows above follow the exact same integration
-shape as OpenCode Zen/OpenRouter: a `base_url`, an `api_key_env`, a default
+All of the no-card rows above follow the exact same integration shape as
+OpenCode Zen/OpenRouter/Groq/Google: a `base_url`, an `api_key_env`, a default
 model, and a few curated `CATALOG` rows — nothing in the router, the settings
 UI, or the failover logic needs to change. Free tiers and model rosters shift
 often on every one of these services; re-check current terms before building
@@ -1349,16 +1386,19 @@ hands the job directly to Ollama.
 ```dotenv
 OPENCODE_API_KEY=your-opencode-zen-key
 OPENROUTER_API_KEY=your-openrouter-key
+GROQ_API_KEY=your-groq-key
+GEMINI_API_KEY=your-gemini-key
 NEX_CHAT_PROVIDER=local
-NEX_CHAT_FALLBACKS=opencode,openrouter
+NEX_CHAT_FALLBACKS=opencode,openrouter,groq,google
 NEX_AGENT_PROVIDER=opencode
-NEX_AGENT_FALLBACKS=openrouter,local
+NEX_AGENT_FALLBACKS=openrouter,groq,google,local
 ```
 
 Routine work still stays on Ollama; hard work gets real hosted model quality
-(free Ling 3.1 Flash on OpenCode Zen, then the same free Ling 3.1 Flash on
-OpenRouter if Zen is unavailable) with zero recurring cost and no payment
-method on file anywhere in the chain.
+(free Ling 3.1 Flash on OpenCode Zen, then OpenRouter, then Groq, then Google
+AI Studio if each one ahead of it is unavailable) with zero recurring cost
+and no payment method on file anywhere in the chain. Any subset of the four
+keys works too — each absent key is simply skipped.
 
 #### Local routine + NIM → GPT → free gateways → Ollama hard-work chain
 
@@ -1367,13 +1407,15 @@ OPENAI_API_KEY=your-openai-key
 NVIDIA_API_KEY=nvapi-your-key
 OPENCODE_API_KEY=your-opencode-zen-key
 OPENROUTER_API_KEY=your-openrouter-key
+GROQ_API_KEY=your-groq-key
+GEMINI_API_KEY=your-gemini-key
 NEX_CHAT_PROVIDER=local
 NEX_CHAT_FALLBACKS=gpt,nim
 NEX_AGENT_PROVIDER=nim
-NEX_AGENT_FALLBACKS=gpt,opencode,openrouter,local
+NEX_AGENT_FALLBACKS=gpt,opencode,openrouter,groq,google,local
 ```
 
-This is the longest safety net Nex ships: NIM, then GPT, then two free
+This is the longest safety net Nex ships: NIM, then GPT, then four free
 no-card gateways, then local — a build only ever stops if every one of those
 is down at once. Copy the complete example if you prefer configuration as code:
 
@@ -1411,6 +1453,12 @@ All settings are optional unless your chosen model provider requires a key.
 | `OPENROUTER_API_KEY` | empty | OpenRouter credential — **free, no card** (openrouter.ai/keys) |
 | `NEX_OPENROUTER_MODEL` | `inclusionai/ling-3.1-flash` | OpenRouter model id (append `:free` for zero-cost variants) |
 | `NEX_OPENROUTER_RPM` | `20` | OpenRouter local safety ceiling (matches the published free-tier 20 RPM) |
+| `GROQ_API_KEY` | empty | Groq credential — **free, no card** (console.groq.com/keys) |
+| `NEX_GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model id |
+| `NEX_GROQ_RPM` | `30` | Groq local safety ceiling (matches the published free-tier 30 RPM) |
+| `GEMINI_API_KEY` | empty | Google AI Studio (Gemini) credential — **free, no card** (aistudio.google.com/app/apikey) |
+| `NEX_GOOGLE_MODEL` | `gemini-2.5-flash` | Google AI Studio model id |
+| `NEX_GOOGLE_RPM` | `10` | Google AI Studio local safety ceiling (conservative; free-tier limits vary by account) |
 | `NEX_PROVIDER_HOSTS` | empty | Optional strict exact-host allowlist for model endpoints |
 | `NEX_SERVERS` | empty | Startup MCP server definitions |
 | `NEX_HTTP_ALLOW` | loopback only | Pre-approved remote MCP hosts |

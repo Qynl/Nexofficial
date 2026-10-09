@@ -7,10 +7,12 @@ The architecture implemented here has two operator-controlled lanes:
     local model is healthy.
   * HARD WORK (the ``agent`` route): complex production plans, evaluations,
     failure diagnosis, and bounded batch jobs. NVIDIA NIM is preferred, GPT is
-    an explicit credentialed fallback, then two FREE no-card gateways
-    (OpenCode Zen, OpenRouter) take over, and Ollama is always the terminal
-    fallback. Any provider without a key (or without a key for THIS lane) is
-    simply skipped — nothing in the chain ever blocks on a missing credential.
+    an explicit credentialed fallback, then four FREE no-card gateways
+    (OpenCode Zen, OpenRouter, Groq, Google AI Studio/Gemini) take over, and
+    Ollama is always the terminal fallback. Any provider without a key (or
+    without a key for THIS lane) is simply skipped — nothing in the chain
+    ever blocks on a missing credential. The more of those free gateways
+    have a key, the rarer a real build ever touches local compute.
 
 Why a router instead of one model call: hosted NIM limits vary by model,
 endpoint, account and current service load. Nex therefore ships a configurable
@@ -21,18 +23,21 @@ plans and repairs. Failover is explicit:
 
     NIM 429 / timeout / 5xx / RPM exhausted
         -> the SAME model job goes to GPT when configured
-        -> otherwise the free OpenCode Zen / OpenRouter gateways take it
+        -> otherwise the free OpenCode Zen / OpenRouter / Groq / Google
+           gateways take it, in that order, for whichever have a key
         -> otherwise Ollama runs it locally
         -> the validated MCP plan is untouched: only the model changes
         -> after cooldown the router hands hard work back to NIM automatically
 
-OpenCode Zen (https://opencode.ai/zen/v1) and OpenRouter
-(https://openrouter.ai/api/v1) are both plain OpenAI-compatible chat/
-completions endpoints, so they need no special-case code — they are
-DEFAULT_PROVIDERS entries like any other, free only because the account
-behind the key is free. Free listings can change or retire; Settings →
-Model always reads the LIVE ``/v1/models`` catalog from the configured key,
-which is the authority — the CATALOG below is only a curated starting point.
+OpenCode Zen (https://opencode.ai/zen/v1), OpenRouter
+(https://openrouter.ai/api/v1), Groq (https://api.groq.com/openai/v1), and
+Google AI Studio/Gemini (https://generativelanguage.googleapis.com/v1beta/openai)
+are all plain OpenAI-compatible chat/completions endpoints, so they need no
+special-case code — they are DEFAULT_PROVIDERS entries like any other, free
+only because the account behind the key is free. Free listings can change or
+retire; Settings → Model always reads the LIVE ``/v1/models`` catalog from
+the configured key, which is the authority — the CATALOG below is only a
+curated starting point.
 
 Nothing here executes a tool. A provider returns TEXT; the agent loop turns
 that text into validated MCP calls. The agent therefore cannot reach the
@@ -77,18 +82,22 @@ _ROLE_MIGRATION = {"planner": ROLE_CHAT, "builder": ROLE_AGENT}
 # to be named here (or by the operator) to be tried, so a future provider
 # added to the catalog can never silently become a fallback for a role.
 #
-# "opencode" (OpenCode Zen) and "openrouter" are FREE, no-card cloud gateways
-# — they cost the operator nothing even without NIM/GPT credentials, so they
-# sit between the paid clouds and the guaranteed local model: a build keeps
-# getting real hosted quality instead of dropping straight to Ollama the
-# moment NIM/GPT are absent or rate limited.
+# "opencode" (OpenCode Zen), "openrouter", "groq", and "google" are all FREE,
+# no-card cloud gateways — they cost the operator nothing even without
+# NIM/GPT credentials, so all four sit between the paid clouds and the
+# guaranteed local model: a build keeps getting real hosted quality instead
+# of dropping straight to Ollama the moment NIM/GPT are absent or rate
+# limited. Order among the four free gateways follows how well-suited each
+# is to agentic/tool-calling work and how generous its free tier is today
+# (opencode/openrouter lead with the same strong $0 agentic model; groq adds
+# very low latency; google adds the highest-volume general safety net).
 ROLE_DEFAULT_FALLBACKS: Dict[str, List[str]] = {
     # Hard work: NIM -> configured GPT -> free gateways -> local, with local
     # guaranteed by Router.chain even if an operator shortens this list.
-    ROLE_AGENT: ["gpt", "opencode", "openrouter", "local"],
+    ROLE_AGENT: ["gpt", "opencode", "openrouter", "groq", "google", "local"],
     # Routine work starts locally; the free gateways are tried before any
     # paid one, and NIM's scarce hard-work budget is the last resort.
-    ROLE_CHAT: ["opencode", "openrouter", "gpt", "nim"],
+    ROLE_CHAT: ["opencode", "openrouter", "groq", "google", "gpt", "nim"],
 }
 
 KIND_OLLAMA = "ollama"    # /api/chat, /api/tags
@@ -322,6 +331,47 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
                 "free, 262K context) — widest single net for 'try another "
                 "free cloud model' once NIM/GPT/OpenCode are all down.",
     },
+    "groq": {
+        "label": "Groq",
+        "kind": KIND_OPENAI,
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+        "api_key_env": "GROQ_API_KEY",
+        # Groq publishes per-model free-tier limits rather than one shared
+        # number; llama-3.3-70b-versatile is 30 RPM / 1,000 RPD (reviewed
+        # 2026-10) — this is Nex's local safety ceiling, not a guarantee.
+        "rpm": 30,
+        "timeout": 120.0,
+        "cooldown_s": 15.0,
+        "structured_outputs": True,
+        "note": "Free, no-card gateway (console.groq.com/keys). Custom LPU "
+                "hardware — very low latency, good for tight agent loops. "
+                "Daily/token caps are tighter than the RPM number suggests "
+                "on the free tier; Settings → Model pulls the live catalog.",
+    },
+    "google": {
+        "label": "Google AI Studio (Gemini)",
+        "kind": KIND_OPENAI,
+        # Google's OpenAI-compatibility shim names its own version segment
+        # "openai" instead of "v1" and never wants a separate "/v1" appended
+        # — see ProviderSpec._endpoint(), which special-cases this ending.
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-2.5-flash",
+        "api_key_env": "GEMINI_API_KEY",
+        # Google cut free-tier limits significantly in late 2025; Gemini 2.5
+        # Flash is commonly reported between 10 and 15 RPM / ~1,500 RPD
+        # today (reviewed 2026-10). Conservative local ceiling, not a
+        # guarantee — aistudio.google.com shows the account's real numbers.
+        "rpm": 10,
+        "timeout": 180.0,
+        "cooldown_s": 20.0,
+        "structured_outputs": False,
+        "note": "Free, no-card gateway (aistudio.google.com/app/apikey). "
+                "Highest raw free quality/volume of the four free gateways "
+                "today, 1M-token context on Flash — the widest general "
+                "safety net before local compute. Settings → Model pulls "
+                "the live catalog.",
+    },
 }
 
 # Curated NIM starting points (reviewed 2026-10; the live /v1/models list in
@@ -431,6 +481,37 @@ CATALOG: List[Dict[str, Any]] = [
     {"provider": "openrouter", "id": "google/gemini-2.5-flash-lite:free",
      "role": "chat", "label": "Gemini 2.5 Flash Lite (OpenRouter, free)",
      "note": "Fast, cheap-quality free chat/summary model."},
+    # --- Groq (free, no card — custom LPU hardware, reviewed 2026-10) ------
+    {"provider": "groq", "id": "llama-3.3-70b-versatile",
+     "role": "agent", "label": "Llama 3.3 70B Versatile (Groq, free)",
+     "note": "The provider default. Extremely low latency on Groq's LPUs — "
+             "good for tight agent loops; free-tier daily/token caps are "
+             "tighter than the 30 RPM number alone suggests."},
+    {"provider": "groq", "id": "openai/gpt-oss-120b",
+     "role": "agent", "label": "GPT-OSS 120B (Groq, free)",
+     "note": "Open-weight OpenAI model served on Groq; strong general "
+             "agentic/coding performance, free tier."},
+    {"provider": "groq", "id": "qwen/qwen3-32b",
+     "role": "chat", "label": "Qwen3 32B (Groq, free)",
+     "note": "Fast free chat/summary model; higher RPM than the 70B model "
+             "but a smaller token-per-minute budget."},
+    {"provider": "groq", "id": "moonshotai/kimi-k2-instruct",
+     "role": "agent", "label": "Kimi K2 (Groq, free)",
+     "note": "Long-horizon agentic/coding model, free tier on Groq."},
+    # --- Google AI Studio / Gemini (free, no card, reviewed 2026-10) -------
+    {"provider": "google", "id": "gemini-2.5-flash",
+     "role": "agent", "label": "Gemini 2.5 Flash (Google, free)",
+     "note": "The provider default. 1M-token context, hybrid reasoning, "
+             "strong free-tier volume — the widest general safety net of "
+             "the four free gateways before local compute."},
+    {"provider": "google", "id": "gemini-2.5-flash-lite",
+     "role": "chat", "label": "Gemini 2.5 Flash Lite (Google, free)",
+     "note": "Higher free-tier RPM/RPD than full Flash; good for routine "
+             "chat/summary load."},
+    {"provider": "google", "id": "gemini-2.5-pro",
+     "role": "chat", "label": "Gemini 2.5 Pro (Google, free)",
+     "note": "Strongest free Gemini for careful planning; much lower free "
+             "RPM/RPD than Flash — not for a tight loop."},
 ]
 
 # Env -> provider field overrides (kept small and explicit).
@@ -448,6 +529,10 @@ ENV_PROVIDER_KEYS: Dict[str, Dict[str, str]] = {
                    "model": "NEX_OPENROUTER_MODEL",
                    "api_key": "NEX_OPENROUTER_API_KEY",
                    "rpm": "NEX_OPENROUTER_RPM"},
+    "groq": {"base_url": "NEX_GROQ_BASE_URL", "model": "NEX_GROQ_MODEL",
+             "api_key": "NEX_GROQ_API_KEY", "rpm": "NEX_GROQ_RPM"},
+    "google": {"base_url": "NEX_GOOGLE_BASE_URL", "model": "NEX_GOOGLE_MODEL",
+               "api_key": "NEX_GOOGLE_API_KEY", "rpm": "NEX_GOOGLE_RPM"},
 }
 
 
@@ -931,10 +1016,19 @@ class ProviderSpec:
         endpoint is ``/v1/chat/completions``, so appending naively produces
         ``/v1/v1/chat/completions`` and a 404 that looks like a provider
         failure. The version segment belongs to exactly one of the two.
+
+        Google's Gemini OpenAI-compatibility shim is the one gateway here
+        that names its version segment "openai" instead of "v1"
+        (``.../v1beta/openai``) and never wants a *separate* "/v1" at all —
+        the real endpoint is ``.../v1beta/openai/chat/completions``, not
+        ``.../v1beta/openai/v1/chat/completions``. Treat that ending the
+        same way: drop the suffix's own "/v1" instead of the base's.
         """
         base = (self.base_url or "").rstrip("/")
         if base.endswith("/v1"):
             base = base[:-len("/v1")]
+        elif base.endswith("/openai"):
+            suffix = suffix.replace("/v1/", "/", 1)
         return base + suffix
 
     @property
@@ -2402,6 +2496,17 @@ def _specs_from_env(base: Dict[str, ProviderSpec]) -> Dict[str, ProviderSpec]:
                     break
         if name == "openrouter" and not fields.get("api_key"):
             for extra in ("OPENROUTER_API_KEY", "NEX_OPENROUTER_API_KEY"):
+                if os.environ.get(extra):
+                    fields["api_key"] = os.environ[extra]
+                    break
+        if name == "groq" and not fields.get("api_key"):
+            for extra in ("GROQ_API_KEY", "NEX_GROQ_API_KEY"):
+                if os.environ.get(extra):
+                    fields["api_key"] = os.environ[extra]
+                    break
+        if name == "google" and not fields.get("api_key"):
+            for extra in ("GEMINI_API_KEY", "GOOGLE_API_KEY",
+                          "NEX_GOOGLE_API_KEY"):
                 if os.environ.get(extra):
                     fields["api_key"] = os.environ[extra]
                     break
