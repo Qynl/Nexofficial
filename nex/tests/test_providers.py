@@ -1859,4 +1859,118 @@ _expect(sleeps_off == [],
         "an explicit max_chill_s=0 must never be silently raised: %r"
         % sleeps_off)
 
+print("=== 17. vision-capable routing (real screenshot critique) ===")
+
+# --- model_supports_vision(): conservative name-pattern detection ---------
+_expect(providers.model_supports_vision("gemini-2.5-flash") is True,
+        "gemini-* is recognised as a vision-capable model name")
+_expect(providers.model_supports_vision("gpt-5.1") is True,
+        "gpt-5.* is recognised as vision-capable")
+_expect(providers.model_supports_vision("gpt-4o-mini") is True,
+        "gpt-4o* is recognised as vision-capable")
+_expect(providers.model_supports_vision("llava:13b") is True,
+        "an Ollama-hosted llava model is recognised as vision-capable")
+_expect(providers.model_supports_vision("nvidia/nemotron-3-super-120b-a12b")
+        is False,
+        "a text-only reasoning model is NOT guessed to be vision-capable")
+_expect(providers.model_supports_vision("llama-3.3-70b-versatile") is False,
+        "Llama 3.3 (text-only) is not misdetected as vision-capable")
+_expect(providers.model_supports_vision("gpt-oss:20b") is False,
+        "the local gpt-oss default is not misdetected as vision-capable")
+_expect(providers.model_supports_vision("") is False,
+        "an empty/unknown model name defaults to text-only (the safe side)")
+_expect(providers.model_supports_vision(None) is False,
+        "None never crashes the check and defaults to text-only")
+
+# --- _attach_images(): per-kind multimodal payload construction ----------
+base_msgs = [{"role": "user", "content": "describe this screenshot"}]
+one_image = [{"mime_type": "image/png", "data": "Zm9v"}]
+
+openai_msgs = providers._attach_images(base_msgs, providers.KIND_OPENAI,
+                                       one_image)
+_expect(base_msgs[0]["content"] == "describe this screenshot",
+        "_attach_images never mutates the caller's original messages list")
+_expect(isinstance(openai_msgs[-1]["content"], list),
+        "OpenAI-kind: the last message's content becomes a list of blocks")
+_expect(openai_msgs[-1]["content"][0] ==
+        {"type": "text", "text": "describe this screenshot"},
+        "OpenAI-kind: the original text is preserved as the first block")
+_expect(openai_msgs[-1]["content"][1] ==
+        {"type": "image_url",
+         "image_url": {"url": "data:image/png;base64,Zm9v"}},
+        "OpenAI-kind: the image becomes a data-URI image_url block")
+
+ollama_msgs = providers._attach_images(base_msgs, providers.KIND_OLLAMA,
+                                       one_image)
+_expect(ollama_msgs[-1]["content"] == "describe this screenshot",
+        "Ollama-kind: the text content is left as a plain string")
+_expect(ollama_msgs[-1]["images"] == ["Zm9v"],
+        "Ollama-kind: raw base64 goes in a sibling 'images' list, no "
+        "data-URI prefix")
+
+no_images = providers._attach_images(base_msgs, providers.KIND_OPENAI, [])
+_expect(no_images is base_msgs,
+        "no images to attach is a no-op (same list returned)")
+
+# --- end-to-end: Router.chat() routes an image request to a vision-     --
+# --- capable provider and skips one that cannot read it -------------------
+http_vision = FakeHTTP()
+http_vision.push("api.openai.com", "the kitchen looks moody and unfinished")
+router_vision = mk_router(http_vision)
+reply = router_vision.chat("chat", MESSAGES, images=one_image)
+_expect(reply == "the kitchen looks moody and unfinished",
+        "chat role (gpt-5.1, vision-capable) answers an image-bearing "
+        "request normally")
+sent_url, sent_body = http_vision.calls[-1]
+_expect("api.openai.com" in sent_url,
+        "the image request actually went to the vision-capable provider")
+sent_content = sent_body["messages"][-1]["content"]
+_expect(isinstance(sent_content, list) and
+        any(b.get("type") == "image_url" for b in sent_content),
+        "the real outgoing request body carries an image_url block, not "
+        "just text — the model can actually see the screenshot")
+
+# mk_router's agent chain is nim (text-only) -> gpt (vision-capable) ->
+# local (text-only). nim/local must be skipped outright for an image
+# request; gpt is the one actually tried — and when even THAT fails (no
+# scripted answer here), the chain is honestly exhausted rather than one
+# of the skipped text-only providers silently answering without ever
+# having seen the picture.
+http_no_vision = FakeHTTP()
+router_no_vision = mk_router(http_no_vision)
+try:
+    router_no_vision.chat("agent", MESSAGES, images=one_image)
+    _expect(False, "an image request where the only vision-capable "
+                   "provider also fails must raise, never fall back to a "
+                   "text-only provider that never saw the image")
+except providers.AllProvidersFailed as exc:
+    reasons = {a["provider"]: a["error"] for a in exc.attempts}
+    _expect(reasons.get("nim") == "no_vision",
+            "NIM (nemotron, text-only) is skipped for an image request "
+            "with an honest 'no_vision' reason: %r" % reasons)
+    _expect(reasons.get("local") == "no_vision",
+            "local (gpt-oss, text-only) is likewise skipped: %r" % reasons)
+    _expect(reasons.get("gpt") not in (None, "no_vision"),
+            "gpt (gpt-5.1, vision-capable) IS attempted — it is the only "
+            "candidate that could have actually seen the image: %r"
+            % reasons)
+_expect(len(http_no_vision.calls) == 1,
+        "exactly one real call was made — to the sole vision-capable "
+        "provider — never to a text-only one just to watch it fail: %r"
+        % (http_no_vision.calls,))
+
+# callable_for() — the real production wiring used by the agent loop —
+# declares vision support and forwards images end-to-end.
+http_cf = FakeHTTP()
+http_cf.push("api.openai.com", "a genuine critique via callable_for")
+router_cf = mk_router(http_cf)
+bound = router_cf.callable_for("chat")
+_expect(getattr(bound, "supports_images", False) is True,
+        "callable_for()'s bound callable declares supports_images=True — "
+        "this is what lets agent/llm.call_with_images actually use it")
+cf_reply = bound(MESSAGES, purpose="visual-review", images=one_image)
+_expect(cf_reply == "a genuine critique via callable_for",
+        "the bound callable forwards images through to Router.chat and "
+        "returns the real reply")
+
 print("\nAll provider-layer tests passed.")

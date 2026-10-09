@@ -35,6 +35,7 @@ from agent.loop import (                                       # noqa: E402
     DEFAULT_MAX_PROGRAM_REPLANS, DEFAULT_MAX_QUALITY_PASSES,
     MIN_RUN_MINUTES, MAX_RUN_MINUTES,
 )
+from agent.task_graph import Task                                # noqa: E402
 from agent.model_planner import plan_to_graph                   # noqa: E402
 from agent.workload import planning_purpose                     # noqa: E402
 from mcp.registry import CapabilityRegistry                    # noqa: E402
@@ -541,6 +542,173 @@ class CoordinatorTests(unittest.TestCase):
         coord = RunCoordinator(FakeManager([mock]),
                                llm_factory=lambda: None)
         self.assertFalse(coord.cancel("ghost"))
+
+
+VISUAL_TOOLS = [
+    {"name": "capture_viewport", "description": "Capture the current viewport.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "save_file", "description": "Save a file to disk.",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+
+class VisionAwareLLM:
+    """A real screenshot critique requires the llm callable to declare it
+    can read images (mirrors Router.callable_for's real contract)."""
+    def __init__(self, reply="moody lighting, but the counters are "
+                              "untextured placeholder grey"):
+        self.calls = []
+        self.supports_purpose = True
+        self.supports_images = True
+        self._reply = reply
+
+    def __call__(self, messages, purpose=None, images=None):
+        self.calls.append((messages, purpose, images))
+        return self._reply
+
+
+def image_result(data="c2NyZWVuc2hvdA=="):
+    """A tool result shaped exactly like the REAL manager hands the loop
+    one: the MCP ``content`` array with a genuine ``type: image`` block."""
+    return {"content": [
+        {"type": "text", "text": "captured"},
+        {"type": "image", "data": data, "mimeType": "image/png"},
+    ]}
+
+
+class VisualCritiqueTests(unittest.TestCase):
+    """The visual/visual_review quality gates only prove a tool with a
+    matching NAME ran and returned non-empty content -- never that
+    anything actually looked at the pixels. _maybe_visual_critique closes
+    that gap, additively, when a vision-capable model is configured.
+    """
+
+    def setUp(self):
+        self.mock = MockMCPServer("engine", VISUAL_TOOLS)
+        self.mgr = FakeManager([self.mock])
+
+    def _task(self):
+        return Task(id="t1", name="capture the kitchen", slug="capture",
+                   server="engine", tool="capture_viewport")
+
+    def test_extract_screenshot_images_finds_real_image_blocks(self):
+        from agent.loop import _extract_screenshot_images
+        out = _extract_screenshot_images(image_result())
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["mime_type"], "image/png")
+        self.assertEqual(out[0]["data"], "c2NyZWVuc2hvdA==")
+
+    def test_extract_screenshot_images_ignores_everything_else(self):
+        from agent.loop import _extract_screenshot_images
+        self.assertEqual(_extract_screenshot_images(None), [])
+        self.assertEqual(_extract_screenshot_images("a bare string"), [])
+        self.assertEqual(_extract_screenshot_images({"ok": True}), [])
+        # a field that merely mentions "image" in its name, or a path, is
+        # not bytes any model could actually look at.
+        self.assertEqual(_extract_screenshot_images(
+            {"content": [{"type": "text", "image_path": "/tmp/shot.png"}]}),
+            [])
+
+    def test_a_real_critique_is_requested_and_recorded(self):
+        llm = VisionAwareLLM()
+        run = AgentRun("v1", "build a polished game", self.mgr, llm=llm)
+        self.assertTrue(run._quality_profile.active,
+                        "the goal must actually be a game-production goal "
+                        "for this test to mean anything")
+        run._maybe_visual_critique(self._task(), image_result())
+        self.assertEqual(len(llm.calls), 1,
+                         "a vision-capable llm is actually called once a "
+                         "real screenshot is captured")
+        _, purpose, images = llm.calls[0]
+        self.assertEqual(purpose, "visual-review")
+        self.assertEqual(images, [{"mime_type": "image/png",
+                                   "data": "c2NyZWVuc2hvdA=="}])
+        self.assertEqual(len(run.visual_critiques), 1)
+        entry = run.visual_critiques[0]
+        self.assertTrue(entry["performed"])
+        self.assertIn("untextured placeholder grey", entry["critique"])
+
+    def test_no_vision_capable_model_skips_honestly_not_silently(self):
+        """A plain (non-vision) llm must never be asked to critique an
+        image it cannot read, but the attempt must still be recorded as
+        'not performed' so the report never implies more rigor than
+        happened."""
+        def plain_llm(messages, purpose=None):
+            return "I cannot see images but here is a guess anyway"
+        plain_llm.supports_purpose = True
+        run = AgentRun("v2", "build a polished game", self.mgr, llm=plain_llm)
+        run._maybe_visual_critique(self._task(), image_result())
+        self.assertEqual(len(run.visual_critiques), 1)
+        entry = run.visual_critiques[0]
+        self.assertFalse(entry["performed"])
+        self.assertIn("no vision-capable model", entry["reason"])
+        self.assertNotIn("critique", entry)
+
+    def test_no_image_in_the_result_means_nothing_is_attempted(self):
+        llm = VisionAwareLLM()
+        run = AgentRun("v3", "build a polished game", self.mgr, llm=llm)
+        run._maybe_visual_critique(self._task(), {"ok": True})
+        self.assertEqual(llm.calls, [])
+        self.assertEqual(run.visual_critiques, [])
+
+    def test_a_non_visual_tool_is_never_sent_for_critique(self):
+        """Only a step whose tool actually matches the 'visual' (capture)
+        gate is eligible -- a real, live, successfully-resolved tool with
+        a different gate (e.g. a plain file save) that happens to return
+        something image-shaped is still not treated as a screenshot."""
+        llm = VisionAwareLLM()
+        run = AgentRun("v4", "build a polished game", self.mgr, llm=llm)
+        other_task = Task(id="t2", name="save the file", slug="save",
+                          server="engine", tool="save_file")
+        run._maybe_visual_critique(other_task, image_result())
+        self.assertEqual(llm.calls, [])
+        self.assertEqual(run.visual_critiques, [])
+
+    def test_an_unknown_tool_is_also_never_sent_for_critique(self):
+        """A step referencing a tool the registry has never heard of
+        (e.g. a stale/disconnected server) fails closed exactly the same
+        way -- no crash, no critique attempted."""
+        llm = VisionAwareLLM()
+        run = AgentRun("v4b", "build a polished game", self.mgr, llm=llm)
+        ghost_task = Task(id="t3", name="ghost step", slug="ghost",
+                          server="engine", tool="does_not_exist")
+        run._maybe_visual_critique(ghost_task, image_result())
+        self.assertEqual(llm.calls, [])
+        self.assertEqual(run.visual_critiques, [])
+
+    def test_non_production_goals_never_trigger_a_critique_call(self):
+        """Ordinary (non-game-production) goals never pay for this extra
+        call even if some tool happens to return image-shaped content."""
+        llm = VisionAwareLLM()
+        run = AgentRun("v5", "echo the text hi", self.mgr, llm=llm)
+        self.assertFalse(run._quality_profile.active)
+        run._maybe_visual_critique(self._task(), image_result())
+        self.assertEqual(llm.calls, [])
+        self.assertEqual(run.visual_critiques, [])
+
+    def test_critique_is_additive_never_required_for_a_passing_run(self):
+        """The existing tool-name/evidence gate logic in agent/quality.py
+        is completely untouched by this feature -- a run can still pass
+        its quality gates with zero visual critiques recorded (e.g. no
+        vision-capable model configured), exactly as before."""
+        def plain_llm(messages, purpose=None):
+            if "planning mind" in messages[0]["content"]:
+                return ('{"steps": [{"name": "shot", "tool": '
+                        '"engine.capture_viewport", "args": {}}]}')
+            return "ok"
+        plain_llm.supports_purpose = True
+        report = AgentRun("v6", "build a polished game", self.mgr,
+                          llm=plain_llm).run()
+        # No exception, no crash, no gate corrupted by the absence of a
+        # vision-capable model -- the run completes and reports normally.
+        # (The mock engine's synthetic "capture_viewport" reply carries no
+        # real image bytes, so honestly there is nothing to critique —
+        # see test_no_image_in_the_result_means_nothing_is_attempted for
+        # the case where a real screenshot IS present but no vision model
+        # is configured.)
+        self.assertIn("quality", report)
+        self.assertEqual(report.get("visual_critiques"), [])
+        self.assertNotEqual(report["status"], "error")
 
 
 class ReportSafetyTests(unittest.TestCase):

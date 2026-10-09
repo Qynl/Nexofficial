@@ -103,6 +103,76 @@ ROLE_DEFAULT_FALLBACKS: Dict[str, List[str]] = {
 KIND_OLLAMA = "ollama"    # /api/chat, /api/tags
 KIND_OPENAI = "openai"    # /v1/chat/completions, /v1/models (NIM, OpenAI, …)
 
+# Best-effort, conservative name patterns for models documented to accept
+# image input alongside text. There is no universal registry of this —
+# operators can point any role at any model string — so this is inferred
+# from publicly known multimodal model families, never assumed. An
+# unrecognised name is treated as text-only: the safe default, because
+# sending an image to a model that cannot read it would not fail loudly,
+# it would just produce confident-sounding prose about pixels it never
+# saw, which is worse than honestly skipping the critique.
+_VISION_MODEL_PATTERNS = (
+    "gemini", "gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4-mini",
+    "claude-3", "claude-opus", "claude-sonnet", "claude-haiku",
+    "llava", "bakllava", "pixtral", "qwen2-vl", "qwen2.5-vl", "qwen-vl",
+    "llama-4-scout", "llama-4-maverick", "grok-4", "grok-vision",
+    "phi-3.5-vision", "phi-4-multimodal", "moondream", "internvl",
+)
+
+
+def model_supports_vision(model: str) -> bool:
+    """Best-effort guess at whether `model` accepts image input.
+
+    See `_VISION_MODEL_PATTERNS` for the rationale: false is always the
+    safe default for an unrecognised model name.
+    """
+    name = str(model or "").lower()
+    return any(pat in name for pat in _VISION_MODEL_PATTERNS)
+
+
+def _attach_images(messages: List[Dict[str, Any]], kind: str,
+                   images: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """Return a NEW messages list with `images` attached to the last
+    message, formatted the way `kind`'s API expects.
+
+    Never mutates the input list or its dicts — the same `messages` may
+    still be tried against another provider of a different `kind` if this
+    one turns out to be unavailable.
+    """
+    if not messages or not images:
+        return messages
+    out = [dict(m) for m in messages]
+    last = dict(out[-1])
+    if kind == KIND_OLLAMA:
+        # Ollama's /api/chat takes raw base64 strings in a sibling
+        # "images" field on the message, not inline in "content".
+        payload = [img["data"] for img in images
+                  if isinstance(img, dict) and img.get("data")]
+        if payload:
+            last["images"] = payload
+    else:
+        # OpenAI-compatible chat completions: "content" becomes a list of
+        # typed blocks when any non-text content is present.
+        text = last.get("content", "")
+        blocks: List[Dict[str, Any]] = []
+        if text:
+            blocks.append({"type": "text", "text": text})
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            data = img.get("data")
+            if not data:
+                continue
+            mime = img.get("mime_type") or "image/png"
+            blocks.append({"type": "image_url",
+                           "image_url": {"url": "data:%s;base64,%s"
+                                         % (mime, data)}})
+        if blocks:
+            last["content"] = blocks
+    out[-1] = last
+    return out
+
+
 # Provider states surfaced to the UI.
 ST_AVAILABLE = "available"
 ST_RATE_LIMITED = "rate_limited"
@@ -2004,9 +2074,18 @@ class Router:
     def chat(self, role: str, messages: List[Dict[str, str]],
              purpose: str = "", temperature: Optional[float] = None,
              max_tokens: Optional[int] = None,
-             timeout: Optional[float] = None) -> str:
+             timeout: Optional[float] = None,
+             images: Optional[List[Dict[str, str]]] = None) -> str:
         """Route a chat call for `role`. Raises AllProvidersFailed if the
-        whole chain is down (callers degrade honestly instead of guessing)."""
+        whole chain is down (callers degrade honestly instead of guessing).
+
+        `images`: optional real image bytes (``[{"mime_type":...,
+        "data": <base64>}]``) to attach to the last message. A provider
+        whose configured model is not known to accept image input is
+        skipped for this call exactly like an unconfigured one — it never
+        silently gets the request text-only and invents an opinion about
+        pixels it never received.
+        """
         chain = self.chain(role)
         attempts: List[Dict[str, Any]] = []
         primary = chain[0] if chain else ""
@@ -2022,6 +2101,10 @@ class Router:
             if not state.available():
                 attempts.append({"provider": name, "error": state.status})
                 continue
+            if images and not model_supports_vision(
+                    self.model_for(role, name)):
+                attempts.append({"provider": name, "error": "no_vision"})
+                continue
             if self._pace(role, chain, index, name, spec, state, purpose) \
                     == "skip":
                 attempts.append({"provider": name, "error": "pacing"})
@@ -2035,9 +2118,11 @@ class Router:
                             "note": "budget exhausted"})
                 continue
             selected_model = self.model_for(role, name)
+            call_messages = (_attach_images(messages, spec.kind, images)
+                             if images else messages)
             try:
                 text, response = self._call(
-                    spec, messages, selected_model, purpose,
+                    spec, call_messages, selected_model, purpose,
                     temperature, max_tokens, timeout)
             except ProviderError as exc:
                 state.mark_error(exc.kind, str(exc), exc.retry_after)
@@ -2148,10 +2233,13 @@ class Router:
 
     def callable_for(self, role: str
                      ) -> Callable[[List[Dict[str, str]]], str]:
-        """Purpose-aware callable compatible with the agent loop."""
-        def _bound(messages: List[Dict[str, str]], purpose: str = "agent") -> str:
-            return self.chat(role, messages, purpose=purpose)
+        """Purpose-aware, vision-aware callable compatible with the agent
+        loop."""
+        def _bound(messages: List[Dict[str, str]], purpose: str = "agent",
+                  images: Optional[List[Dict[str, str]]] = None) -> str:
+            return self.chat(role, messages, purpose=purpose, images=images)
         _bound.supports_purpose = True  # type: ignore[attr-defined]
+        _bound.supports_images = True  # type: ignore[attr-defined]
         return _bound
 
     def available(self, role: str) -> bool:

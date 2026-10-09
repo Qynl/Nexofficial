@@ -43,7 +43,7 @@ from agent.events import (
     STATUS_COMPLETED, STATUS_PARTIAL, STATUS_FAILED, STATUS_BLOCKED,
     STATUS_CANCELLED, emit,
 )
-from agent.llm import call as call_llm
+from agent.llm import call as call_llm, call_with_images
 from agent.mcp_production import (
     context_block, rank_context_resources, server_prompt_names,
 )
@@ -63,6 +63,7 @@ from agent.quality import (
     correction_note as quality_correction_note,
     planning_brief as quality_planning_brief,
     profile_for_goal,
+    tool_gates,
 )
 from agent.workload import planning_purpose
 from agent.task_graph import (
@@ -305,6 +306,36 @@ def _result_value(result: Any, key: Optional[str]) -> Any:
 
 _REF_RE = re.compile(r"^\$([a-zA-Z0-9_-]+)(?:\.([a-zA-Z0-9_.-]+))?$")
 
+_MAX_CRITIQUE_IMAGES = 2
+
+
+def _extract_screenshot_images(result: Any) -> List[Dict[str, str]]:
+    """Pull real MCP image content blocks out of a tool result.
+
+    Per the MCP spec, a tool's ``content`` array can mix ``{"type":
+    "text", ...}`` and ``{"type": "image", "data": <base64>, "mimeType":
+    ...}`` items. Only an actual ``type == "image"`` block with non-empty
+    ``data`` counts — a field that merely mentions "image" in its name,
+    or a bare file path/URL, is not something any model can look at, so
+    it is never treated as if it were.
+    """
+    out: List[Dict[str, str]] = []
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type", "")).lower() != "image":
+                    continue
+                data = item.get("data")
+                if isinstance(data, str) and data.strip():
+                    mime = str(item.get("mimeType") or "image/png")
+                    out.append({"mime_type": mime, "data": data.strip()})
+                if len(out) >= _MAX_CRITIQUE_IMAGES:
+                    break
+    return out
+
 
 class ArgResolutionError(Exception):
     """A $reference in a step's arguments could not be resolved."""
@@ -369,6 +400,10 @@ class AgentRun:
         self._evaluations = 0
         self._quality_passes = 0
         self._quality_profile = profile_for_goal(goal)
+        # Real AI opinions of actually-captured screenshots, additive to
+        # (never a substitute for) the tool-evidence quality gates — see
+        # `_maybe_visual_critique`.
+        self.visual_critiques: List[Dict[str, Any]] = []
         self._program_active = is_large_game_goal(goal)
         self._engine_targets: List[Dict[str, Any]] = []
         self._context_block: Optional[str] = None
@@ -865,6 +900,60 @@ class AgentRun:
                    server=task.server, phase="ok",
                    preview=result_preview(result))
         self._emit("run.step", step=task.to_public())
+        self._maybe_visual_critique(task, result)
+
+    def _maybe_visual_critique(self, task: Task, result: Any) -> None:
+        """When a screenshot-capture step succeeds, ask a vision-capable
+        model to genuinely look at the pixels and critique them.
+
+        The "visual"/"visual_review" quality gates only prove a tool with
+        a matching NAME ran and returned non-empty content — never that
+        anything actually looked at the image. This closes that gap when
+        it honestly can: it is always additive evidence (it never passes
+        or fails a gate) and costs nothing when no vision-capable
+        provider is configured — no call is attempted in that case.
+        """
+        if not self._quality_profile.active or self.llm is None:
+            return
+        server_view = self.manager.registry().server(task.server or "")
+        tool_view = server_view.by_name(task.tool or "") if server_view \
+            else None
+        if tool_view is None or "visual" not in tool_gates(tool_view):
+            return
+        images = _extract_screenshot_images(result)
+        if not images:
+            return
+        prompt = (
+            "A game-engine tool just captured the screenshot attached "
+            "below while working on this goal:\n\n%s\n\n"
+            "Look at the actual image and give an honest, specific "
+            "critique in 3-5 sentences: does the lighting, mood, and "
+            "composition serve the goal; are there obvious defects "
+            "(missing textures, z-fighting, placeholder geometry, flat "
+            "default lighting); and what is the single most important "
+            "thing to fix next? If it looks like an untouched default "
+            "scene, say so plainly — do not be diplomatic about it."
+        ) % self.goal[:800]
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            critique = call_with_images(
+                self.llm, messages, "visual-review", images)
+        except Exception:  # noqa: BLE001 - an auxiliary check must
+            # never break an otherwise-successful step.
+            critique = None
+        entry: Dict[str, Any] = {"step": task.name, "tool": task.tool}
+        if critique and critique.strip():
+            text = critique.strip()[:1200]
+            entry["performed"] = True
+            entry["critique"] = text
+            self.context.observe(
+                task.name + " (AI visual critique)", task.tool or "?",
+                task.server or "?", text, ok=True)
+            self._emit("run.visual_critique", step_id=task.id, critique=text)
+        else:
+            entry["performed"] = False
+            entry["reason"] = "no vision-capable model is currently configured"
+        self.visual_critiques.append(entry)
 
     def _await_approval(self, task: Task, outcome: Dict[str, Any],
                         resolved_args: Dict[str, Any]) -> bool:
@@ -1463,6 +1552,7 @@ class AgentRun:
             "evaluation_interval_steps": self.eval_every_steps,
             "quality_passes": self._quality_passes,
             "quality": quality,
+            "visual_critiques": list(self.visual_critiques),
             "mcp_production_review": plan_meta.get("production_review") or {},
             "reversal": self._reversal_plan(),
             "engine_targets": list(self._engine_targets),
@@ -1537,6 +1627,7 @@ class AgentRun:
             "steps": [t.to_public() for t in self.graph.all()],
             "waiting": (self._approval is not None),
             "quality": self._quality_scorecard(),
+            "visual_critiques": list(self.visual_critiques),
             "mcp_production_review": dict(
                 (getattr(self.graph, "plan_meta", {}) or {}).get(
                     "production_review") or {}),
@@ -1617,6 +1708,19 @@ def _fallback_summary(report: Dict[str, Any]) -> str:
                          ", ".join(quality.get("unavailable") or []))
         lines.append("This is an evidence score, not a guarantee of AAA or "
                      "commercial quality.")
+    critiques = report.get("visual_critiques") or []
+    performed = [c for c in critiques if c.get("performed")]
+    if performed:
+        lines.append("\nAI visual critique (a model actually looked at "
+                     "the captured screenshot(s)):")
+        for c in performed[:3]:
+            lines.append("- %s: %s" % (c.get("step", "?"), c.get("critique", "")))
+    elif critiques:
+        lines.append("\nScreenshots were captured, but no vision-capable "
+                     "model is configured to actually look at them — "
+                     "visual evidence above reflects only that the "
+                     "capture tool ran, not a genuine AI opinion of the "
+                     "image.")
     return "\n".join(lines)
 
 

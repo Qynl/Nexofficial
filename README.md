@@ -545,6 +545,8 @@ For game-authoring requests, `agent/quality.py` derives a production contract fr
 
 A normal production game-making run requires the first eight. A **flagship** request—terms such as “AAA-style,” “high-quality,” “professional,” “shippable,” or “cinematic”—also requires performance evidence. Visual capture and visual review are deliberately separate: pixels existing is not the same as those pixels being judged.
 
+The `visual`/`visual_review` **gates** above are still, honestly, just tool-name-and-evidence checks — they prove a capture/review tool ran and returned non-empty content, not that anything looked at the pixels. Separately from the score, when a screenshot step succeeds and returns real MCP image bytes, Nex makes one additional, additive call: if (and only if) the currently configured model for that work is known to accept image input (e.g. Gemini, GPT-4o/5-class, or a local vision model such as LLaVA — plain text-only models are skipped, never silently sent an image they cannot read), a vision-capable model is asked for an honest, specific critique of that exact screenshot against the stated goal. The critique is surfaced in the run's report (`visual_critiques`) and folded into the final summary when one was produced; it never changes a gate's pass/fail state, and when no vision-capable model is configured nothing is attempted or faked — the report says so plainly instead of implying a review happened.
+
 The final report contains a score from `0–100`, gate-by-gate state, supporting step/tool evidence, missing gates, unavailable capabilities, and the number of corrective passes. A gate can be:
 
 - `passed` — a successful task used a live tool that supports this evidence;
@@ -1129,6 +1131,14 @@ segment `openai` instead of `v1` and gets exactly one targeted exception in
 | **OpenRouter** | **free, no card** | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | `inclusionai/ling-3.1-flash` |
 | **Groq** | **free, no card** | `GROQ_API_KEY` | `api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | **Google AI Studio (Gemini)** | **free, no card** | `GEMINI_API_KEY` | `generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` |
+
+Of these defaults, only `gemini-2.5-flash` and `gpt-5.1` are recognised as
+vision-capable — that gates the real-screenshot AI critique described above
+in "The game-production quality protocol." `model_supports_vision()` in
+`agent/providers.py` matches known multimodal model-name families (`gemini`,
+`gpt-4o`/`gpt-5`, `claude-3`, `llava`, `pixtral`, `qwen*-vl`,
+`llama-4-scout`/`maverick`, and a few others) and is conservative on purpose:
+an unrecognised model name is always treated as text-only.
 
 #### Groq and Google AI Studio — two more zero-cost safety nets
 
