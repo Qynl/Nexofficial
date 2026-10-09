@@ -114,6 +114,44 @@ DEFAULT_BUDGET_S = _env_float("NEX_RUN_BUDGET_S", 1800.0)
 MAX_CONTEXT_RESOURCES = max(0, _env_int("NEX_MAX_CONTEXT_RESOURCES", 6))
 DEFAULT_APPROVAL_TIMEOUT_S = _env_float("NEX_APPROVAL_TIMEOUT_S", 600.0)
 
+# A user who explicitly agrees to a long, ambitious build (see
+# agent/prompts.py ACT_DIRECTIVE) should get a run that can actually USE that
+# time, not one that quietly hits the ordinary small step/replan ceiling
+# after a few minutes and finishes early while real wall-clock budget is
+# still sitting unused — that is the "fakes half the time" failure mode.
+# Bounded on both ends: never below a minute that could do anything useful,
+# never above a cap an operator has to explicitly raise.
+MIN_RUN_MINUTES = max(1, _env_int("NEX_MIN_RUN_MINUTES", 5))
+MAX_RUN_MINUTES = max(MIN_RUN_MINUTES, _env_int("NEX_MAX_RUN_MINUTES", 240))
+
+
+def budget_for_minutes(minutes: Optional[float]) -> Dict[str, Any]:
+    """Scale the run's time AND work budgets together for an explicit,
+    user-approved run length.
+
+    Returns {} (meaning: use the ordinary defaults, unchanged) when `minutes`
+    is missing or not a usable positive number — this is the path every
+    existing call site takes today, so nothing about default behavior moves.
+    Otherwise every budget that gates how much real work a run may attempt
+    (wall-clock time, tool-call steps, production-program replans) scales by
+    the same factor, so a longer approved run is actually allowed to do
+    proportionally more, not just wait around longer before the same small
+    ceiling cuts it off.
+    """
+    try:
+        value = float(minutes)
+    except (TypeError, ValueError):
+        return {}
+    if not (value > 0):
+        return {}
+    clamped = max(MIN_RUN_MINUTES, min(MAX_RUN_MINUTES, value))
+    factor = clamped / (DEFAULT_BUDGET_S / 60.0)
+    return {
+        "budget_s": clamped * 60.0,
+        "max_steps": max(1, round(DEFAULT_MAX_STEPS * factor)),
+        "max_program_replans": max(1, round(DEFAULT_MAX_PROGRAM_REPLANS * factor)),
+    }
+
 _MAX_REPEAT = 2          # retries for the SAME error signature
 
 

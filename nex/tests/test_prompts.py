@@ -118,6 +118,16 @@ def main() -> None:
            "the create-before-use rule actually tells the model to use "
            "depends_on to enforce the ordering, not just assert it")
 
+    # --- the chat model is told to ask before committing to a long,
+    # --- unattended run, and how to express the approved length ------------
+    expect('"minutes"' in prompts.ACT_DIRECTIVE,
+           "the act directive documents the optional minutes field")
+    expect("TIME BUDGET" in prompts.ACT_DIRECTIVE,
+           "the act directive explains when to ask about run length")
+    expect("does not already say how long" in prompts.ACT_DIRECTIVE,
+           "the model is told to ask first when duration is unstated, not "
+           "assume a long run is fine")
+
     if _FAILED:
         print("\n%d failing assertions." % len(_FAILED))
         sys.exit(1)

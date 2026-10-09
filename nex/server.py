@@ -64,7 +64,7 @@ _providers.load_env()
 from agent import prompts as _prompts
 from agent.engines import public_targets as public_engine_targets
 from agent.jsonreply import extract_json_with_key
-from agent.loop import RunCoordinator
+from agent.loop import RunCoordinator, budget_for_minutes
 from agent.production import readiness as production_readiness
 from mcp.manager import get_manager
 from mcp.policy import Policy, set_policy
@@ -394,8 +394,13 @@ def _publish_chat(cid: str, event_type: str, **payload: Any) -> None:
                  "ts": time.time(), **payload})
 
 
-def _start_run(cid: str, goal: str, say: str) -> None:
-    """The ACT path: persist the ack + a run message, then execute."""
+def _start_run(cid: str, goal: str, say: str, **run_opts: Any) -> None:
+    """The ACT path: persist the ack + a run message, then execute.
+
+    `run_opts` (e.g. budget_s/max_steps/max_program_replans, from
+    budget_for_minutes()) pass straight through to RunCoordinator.start();
+    empty by default, which is exactly today's behavior.
+    """
     if say:
         m = STORE.add_message(cid, "assistant", say)
         _publish_chat(cid, "chat.delta", message_id=m["id"], delta=say,
@@ -413,10 +418,11 @@ def _start_run(cid: str, goal: str, say: str) -> None:
     } for target in targets]
     run_message = STORE.add_message(
         cid, "assistant", goal, kind="run", meta={"run": "starting"})
-    run_id = RUNS.start(goal, conversation_id=cid)
+    run_id = RUNS.start(goal, conversation_id=cid, **run_opts)
     STORE.update_message(run_message["id"], meta={
         "run": "starting", "run_id": run_id,
         "engine_targets": compact_targets,
+        "budget_s": run_opts.get("budget_s"),
     })
 
 
@@ -475,7 +481,8 @@ def _chat_turn(cid: str, user_text: str,
             and directive["act"].strip():
         goal = directive["act"].strip()[:1000]
         say = str(directive.get("say") or "").strip()[:500]
-        _start_run(cid, goal, say or "On it — %s" % goal)
+        run_opts = budget_for_minutes(directive.get("minutes"))
+        _start_run(cid, goal, say or "On it — %s" % goal, **run_opts)
         return
 
     # Plain reply.

@@ -29,7 +29,11 @@ sys.path.insert(0, NEX)
 os.environ.setdefault("NEX_HOME", "/tmp/nex-loop-tests")
 
 from agent.mock_mcp import MockMCPServer, server_view          # noqa: E402
-from agent.loop import AgentRun, RunCoordinator                # noqa: E402
+from agent.loop import (                                       # noqa: E402
+    AgentRun, RunCoordinator, budget_for_minutes,
+    DEFAULT_BUDGET_S, DEFAULT_MAX_STEPS, DEFAULT_MAX_PROGRAM_REPLANS,
+    MIN_RUN_MINUTES, MAX_RUN_MINUTES,
+)
 from agent.model_planner import plan_to_graph                   # noqa: E402
 from agent.workload import planning_purpose                     # noqa: E402
 from mcp.registry import CapabilityRegistry                    # noqa: E402
@@ -550,6 +554,61 @@ class ReportSafetyTests(unittest.TestCase):
         blob = repr(report)
         self.assertNotIn("SECRET", blob, "raw model output must not leak "
                         "into the public report")
+
+
+class BudgetForMinutesTests(unittest.TestCase):
+    """A user who approves a longer run must get MORE allowed WORK too, not
+    just a longer clock before the same small step/replan ceiling cuts it
+    off early (the 'fakes half the time' failure mode)."""
+
+    def test_no_minutes_means_use_the_ordinary_defaults(self):
+        for garbage in (None, 0, -5, "not a number", "", [], {}):
+            self.assertEqual(budget_for_minutes(garbage), {},
+                             "garbage/missing minutes=%r must change "
+                             "nothing" % (garbage,))
+
+    def test_the_default_run_length_reproduces_todays_defaults_exactly(self):
+        # 30 minutes IS DEFAULT_BUDGET_S today; asking for exactly that
+        # must reproduce today's real defaults, not some rounded-off drift.
+        out = budget_for_minutes(DEFAULT_BUDGET_S / 60.0)
+        self.assertEqual(out["budget_s"], DEFAULT_BUDGET_S)
+        self.assertEqual(out["max_steps"], DEFAULT_MAX_STEPS)
+        self.assertEqual(out["max_program_replans"],
+                         DEFAULT_MAX_PROGRAM_REPLANS)
+
+    def test_double_the_time_doubles_the_work_budgets_too(self):
+        base = budget_for_minutes(DEFAULT_BUDGET_S / 60.0)
+        doubled = budget_for_minutes(DEFAULT_BUDGET_S / 60.0 * 2)
+        self.assertAlmostEqual(doubled["budget_s"], base["budget_s"] * 2)
+        self.assertAlmostEqual(doubled["max_steps"], base["max_steps"] * 2,
+                               delta=1)
+        self.assertAlmostEqual(doubled["max_program_replans"],
+                               base["max_program_replans"] * 2, delta=1)
+
+    def test_an_absurd_request_is_clamped_to_the_configured_ceiling(self):
+        out = budget_for_minutes(10 ** 9)
+        self.assertEqual(out["budget_s"], MAX_RUN_MINUTES * 60.0)
+
+    def test_a_tiny_request_is_clamped_to_the_configured_floor(self):
+        out = budget_for_minutes(0.001)
+        self.assertEqual(out["budget_s"], MIN_RUN_MINUTES * 60.0)
+
+    def test_a_string_number_from_json_works_like_a_real_number(self):
+        self.assertEqual(budget_for_minutes("60"), budget_for_minutes(60))
+
+    def test_a_longer_run_actually_reaches_the_server_opts(self):
+        # End-to-end through the public constructor path: the scaled values
+        # must land on the AgentRun that will actually execute, not just be
+        # computed and discarded.
+        mock = MockMCPServer("echo", ECHO_TOOLS)
+        mgr = FakeManager([mock])
+        opts = budget_for_minutes(120)
+        run = AgentRun("p-long", "echo x", mgr, llm=None, **opts)
+        self.assertEqual(run.budget_s, 120 * 60.0)
+        self.assertEqual(run.max_steps, opts["max_steps"])
+        self.assertGreater(run.max_steps, DEFAULT_MAX_STEPS,
+                           "a 4x-longer approved run must get a bigger "
+                           "step budget, not just a longer clock")
 
 
 if __name__ == "__main__":

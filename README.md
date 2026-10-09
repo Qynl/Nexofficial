@@ -493,11 +493,28 @@ save/progression data. Missing implementation, playtest, visual capture, or
 visual-review tools are hard readiness blockers. This does not stop useful work;
 it stops Nex from calling a thin editor bridge a virtual game studio.
 
-The program remains bounded: 64 tool calls, eight production stages, three
-structural replans, one final evidence/polish pass, and a 30-minute wall clock by
-default. If any stage cannot be planned or completed, the result is `partial`,
-not “GTA finished.” Those limits are configurable for an operator who really
-has the engine automation and compute to support a larger campaign.
+The program remains bounded: eight production stages, a wall clock, and
+step/replan ceilings that scale together with it. If any stage cannot be
+planned or completed, the result is `partial`, not “GTA finished.”
+
+By default a run gets 64 tool calls and a 30-minute wall clock (`NEX_MAX_STEPS`
+/ `NEX_RUN_BUDGET_S`) — enough to make real, honestly-reported progress on a
+focused ask, not enough to carry an eight-stage build end to end. A studio-scale
+program also gets its own larger replan budget (`NEX_MAX_PROGRAM_REPLANS`,
+default 16, shared across all 8 stages rather than borrowing the small
+single-plan default of 3) so one early stage needing a correction does not
+starve every later stage's chance to fix its own evidence.
+
+For a genuinely long session, Nex asks first instead of assuming: when a chat
+message asks for an ambitious, multi-hour build and has not already said how
+long you're willing to let it work, it replies in plain language asking for a
+time budget (a quick pass vs. a specific longer window, up to `NEX_MAX_RUN_MINUTES`
+— 4 hours by default). Once you answer, the wall clock **and** the step/replan
+budgets scale together for that run — approving 4x the time gets roughly 4x the
+tool-call and correction budget too, not just a longer silence before the same
+small ceiling ends it early. `NEX_MIN_RUN_MINUTES`/`NEX_MAX_RUN_MINUTES` bound
+what can be approved this way; an operator can always raise the plain defaults
+further for unattended/scripted use.
 
 ## The game-production quality protocol
 
@@ -1409,7 +1426,9 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_MAX_QUALITY_PASSES` | `1` | Maximum final evidence/polish passes after game work |
 | `NEX_MAX_PRODUCTION_STAGES` | `8` | Milestone-plan cap for studio-scale game goals |
 | `NEX_EVAL_EVERY_STEPS` | `6` | Successful MCP steps between model evaluation checkpoints; failures evaluate immediately |
-| `NEX_RUN_BUDGET_S` | `1800` | Run wall-clock budget |
+| `NEX_RUN_BUDGET_S` | `1800` | Default run wall-clock budget (used when a chat run does not name an approved run length — see below) |
+| `NEX_MIN_RUN_MINUTES` | `5` | Floor for an explicitly approved run length |
+| `NEX_MAX_RUN_MINUTES` | `240` | Ceiling for an explicitly approved run length (4 hours) |
 | `NEX_APPROVAL_TIMEOUT_S` | `600` | Approval wait budget |
 | `NEX_HOST` / `NEX_PORT` | `127.0.0.1` / `8787` | HTTP bind address. Loopback by default; any other value prints an exposure warning at startup |
 | `NEX_HOME` | `~/.nex` | Persistent state directory |

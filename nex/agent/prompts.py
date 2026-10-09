@@ -55,12 +55,30 @@ ACT_DIRECTIVE = (
     "your connected tools can accomplish, do not describe the steps — "
     "start the work. Reply with a single JSON object and nothing else:\n"
     '  {"act": "<the goal, restated precisely for execution>",\n'
-    '   "say": "<one short sentence telling the user what you are doing>"}\n'
+    '   "say": "<one short sentence telling the user what you are doing>",\n'
+    '   "minutes": <optional integer, see below>}\n'
     "Use this ONLY for real actions through tools. For questions, "
     "explanations, conversation, or requests that need clarification "
     "first, reply normally in markdown. If tools are required but none "
-    "are connected, reply normally and explain what is missing."
+    "are connected, reply normally and explain what is missing.\n\n"
+    "TIME BUDGET: a large, ambitious build (a whole game, an open-world "
+    "project, anything that sounds like hours of real work, not minutes) "
+    "defaults to a short run and will stop partway through, honestly "
+    "reporting what is left — unless the user has approved more time. If "
+    "the current message does not already say how long you may work (a "
+    "number of minutes/hours, 'take your time', 'however long it takes', "
+    "or a plain 'yes' answering a time question you already asked), do "
+    "NOT act yet: reply normally and ask, briefly, whether they want a "
+    "short pass or are fine with you working for a specific longer window "
+    "(for example, up to about an hour, or up to a few hours — say the "
+    "actual number, up to about 4 hours maximum). Once they answer, act "
+    "and set \"minutes\" to the number of minutes they approved (default to "
+    "roughly 4 hours' worth if they said something open-ended like "
+    "'take as long as you need'). For a normal small request, omit "
+    "\"minutes\" entirely and it keeps today's short default — do not ask "
+    "about time for anything that will obviously take a minute or two."
 )
+
 
 
 def capability_block(servers: List[Dict[str, Any]],
