@@ -768,6 +768,14 @@ dispatchers too (Unreal's `call_tool` wrapper), so the category checked is the
 real action being invoked, not the wrapper's own classification. Every other
 call keeps using the server's configured timeout exactly as before.
 
+An operator's own `timeout_s` can go well past that 15-minute floor, too: the
+configurable ceiling is `NEX_MAX_CALL_TIMEOUT_S` (default 14400s / 4 hours),
+matching the longest run length a chat can explicitly approve
+(`NEX_MAX_RUN_MINUTES`). A run approved to go for hours is otherwise pointless
+if a single real cook or lighting bake inside it still hits an unrelated
+1-hour wall — the per-call ceiling and the run-length ceiling now agree with
+each other by default, and both are independently operator-tunable.
+
 ### What an excellent engine MCP server should do
 
 | Contract property | Why Nex benefits |
@@ -1477,6 +1485,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_RUN_BUDGET_S` | `1800` | Default run wall-clock budget (used when a chat run does not name an approved run length — see below) |
 | `NEX_MIN_RUN_MINUTES` | `5` | Floor for an explicitly approved run length |
 | `NEX_MAX_RUN_MINUTES` | `240` | Ceiling for an explicitly approved run length (4 hours) |
+| `NEX_MAX_CALL_TIMEOUT_S` | `14400` | Ceiling on the per-server `timeout_s` an operator can configure for one MCP call (4 hours, matching `NEX_MAX_RUN_MINUTES`) — a single long BUILD/cook call must not be undercut by an unrelated, shorter wall |
 | `NEX_APPROVAL_TIMEOUT_S` | `600` | Approval wait budget |
 | `NEX_HOST` / `NEX_PORT` | `127.0.0.1` / `8787` | HTTP bind address. Loopback by default; any other value prints an exposure warning at startup |
 | `NEX_HOME` | `~/.nex` | Persistent state directory |

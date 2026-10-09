@@ -62,12 +62,30 @@ ST_ERROR = "error"
 
 # Real engine work in the BUILD category (compiling, packaging, cooking,
 # baking lighting) can legitimately run minutes, not seconds. A single flat
-# `call_timeout` per server (default 60s, operator-tunable 1s-3600s) forces
-# a choice between failing every real build outright or making ordinary
-# reads/writes wait just as long before a truly hung call is noticed. BUILD
-# calls get at least this floor; it only ever RAISES the effective timeout
-# for that one call, never lowers an operator's own larger setting.
+# `call_timeout` per server (default 60s, operator-tunable up to
+# NEX_MAX_CALL_TIMEOUT_S) forces a choice between failing every real build
+# outright or making ordinary reads/writes wait just as long before a truly
+# hung call is noticed. BUILD calls get at least this floor; it only ever
+# RAISES the effective timeout for that one call, never lowers an operator's
+# own larger setting.
 _BUILD_CALL_TIMEOUT_FLOOR_S = 900.0
+
+# Hard ceiling for an operator-configured per-server call timeout. Matches
+# agent/loop.py's own default MAX_RUN_MINUTES (4 hours) so a chat run that a
+# user has explicitly approved to run that long is never undercut by an
+# unrelated, shorter wall on a single BUILD/cook call inside it — a huge
+# project's full cook can legitimately take most of a long run's budget.
+# Independently configurable: raising a run's approved minutes does not by
+# itself raise this, and vice versa; they are different axes that happen to
+# share a sensible default.
+_MAX_CALL_TIMEOUT_S = 14400.0
+try:
+    _MAX_CALL_TIMEOUT_S = max(
+        1.0, float(os.environ.get("NEX_MAX_CALL_TIMEOUT_S", "")
+                   or _MAX_CALL_TIMEOUT_S))
+except (TypeError, ValueError):
+    pass
+
 
 # A stdio command must be ONE executable token; anything from
 # this set means someone is smuggling shell syntax where a
@@ -256,8 +274,9 @@ def validate_server_entry(entry: Any,
     if to is not None:
         try:
             v = float(to)
-            if not (1.0 <= v <= 3600.0):
-                problems.append("timeout_s must be 1..3600")
+            if not (1.0 <= v <= _MAX_CALL_TIMEOUT_S):
+                problems.append("timeout_s must be 1..%g"
+                                % _MAX_CALL_TIMEOUT_S)
         except (TypeError, ValueError):
             problems.append("timeout_s must be a number")
     return problems
@@ -602,7 +621,7 @@ class ServerManager:
         if to is not None:
             try:
                 v = float(to)
-                if 1.0 <= v <= 3600.0:
+                if 1.0 <= v <= _MAX_CALL_TIMEOUT_S:
                     up.call_timeout = v
             except (TypeError, ValueError):
                 pass

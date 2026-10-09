@@ -20,7 +20,8 @@ import mcp_echo_server as echo                        # noqa: E402
 
 os.environ["NEX_HOME"] = tempfile.mkdtemp(prefix="nex-mgr-")
 
-from mcp.manager import ServerManager                 # noqa: E402
+import mcp.manager as manager_mod                      # noqa: E402
+from mcp.manager import ServerManager, validate_server_entry  # noqa: E402
 from mcp.schema import validate_tool_output            # noqa: E402
 
 _FAILED = []
@@ -525,6 +526,66 @@ class BuildCallTimeoutTests(unittest.TestCase):
             self.assertGreaterEqual(seen["timeout"], 900.0)
         finally:
             mgr.close()
+
+
+class CallTimeoutCeilingTests(unittest.TestCase):
+    """A chat run can now be explicitly approved to run for hours (see
+    agent/loop.py budget_for_minutes); a single BUILD/cook MCP call inside
+    that run must not be undercut by an unrelated, much shorter ceiling."""
+
+    def test_default_ceiling_is_four_hours_not_one(self):
+        self.assertEqual(manager_mod._MAX_CALL_TIMEOUT_S, 14400.0,
+                         "the per-server call-timeout ceiling should match "
+                         "agent/loop.py's own 4-hour default run length, "
+                         "not an unrelated 1-hour wall")
+
+    def test_validation_accepts_a_timeout_past_the_old_one_hour_ceiling(self):
+        problems = validate_server_entry(
+            {"name": "engine", "url": "http://127.0.0.1:9999/mcp",
+             "timeout_s": 7200.0})
+        self.assertEqual(problems, [],
+                         "2 hours must validate now that a run can "
+                         "legitimately be approved to run that long: %r"
+                         % problems)
+
+    def test_validation_still_rejects_above_the_new_ceiling(self):
+        problems = validate_server_entry(
+            {"name": "engine", "url": "http://127.0.0.1:9999/mcp",
+             "timeout_s": manager_mod._MAX_CALL_TIMEOUT_S + 1})
+        self.assertTrue(any("timeout_s" in p for p in problems),
+                        "a timeout above the configured ceiling must still "
+                        "be refused, not silently accepted: %r" % problems)
+
+    def test_validation_still_rejects_zero_and_negative(self):
+        for bad in (0, -5, "not-a-number"):
+            problems = validate_server_entry(
+                {"name": "engine", "url": "http://127.0.0.1:9999/mcp",
+                 "timeout_s": bad})
+            self.assertTrue(problems,
+                            "a non-positive/invalid timeout_s must still "
+                            "be refused: %r -> %r" % (bad, problems))
+
+    def test_a_long_configured_timeout_actually_reaches_the_upstream(self):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), echo.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        mgr = ServerManager()
+        try:
+            norm, err = mgr.add({
+                "name": "engine", "trusted": True,
+                "url": "http://127.0.0.1:%d/mcp" % port,
+                "timeout_s": 7200.0})
+            self.assertEqual(err, "", err)
+            up = mgr.upstream("engine")
+            self.assertIsNotNone(up, "the server should have connected")
+            self.assertEqual(up.call_timeout, 7200.0,
+                             "a 2-hour configured timeout, now inside the "
+                             "raised ceiling, must actually reach the "
+                             "Upstream that makes the real call")
+        finally:
+            mgr.close()
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":
