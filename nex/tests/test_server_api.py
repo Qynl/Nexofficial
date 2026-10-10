@@ -550,6 +550,79 @@ class APITests(unittest.TestCase):
               "prior roblox project model reached RunCoordinator.start: %r"
               % captured)
 
+    def test_run_summary_persists_a_checkpoint(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        self.assertEqual(server_mod.STORE.list_checkpoints(cid), [])
+
+        class FakeRun:
+            conversation_id = cid
+            run_id = "run-fake-checkpoint-test"
+
+        report = {"status": "completed",
+                 "checkpoint": {"run_id": "run-fake-checkpoint-test",
+                               "run_no": 1, "mutations": 2,
+                               "reversible": 1, "steps": []}}
+        server_mod._on_run_summary(FakeRun(), "done", report)
+        checkpoints = server_mod.STORE.list_checkpoints(cid)
+        expect(len(checkpoints) == 1 and checkpoints[0]["mutations"] == 2,
+              "checkpoint persisted after a run: %r" % checkpoints)
+
+    def test_checkpoints_endpoint_lists_compact_summaries(self):
+        s, c = self.req("POST", "/api/conversations")
+        cid = c["conversation"]["id"]
+        server_mod.STORE.save_checkpoint(cid, 1, {
+            "run_id": "r1", "run_no": 1, "mutations": 3, "reversible": 2,
+            "irreversible": 1, "coverage_pct": 67,
+            "steps": [{"tool": "destroy_actor"}]})
+        s, body = self.req("GET", "/api/conversations/%s/checkpoints" % cid)
+        expect(s == 200, "checkpoints endpoint: %s" % s)
+        expect(len(body["checkpoints"]) == 1, "one checkpoint listed")
+        expect("steps" not in body["checkpoints"][0],
+              "checkpoint list view must not expose raw steps")
+        expect(body["checkpoints"][0]["run_no"] == 1, "run_no present")
+
+    def test_checkpoints_endpoint_unknown_conversation_404s(self):
+        s, _ = self.req("GET", "/api/conversations/no-such-id/checkpoints")
+        expect(s == 404, "unknown conversation checkpoints: %s" % s)
+
+    def test_rollback_plan_endpoint_combines_checkpoints(self):
+        s, c = self.req("POST", "/api/conversations")
+        cid = c["conversation"]["id"]
+        server_mod.STORE.save_checkpoint(cid, 1, {
+            "run_id": "r1", "run_no": 1, "mutations": 1, "reversible": 1,
+            "irreversible": 0, "coverage_pct": 100,
+            "steps": [{"tool": "destroy_a"}], "blocked": []})
+        server_mod.STORE.save_checkpoint(cid, 2, {
+            "run_id": "r2", "run_no": 2, "mutations": 1, "reversible": 1,
+            "irreversible": 0, "coverage_pct": 100,
+            "steps": [{"tool": "destroy_b"}], "blocked": []})
+        s, body = self.req(
+            "POST", "/api/conversations/%s/checkpoints/rollback-plan" % cid,
+            body={})
+        expect(s == 200, "rollback plan endpoint: %s" % s)
+        plan = body["rollback_plan"]
+        expect(plan["runs_included"] == [2, 1], "newest run first: %r"
+              % plan["runs_included"])
+        expect([step["tool"] for step in plan["steps"]]
+              == ["destroy_b", "destroy_a"], "steps in LIFO order: %r"
+              % plan["steps"])
+
+    def test_rollback_plan_endpoint_honors_since_run_no(self):
+        s, c = self.req("POST", "/api/conversations")
+        cid = c["conversation"]["id"]
+        server_mod.STORE.save_checkpoint(cid, 1, {
+            "run_id": "r1", "run_no": 1, "mutations": 1, "reversible": 1,
+            "irreversible": 0, "coverage_pct": 100, "steps": [], "blocked": []})
+        server_mod.STORE.save_checkpoint(cid, 2, {
+            "run_id": "r2", "run_no": 2, "mutations": 1, "reversible": 1,
+            "irreversible": 0, "coverage_pct": 100, "steps": [], "blocked": []})
+        s, body = self.req(
+            "POST", "/api/conversations/%s/checkpoints/rollback-plan" % cid,
+            body={"since_run_no": 1})
+        expect(body["rollback_plan"]["runs_included"] == [2],
+              "since_run_no excludes the older checkpoint: %r"
+              % body["rollback_plan"]["runs_included"])
+
     def test_run_resolve_unknown(self):
         s, _ = self.req("POST", "/api/runs/run-void/resolve",
                         body={"approved": True})

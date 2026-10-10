@@ -62,6 +62,7 @@ from agent import providers as _providers
 _providers.load_env()
 
 from agent import prompts as _prompts
+from agent.checkpoints import checkpoint_summary, combine_rollback_plan
 from agent.engines import public_targets as public_engine_targets
 from agent.jsonreply import extract_json_with_key
 from agent.loop import RunCoordinator, budget_for_minutes
@@ -418,6 +419,12 @@ def _on_run_summary(run: Any, text: str, report: Dict[str, Any]) -> None:
     if isinstance(roblox_asset_model, dict) and roblox_asset_model:
         try:
             STORE.save_roblox_asset_model(cid, roblox_asset_model)
+        except Exception:  # noqa: BLE001 - advisory, never blocking
+            pass
+    checkpoint = report.get("checkpoint")
+    if isinstance(checkpoint, dict) and checkpoint.get("run_no") is not None:
+        try:
+            STORE.save_checkpoint(cid, checkpoint["run_no"], checkpoint)
         except Exception:  # noqa: BLE001 - advisory, never blocking
             pass
 
@@ -865,6 +872,11 @@ class NexHandler(BaseHTTPRequestHandler):
                 cid = path.split("/")[3]
                 self._handle_regenerate(cid)
                 return
+            if (path.startswith("/api/conversations/")
+                    and path.endswith("/checkpoints/rollback-plan")):
+                cid = path.split("/")[3]
+                self._handle_rollback_plan(cid)
+                return
             if path.startswith("/api/runs/"):
                 self._handle_run_action(path)
                 return
@@ -944,6 +956,16 @@ class NexHandler(BaseHTTPRequestHandler):
                 "conversation": conv,
                 "messages": STORE.get_messages(cid),
             })
+            return
+        if len(parts) >= 4 and parts[3] == "checkpoints":
+            conv = STORE.get_conversation(cid)
+            if conv is None:
+                self._send_json(404, error_payload(ERR_USER,
+                                                   "no such conversation"))
+                return
+            checkpoints = STORE.list_checkpoints(cid)
+            self._send_json(200, {"checkpoints":
+                                  [checkpoint_summary(c) for c in checkpoints]})
             return
         conv = STORE.get_conversation(cid)
         if conv is None:
@@ -1047,6 +1069,28 @@ class NexHandler(BaseHTTPRequestHandler):
         threading.Thread(target=_worker, daemon=True,
                           name="nex-chat-r").start()
         self._send_json(200, {"ok": True})
+
+    def _handle_rollback_plan(self, cid: str) -> None:
+        """Compute (never execute) a compensating plan spanning every
+        checkpoint after `since_run_no` — see agent/checkpoints.py. This
+        is advisory only: every step still has to go through a real run's
+        manager.call with full policy/approval/audit, same as any other
+        mutating action."""
+        conv = STORE.get_conversation(cid)
+        if conv is None:
+            self._send_json(404, error_payload(ERR_USER,
+                                               "no such conversation"))
+            return
+        body = self._read_json_body()
+        since_run_no = body.get("since_run_no")
+        try:
+            since_run_no = int(since_run_no) if since_run_no is not None \
+                else None
+        except (TypeError, ValueError):
+            since_run_no = None
+        checkpoints = STORE.list_checkpoints(cid)
+        plan = combine_rollback_plan(checkpoints, since_run_no=since_run_no)
+        self._send_json(200, {"rollback_plan": plan})
 
     def _handle_run_action(self, path: str) -> None:
         parts = path.strip("/").split("/")

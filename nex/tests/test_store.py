@@ -255,6 +255,38 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(self.s.delete_conversation(c["id"]))
         self.assertIsNone(self.s.get_roblox_asset_model(c["id"]))
 
+    def test_checkpoints_accumulate_per_run_and_list_newest_first(self):
+        c = self.s.create_conversation()
+        self.assertEqual(self.s.list_checkpoints(c["id"]), [])
+        self.s.save_checkpoint(c["id"], 1, {"run_no": 1, "mutations": 1})
+        self.s.save_checkpoint(c["id"], 2, {"run_no": 2, "mutations": 2})
+        checkpoints = self.s.list_checkpoints(c["id"])
+        self.assertEqual([cp["run_no"] for cp in checkpoints], [2, 1])
+
+    def test_saving_the_same_run_no_upserts_not_duplicates(self):
+        c = self.s.create_conversation()
+        self.s.save_checkpoint(c["id"], 1, {"run_no": 1, "mutations": 1})
+        self.s.save_checkpoint(c["id"], 1, {"run_no": 1, "mutations": 5})
+        checkpoints = self.s.list_checkpoints(c["id"])
+        self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(checkpoints[0]["mutations"], 5)
+
+    def test_checkpoints_are_deleted_with_their_conversation(self):
+        c = self.s.create_conversation()
+        self.s.save_checkpoint(c["id"], 1, {"run_no": 1})
+        self.assertTrue(self.s.delete_conversation(c["id"]))
+        self.assertEqual(self.s.list_checkpoints(c["id"]), [])
+
+    def test_checkpoints_are_bounded_per_conversation(self):
+        c = self.s.create_conversation()
+        cap = store.Store.MAX_CHECKPOINTS_PER_CONVERSATION
+        for i in range(cap + 10):
+            self.s.save_checkpoint(c["id"], i, {"run_no": i})
+        checkpoints = self.s.list_checkpoints(c["id"], limit=cap + 20)
+        self.assertLessEqual(len(checkpoints), cap)
+        # The most recent ones must survive the cap, not the oldest.
+        self.assertIn(cap + 9, [cp["run_no"] for cp in checkpoints])
+
     def test_search_finds_content(self):
         c = self.s.create_conversation()
         self.s.add_message(c["id"], "user",

@@ -33,6 +33,27 @@ MAX_LIST = 20
 MAX_RISKS = 8
 MAX_PERF_NOTES = 10
 
+# Confidence states for every fact this module tracks (point 13 of the
+# production brief). These are never a model's self-report — each one is
+# derived purely from WHEN and HOW a fact was last touched by real
+# evidence (merge_from_run's own bookkeeping), the same ground-truth
+# discipline as every other agent/* module in this codebase:
+#
+#   CONFIRMED   re-affirmed by real evidence IN THIS RUN
+#   INFERRED    believed true from a heuristic correlation, never a
+#               direct re-test of the original claim (e.g. "resolved"
+#               bugs: the failing tool later succeeded elsewhere, which
+#               is suggestive, not a replay of the exact failure)
+#   UNVERIFIED  carried forward with NO new evidence either way this run
+#   STALE       unconfirmed for STALE_AFTER_RUNS or more consecutive
+#               runs — old enough that the live project should be
+#               re-checked before this fact is trusted again
+MEMORY_CONFIRMED = "CONFIRMED"
+MEMORY_INFERRED = "INFERRED"
+MEMORY_UNVERIFIED = "UNVERIFIED"
+MEMORY_STALE = "STALE"
+STALE_AFTER_RUNS = 3
+
 
 def empty_memory(conversation_id: str = "") -> Dict[str, Any]:
     return {
@@ -41,6 +62,7 @@ def empty_memory(conversation_id: str = "") -> Dict[str, Any]:
         "updated_at": 0.0,
         "milestones_done": [],
         "milestones_open": [],
+        "milestone_confidence": {},
         "known_bugs": [],
         "resolved_bugs": [],
         "visual_issues_open": [],
@@ -50,6 +72,13 @@ def empty_memory(conversation_id: str = "") -> Dict[str, Any]:
         "tool_success_counts": {},
         "tool_failure_counts": {},
     }
+
+
+def _confidence_for_age(last_confirmed_run: int, run_no: int) -> str:
+    """UNVERIFIED while recent, STALE once it has gone STALE_AFTER_RUNS or
+    more runs without being re-touched by real evidence."""
+    age = run_no - int(last_confirmed_run or 0)
+    return MEMORY_STALE if age >= STALE_AFTER_RUNS else MEMORY_UNVERIFIED
 
 
 def _dedup_tail(items: Sequence[str], limit: int) -> List[str]:
@@ -93,6 +122,21 @@ def merge_from_run(previous: Optional[Dict[str, Any]], *,
         max_list)
     open_ = [m for m in open_raw if m not in done]
 
+    prev_milestone_confidence = dict(prev.get("milestone_confidence", {}))
+    milestone_confidence: Dict[str, Dict[str, Any]] = {}
+    reaffirmed_this_run = set(milestones_done)
+    for name in done:
+        prior_entry = prev_milestone_confidence.get(name, {})
+        if name in reaffirmed_this_run:
+            milestone_confidence[name] = {
+                "state": MEMORY_CONFIRMED, "last_confirmed_run": run_no}
+        else:
+            last_confirmed = int(prior_entry.get("last_confirmed_run")
+                                 or run_no - 1)
+            milestone_confidence[name] = {
+                "state": _confidence_for_age(last_confirmed, run_no),
+                "last_confirmed_run": last_confirmed}
+
     prev_bugs = {b["key"]: b for b in prev.get("known_bugs", [])
                 if isinstance(b, dict) and b.get("key")}
     current_keys = set()
@@ -116,6 +160,8 @@ def merge_from_run(previous: Optional[Dict[str, Any]], *,
             entry = {"key": key, "tool": tool, "failure_kind": kind,
                      "summary": summary, "first_seen_run": run_no,
                      "last_seen_run": run_no, "occurrences": 1}
+        # Failed again THIS run: real, fresh evidence it is still broken.
+        entry["confidence"] = MEMORY_CONFIRMED
         still_open.append(entry)
 
     succeeded_tools = {str(o.get("tool")) for o in tool_outcomes
@@ -127,11 +173,20 @@ def merge_from_run(previous: Optional[Dict[str, Any]], *,
         if bug.get("tool") in succeeded_tools:
             resolved_entry = dict(bug)
             resolved_entry["resolved_at_run"] = run_no
+            # Always INFERRED, never CONFIRMED: the tool succeeding
+            # elsewhere is a heuristic correlation, not a replay of the
+            # exact original failure — see the module docstring.
+            resolved_entry["confidence"] = MEMORY_INFERRED
             resolved.append(resolved_entry)
         else:
-            # Neither re-failed nor re-proven this run; carry forward as
-            # still-open rather than silently dropping known evidence.
-            still_open.append(bug)
+            # Neither re-failed nor re-proven this run; carry forward with
+            # NO new evidence either way — UNVERIFIED, decaying to STALE
+            # the longer it goes untouched, never silently re-stamped
+            # CONFIRMED just because it survived another run.
+            entry = dict(bug)
+            entry["confidence"] = _confidence_for_age(
+                bug.get("last_seen_run", run_no - 1), run_no)
+            still_open.append(entry)
 
     known_bugs = still_open[-max_list:]
     resolved_bugs = resolved[-max_list:]
@@ -176,6 +231,7 @@ def merge_from_run(previous: Optional[Dict[str, Any]], *,
         "updated_at": time.time(),
         "milestones_done": done,
         "milestones_open": open_,
+        "milestone_confidence": milestone_confidence,
         "known_bugs": known_bugs,
         "resolved_bugs": resolved_bugs,
         "visual_issues_open": visual_open,
@@ -204,8 +260,14 @@ def to_prompt_block(memory: Optional[Dict[str, Any]], limit: int = 5,
     ]
     done = memory.get("milestones_done") or []
     if done:
+        confidence = memory.get("milestone_confidence") or {}
+        labeled = [
+            (m + " (STALE — recheck before relying on this)")
+            if confidence.get(m, {}).get("state") == MEMORY_STALE else m
+            for m in done[-limit:]
+        ]
         lines.append("Milestones previously completed: " +
-                     ", ".join(done[-limit:]))
+                     ", ".join(labeled))
     open_ = memory.get("milestones_open") or []
     if open_:
         lines.append("Milestones still open: " + ", ".join(open_[:limit]))

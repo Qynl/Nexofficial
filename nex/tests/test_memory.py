@@ -15,7 +15,10 @@ NEX = os.path.dirname(HERE)
 sys.path.insert(0, NEX)
 os.environ.setdefault("NEX_HOME", "/tmp/nex-memory-tests")
 
-from agent.memory import empty_memory, merge_from_run, to_prompt_block  # noqa: E402
+from agent.memory import (                                          # noqa: E402
+    MEMORY_CONFIRMED, MEMORY_INFERRED, MEMORY_STALE, MEMORY_UNVERIFIED,
+    STALE_AFTER_RUNS, empty_memory, merge_from_run, to_prompt_block,
+)
 
 
 class EmptyAndFirstRunTests(unittest.TestCase):
@@ -205,6 +208,78 @@ class LoopIntegrationTests(unittest.TestCase):
         self.assertEqual(mem2["runs_recorded"], 2)
         self.assertEqual(mem2["known_bugs"][0]["occurrences"], 2)
         self.assertTrue(any("build_project" in r for r in mem2["risks"]))
+
+
+class ConfidenceStateTests(unittest.TestCase):
+    """Point 13: every fact carries CONFIRMED/INFERRED/UNVERIFIED/STALE,
+    derived purely from when real evidence last touched it — never from
+    an LLM's self-report."""
+
+    def test_a_milestone_reaffirmed_this_run_is_confirmed(self):
+        mem = merge_from_run(None, conversation_id="c1",
+                             milestones_done=["discovery"])
+        self.assertEqual(
+            mem["milestone_confidence"]["discovery"]["state"],
+            MEMORY_CONFIRMED)
+
+    def test_a_milestone_not_mentioned_again_is_unverified_not_confirmed(
+            self):
+        mem = merge_from_run(None, conversation_id="c1",
+                             milestones_done=["discovery"])
+        mem2 = merge_from_run(mem, conversation_id="c1", milestones_done=[])
+        self.assertEqual(
+            mem2["milestone_confidence"]["discovery"]["state"],
+            MEMORY_UNVERIFIED)
+
+    def test_a_milestone_untouched_for_enough_runs_goes_stale(self):
+        mem = merge_from_run(None, conversation_id="c1",
+                             milestones_done=["discovery"])
+        for _ in range(STALE_AFTER_RUNS + 1):
+            mem = merge_from_run(mem, conversation_id="c1",
+                                 milestones_done=[])
+        self.assertEqual(
+            mem["milestone_confidence"]["discovery"]["state"], MEMORY_STALE)
+
+    def test_a_bug_failing_again_this_run_is_confirmed(self):
+        mem = merge_from_run(
+            None, conversation_id="c1",
+            failed=[{"tool": "compile_blueprint", "error": "x",
+                    "failure_kind": "compilation"}],
+            tool_outcomes=[{"tool": "compile_blueprint", "ok": False}])
+        self.assertEqual(mem["known_bugs"][0]["confidence"], MEMORY_CONFIRMED)
+
+    def test_a_bug_silently_carried_forward_is_unverified_not_confirmed(
+            self):
+        mem = merge_from_run(
+            None, conversation_id="c1",
+            failed=[{"tool": "compile_blueprint", "error": "x",
+                    "failure_kind": "compilation"}],
+            tool_outcomes=[{"tool": "compile_blueprint", "ok": False}])
+        mem2 = merge_from_run(mem, conversation_id="c1", failed=[],
+                              tool_outcomes=[])
+        self.assertEqual(mem2["known_bugs"][0]["confidence"],
+                         MEMORY_UNVERIFIED)
+
+    def test_a_stale_milestone_is_flagged_in_the_rendered_prompt_block(self):
+        mem = merge_from_run(None, conversation_id="c1",
+                             milestones_done=["discovery"])
+        for _ in range(STALE_AFTER_RUNS + 1):
+            mem = merge_from_run(mem, conversation_id="c1",
+                                 milestones_done=[])
+        block = to_prompt_block(mem)
+        self.assertIn("discovery (STALE", block)
+
+    def test_a_resolved_bug_is_always_inferred_never_confirmed(self):
+        mem = merge_from_run(
+            None, conversation_id="c1",
+            failed=[{"tool": "package_project", "error": "x",
+                    "failure_kind": "compilation"}],
+            tool_outcomes=[{"tool": "package_project", "ok": False}])
+        mem2 = merge_from_run(
+            mem, conversation_id="c1", failed=[],
+            tool_outcomes=[{"tool": "package_project", "ok": True}])
+        self.assertEqual(mem2["resolved_bugs"][0]["confidence"],
+                         MEMORY_INFERRED)
 
 
 if __name__ == "__main__":

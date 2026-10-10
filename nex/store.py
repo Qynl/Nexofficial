@@ -134,6 +134,15 @@ CREATE TABLE IF NOT EXISTS roblox_asset_model (
     data TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS checkpoints (
+    conversation_id TEXT NOT NULL,
+    run_no INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (conversation_id, run_no)
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_conv
+    ON checkpoints(conversation_id, run_no);
 """
 
 
@@ -230,6 +239,8 @@ class Store:
             self._db.execute(
                 "DELETE FROM roblox_asset_model WHERE conversation_id = ?",
                 (cid,))
+            self._db.execute(
+                "DELETE FROM checkpoints WHERE conversation_id = ?", (cid,))
             cur = self._db.execute("DELETE FROM conversations WHERE id = ?",
                                    (cid,))
             self._db.commit()
@@ -403,6 +414,55 @@ class Store:
                 "DO UPDATE SET data = excluded.data, "
                 "updated_at = excluded.updated_at", (cid, payload, now))
             self._db.commit()
+
+    # ----- checkpoints (agent/checkpoints.py — cross-run rollback points) --
+
+    MAX_CHECKPOINTS_PER_CONVERSATION = 50
+
+    def save_checkpoint(self, cid: str, run_no: int,
+                        checkpoint: Dict[str, Any]) -> None:
+        """Upsert one run's checkpoint (agent/checkpoints.make_checkpoint
+        output), then prune this conversation down to the most recent
+        MAX_CHECKPOINTS_PER_CONVERSATION so a very long conversation's
+        checkpoint history cannot grow without bound."""
+        if not cid or not isinstance(checkpoint, dict):
+            return
+        payload = json.dumps(checkpoint, ensure_ascii=False)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO checkpoints (conversation_id, run_no, data, "
+                "created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(conversation_id, run_no) "
+                "DO UPDATE SET data = excluded.data, "
+                "created_at = excluded.created_at", (cid, run_no, payload, now))
+            stale = [r[0] for r in self._db.execute(
+                "SELECT run_no FROM checkpoints WHERE conversation_id = ? "
+                "ORDER BY run_no DESC", (cid,)).fetchall()
+                [self.MAX_CHECKPOINTS_PER_CONVERSATION:]]
+            if stale:
+                self._db.executemany(
+                    "DELETE FROM checkpoints WHERE conversation_id = ? "
+                    "AND run_no = ?", [(cid, r) for r in stale])
+            self._db.commit()
+
+    def list_checkpoints(self, cid: str, limit: int = 50
+                         ) -> List[Dict[str, Any]]:
+        """Every persisted checkpoint for this conversation, most recent
+        run first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT data FROM checkpoints WHERE conversation_id = ? "
+                "ORDER BY run_no DESC LIMIT ?", (cid, limit)).fetchall()
+        out: List[Dict[str, Any]] = []
+        for (raw,) in rows:
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(data, dict):
+                out.append(data)
+        return out
 
     def get_conversation(self, cid: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -581,6 +641,9 @@ class Store:
                     "DELETE FROM roblox_asset_model "
                     "WHERE conversation_id = ?", (old_cid,))
                 self._db.execute(
+                    "DELETE FROM checkpoints WHERE conversation_id = ?",
+                    (old_cid,))
+                self._db.execute(
                     "DELETE FROM conversations WHERE id = ?", (old_cid,))
                 removed += 1
         if self.max_conversations:
@@ -615,6 +678,9 @@ class Store:
                     self._db.execute(
                         "DELETE FROM roblox_asset_model "
                         "WHERE conversation_id = ?", (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM checkpoints WHERE conversation_id = ?",
+                        (old_cid,))
                     self._db.execute(
                         "DELETE FROM conversations WHERE id = ?", (old_cid,))
                     removed += 1
@@ -780,7 +846,8 @@ class Store:
                 "DELETE FROM project_memory; DELETE FROM regression_state; "
                 "DELETE FROM project_graph; "
                 "DELETE FROM roblox_project_model; "
-                "DELETE FROM roblox_asset_model;")
+                "DELETE FROM roblox_asset_model; "
+                "DELETE FROM checkpoints;")
             self._db.commit()
             self._reclaim_space_locked()
 

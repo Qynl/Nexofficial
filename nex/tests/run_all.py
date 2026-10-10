@@ -30,6 +30,7 @@ SUITES = [
     "test_visual.py",         # iterative visual-defect tracking + feedback
     "test_failures.py",       # failure-taxonomy classification
     "test_memory.py",         # cross-run structured project memory
+    "test_checkpoints.py",    # cross-run persisted rollback points
     "test_regression.py",     # system -> dependent-systems regression risk
     "test_project_graph.py",  # identifier co-occurrence dependency graph
     "test_playtest.py",       # canonical scripted gameplay-loop evidence

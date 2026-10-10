@@ -92,6 +92,7 @@ from roblox.playtest import playtest_review as roblox_playtest_review
 from roblox.multiplayer import multiplayer_review as roblox_multiplayer_review
 from roblox.persistence import persistence_review as roblox_persistence_review
 from roblox.verification import roblox_verify_systems
+from agent.checkpoints import make_checkpoint
 from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING,
 )
@@ -1685,6 +1686,8 @@ class AgentRun:
             self._project_graph_in, tasks, run_no)
         roblox_report, roblox_project_model, roblox_asset_model = (
             self._roblox_report(tasks, run_no))
+        reversal_plan = self._reversal_plan()
+        checkpoint = make_checkpoint(reversal_plan, self.run_id, run_no)
         return {
             "status": status,
             "goal": self.goal,
@@ -1704,7 +1707,8 @@ class AgentRun:
             "visual_critiques": list(self.visual_critiques),
             "visual_issues": visual_issues,
             "mcp_production_review": plan_meta.get("production_review") or {},
-            "reversal": self._reversal_plan(),
+            "reversal": reversal_plan,
+            "checkpoint": checkpoint,
             "engine_targets": list(self._engine_targets),
             "production_program": program,
             "project_memory": project_memory,
