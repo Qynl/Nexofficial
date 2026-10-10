@@ -70,8 +70,8 @@ from agent.failures import classify_failure, label as failure_label
 from agent.memory import merge_from_run, to_prompt_block as memory_prompt_block
 from agent.priority import bottleneck_note
 from agent.regression import (
-    cross_run_risk, merge_regression_state, regression_brief,
-    regression_review,
+    cross_run_risk, merge_regression_state, mutated_systems,
+    regression_brief, regression_review,
 )
 from agent.project_graph import merge_project_graph, to_public as graph_to_public
 from agent.playtest import playtest_review
@@ -92,7 +92,9 @@ from roblox.playtest import playtest_review as roblox_playtest_review
 from roblox.multiplayer import multiplayer_review as roblox_multiplayer_review
 from roblox.persistence import persistence_review as roblox_persistence_review
 from roblox.verification import roblox_verify_systems
+from roblox.test_generation import generate_test_plan as roblox_test_plan
 from agent.checkpoints import make_checkpoint
+from agent.visual_evidence import before_after_coverage
 from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING,
 )
@@ -1706,6 +1708,8 @@ class AgentRun:
             "quality": quality,
             "visual_critiques": list(self.visual_critiques),
             "visual_issues": visual_issues,
+            "visual_evidence_coverage": before_after_coverage(
+                tasks, self.manager.registry()),
             "mcp_production_review": plan_meta.get("production_review") or {},
             "reversal": reversal_plan,
             "checkpoint": checkpoint,
@@ -1764,6 +1768,7 @@ class AgentRun:
             "remote_contracts": contracts,
             "playtest": roblox_playtest_review(tasks, registry),
             "multiplayer": roblox_multiplayer_review(tasks, registry),
+            "test_plan": roblox_test_plan(mutated_systems(tasks).keys()),
             "persistence": roblox_persistence_review(tasks, registry),
             "verification": roblox_verify_systems(
                 tasks, registry,

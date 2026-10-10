@@ -49,6 +49,7 @@ class RobloxDetectionGatingTests(unittest.TestCase):
                       report["roblox_project_model"]["nodes"])
         self.assertTrue(any(c["name"] == "PurchaseItem"
                            for c in report["roblox"]["remote_contracts"]))
+        self.assertIn("networking", report["roblox"]["test_plan"]["systems"])
 
     def test_a_non_roblox_project_gets_an_honestly_inactive_report(self):
         server = MockMCPServer("unreal_editor", [tool("spawn_actor")])
