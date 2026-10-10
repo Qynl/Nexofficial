@@ -404,6 +404,22 @@ def _on_run_summary(run: Any, text: str, report: Dict[str, Any]) -> None:
             STORE.save_project_graph(cid, project_graph)
         except Exception:  # noqa: BLE001 - advisory, never blocking
             pass
+    # roblox_project_model/roblox_asset_model are None (not an empty dict)
+    # on a non-Roblox run — see agent/loop.py's _roblox_report() — so a
+    # run about something else in the same conversation never overwrites
+    # a real prior Roblox project's persisted state with "nothing".
+    roblox_project_model = report.get("roblox_project_model")
+    if isinstance(roblox_project_model, dict) and roblox_project_model:
+        try:
+            STORE.save_roblox_project_model(cid, roblox_project_model)
+        except Exception:  # noqa: BLE001 - advisory, never blocking
+            pass
+    roblox_asset_model = report.get("roblox_asset_model")
+    if isinstance(roblox_asset_model, dict) and roblox_asset_model:
+        try:
+            STORE.save_roblox_asset_model(cid, roblox_asset_model)
+        except Exception:  # noqa: BLE001 - advisory, never blocking
+            pass
 
 
 RUNS = RunCoordinator(MANAGER, _agent_llm, bus=BUS.publish,
@@ -451,10 +467,21 @@ def _start_run(cid: str, goal: str, say: str, **run_opts: Any) -> None:
         prior_project_graph = STORE.get_project_graph(cid)
     except Exception:  # noqa: BLE001 - advisory, never blocking
         prior_project_graph = None
+    try:
+        prior_roblox_project_model = STORE.get_roblox_project_model(cid)
+    except Exception:  # noqa: BLE001 - advisory, never blocking
+        prior_roblox_project_model = None
+    try:
+        prior_roblox_asset_model = STORE.get_roblox_asset_model(cid)
+    except Exception:  # noqa: BLE001 - advisory, never blocking
+        prior_roblox_asset_model = None
     run_id = RUNS.start(goal, conversation_id=cid,
                         project_memory=prior_memory,
                         regression_state=prior_regression_state,
-                        project_graph=prior_project_graph, **run_opts)
+                        project_graph=prior_project_graph,
+                        roblox_project_model=prior_roblox_project_model,
+                        roblox_asset_model=prior_roblox_asset_model,
+                        **run_opts)
     STORE.update_message(run_message["id"], meta={
         "run": "starting", "run_id": run_id,
         "engine_targets": compact_targets,

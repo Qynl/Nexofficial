@@ -216,6 +216,45 @@ class StoreTests(unittest.TestCase):
             reopened.close()
             self.s = store.Store(self.db)   # tearDown() will close this
 
+    def test_roblox_project_model_round_trips_and_is_deleted_with_its_conversation(
+            self):
+        c = self.s.create_conversation()
+        self.assertIsNone(self.s.get_roblox_project_model(c["id"]))
+        self.s.save_roblox_project_model(c["id"], {"nodes": {
+            "ReplicatedStorage.PurchaseItem": {"kind": "remote"}},
+            "children": {}})
+        got = self.s.get_roblox_project_model(c["id"])
+        self.assertEqual(
+            got["nodes"]["ReplicatedStorage.PurchaseItem"]["kind"], "remote")
+        self.assertTrue(self.s.delete_conversation(c["id"]))
+        self.assertIsNone(self.s.get_roblox_project_model(c["id"]))
+
+    def test_roblox_project_model_survives_reopen(self):
+        c = self.s.create_conversation()
+        self.s.save_roblox_project_model(
+            c["id"], {"nodes": {"Workspace.Rock": {"kind": "instance"}},
+                     "children": {}})
+        self.s.close()
+        reopened = store.Store(self.db)
+        try:
+            got = reopened.get_roblox_project_model(c["id"])
+            self.assertEqual(got["nodes"]["Workspace.Rock"]["kind"],
+                             "instance")
+        finally:
+            reopened.close()
+            self.s = store.Store(self.db)   # tearDown() will close this
+
+    def test_roblox_asset_model_round_trips_and_is_deleted_with_its_conversation(
+            self):
+        c = self.s.create_conversation()
+        self.assertIsNone(self.s.get_roblox_asset_model(c["id"]))
+        self.s.save_roblox_asset_model(
+            c["id"], {"assets": {"111": {"kind": "mesh"}}})
+        got = self.s.get_roblox_asset_model(c["id"])
+        self.assertEqual(got["assets"]["111"]["kind"], "mesh")
+        self.assertTrue(self.s.delete_conversation(c["id"]))
+        self.assertIsNone(self.s.get_roblox_asset_model(c["id"]))
+
     def test_search_finds_content(self):
         c = self.s.create_conversation()
         self.s.add_message(c["id"], "user",

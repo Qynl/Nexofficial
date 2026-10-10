@@ -489,6 +489,67 @@ class APITests(unittest.TestCase):
               "prior project graph reached RunCoordinator.start: %r"
               % captured)
 
+    def test_run_summary_persists_roblox_project_model(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        self.assertIsNone(server_mod.STORE.get_roblox_project_model(cid))
+
+        class FakeRun:
+            conversation_id = cid
+            run_id = "run-fake-roblox-model-test"
+
+        report = {"status": "completed",
+                 "roblox_project_model": {"nodes": {
+                     "ReplicatedStorage.PurchaseItem": {"kind": "remote"}},
+                     "children": {}}}
+        server_mod._on_run_summary(FakeRun(), "done", report)
+        model = server_mod.STORE.get_roblox_project_model(cid)
+        expect(model is not None
+              and model["nodes"]["ReplicatedStorage.PurchaseItem"]["kind"]
+              == "remote",
+              "roblox project model persisted after a run: %r" % model)
+
+    def test_a_non_roblox_run_never_overwrites_a_prior_roblox_model(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        server_mod.STORE.save_roblox_project_model(
+            cid, {"nodes": {"Workspace.Rock": {"kind": "instance"}},
+                 "children": {}})
+
+        class FakeRun:
+            conversation_id = cid
+            run_id = "run-fake-non-roblox-test"
+
+        # roblox_project_model is None (not computed), exactly what
+        # agent/loop.py's _roblox_report() returns for a non-Roblox run.
+        report = {"status": "completed", "roblox_project_model": None}
+        server_mod._on_run_summary(FakeRun(), "done", report)
+        model = server_mod.STORE.get_roblox_project_model(cid)
+        expect(model is not None and "Workspace.Rock" in model["nodes"],
+              "a non-Roblox run must not erase prior Roblox state: %r"
+              % model)
+
+    def test_start_run_loads_prior_roblox_project_model_for_the_new_run(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        server_mod.STORE.save_roblox_project_model(
+            cid, {"nodes": {"Workspace.Rock": {"kind": "instance"}},
+                 "children": {}})
+        captured = {}
+        real_start = server_mod.RUNS.start
+
+        def fake_start(goal, conversation_id=None, **opts):
+            captured["roblox_project_model"] = opts.get(
+                "roblox_project_model")
+            return "run-not-really-started"
+
+        server_mod.RUNS.start = fake_start
+        try:
+            server_mod._start_run(cid, "a test goal", "")
+        finally:
+            server_mod.RUNS.start = real_start
+        expect("Workspace.Rock" in
+              (captured.get("roblox_project_model") or {}).get("nodes", {}),
+              "prior roblox project model reached RunCoordinator.start: %r"
+              % captured)
+
     def test_run_resolve_unknown(self):
         s, _ = self.req("POST", "/api/runs/run-void/resolve",
                         body={"approved": True})

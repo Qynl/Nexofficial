@@ -78,6 +78,20 @@ from agent.playtest import playtest_review
 from agent.verification import verify_systems
 from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
+from roblox.capabilities import capability_report as roblox_capability_report
+from roblox.project_model import (
+    merge_project_model as roblox_merge_project_model,
+    to_public as roblox_model_to_public,
+)
+from roblox.assets import (
+    merge_asset_model as roblox_merge_asset_model,
+    to_public as roblox_assets_to_public,
+)
+from roblox.networking import build_contracts as roblox_build_contracts
+from roblox.playtest import playtest_review as roblox_playtest_review
+from roblox.multiplayer import multiplayer_review as roblox_multiplayer_review
+from roblox.persistence import persistence_review as roblox_persistence_review
+from roblox.verification import roblox_verify_systems
 from agent.task_graph import (
     Task, TaskGraph, SUCCESS, FAILED, SKIPPED, PENDING, RUNNING,
 )
@@ -383,7 +397,9 @@ class AgentRun:
                  on_summary: Optional[Callable] = None,
                  project_memory: Optional[Dict[str, Any]] = None,
                  regression_state: Optional[Dict[str, Any]] = None,
-                 project_graph: Optional[Dict[str, Any]] = None):
+                 project_graph: Optional[Dict[str, Any]] = None,
+                 roblox_project_model: Optional[Dict[str, Any]] = None,
+                 roblox_asset_model: Optional[Dict[str, Any]] = None):
         self.run_id = run_id
         self.goal = goal
         self.manager = manager
@@ -405,6 +421,14 @@ class AgentRun:
         # earlier runs in this same conversation. Never an engine schema.
         self._project_graph_in: Optional[Dict[str, Any]] = (
             dict(project_graph) if project_graph else None)
+        # Roblox-specific cross-run state (roblox/project_model.py,
+        # roblox/assets.py) — only ever populated/consulted when this run's
+        # own engine detection (agent/engines.py) actually says Roblox
+        # Studio is the connected target; see _build_report().
+        self._roblox_project_model_in: Optional[Dict[str, Any]] = (
+            dict(roblox_project_model) if roblox_project_model else None)
+        self._roblox_asset_model_in: Optional[Dict[str, Any]] = (
+            dict(roblox_asset_model) if roblox_asset_model else None)
         self.max_steps = max_steps
         self.max_replans = max_replans
         self.max_program_replans = max(max_replans, max_program_replans)
@@ -1659,6 +1683,8 @@ class AgentRun:
             self._regression_state_in, run_review, run_no)
         project_graph = merge_project_graph(
             self._project_graph_in, tasks, run_no)
+        roblox_report, roblox_project_model, roblox_asset_model = (
+            self._roblox_report(tasks, run_no))
         return {
             "status": status,
             "goal": self.goal,
@@ -1692,8 +1718,54 @@ class AgentRun:
             "verification": verify_systems(
                 tasks, self.manager.registry(),
                 visual_critiques_recorded=len(self.visual_critiques)),
+            "roblox": roblox_report,
+            "roblox_project_model": roblox_project_model,
+            "roblox_asset_model": roblox_asset_model,
             "duration_s": round(time.time() - self.started_at, 1),
         }
+
+    def _roblox_report(
+            self, tasks: List[Task], run_no: int
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Roblox-specific evidence (roblox/*), computed ONLY when this
+        run's own engine detection actually found Roblox Studio connected
+        — never run against an Unreal (or undetected) project, so a
+        Blueprint path is never misread as a Roblox Instance declaration.
+
+        Returns (report dict, project_model to persist, asset_model to
+        persist). The latter two are None when Roblox was not detected,
+        so server.py never overwrites a real prior Roblox project's
+        persisted state with "nothing" just because one run happened to
+        be about something else in the same conversation.
+        """
+        is_roblox = any(t.get("id") == "roblox_studio"
+                        for t in self._engine_targets)
+        if not is_roblox:
+            return ({"active": False,
+                    "note": "Roblox Studio was not detected as a target "
+                            "this run; no Roblox-specific evidence was "
+                            "computed."},
+                   None, None)
+        registry = self.manager.registry()
+        project_model = roblox_merge_project_model(
+            self._roblox_project_model_in, tasks, run_no)
+        asset_model = roblox_merge_asset_model(
+            self._roblox_asset_model_in, tasks, run_no)
+        contracts = roblox_build_contracts(project_model, tasks)
+        report = {
+            "active": True,
+            "capabilities": roblox_capability_report(registry, tasks),
+            "project_model_summary": roblox_model_to_public(project_model),
+            "asset_model_summary": roblox_assets_to_public(asset_model),
+            "remote_contracts": contracts,
+            "playtest": roblox_playtest_review(tasks, registry),
+            "multiplayer": roblox_multiplayer_review(tasks, registry),
+            "persistence": roblox_persistence_review(tasks, registry),
+            "verification": roblox_verify_systems(
+                tasks, registry,
+                visual_critiques_recorded=len(self.visual_critiques)),
+        }
+        return report, project_model, asset_model
 
     def _performance_notes(self, completed: List[Task]) -> List[str]:
         """One-line notes from successful performance-flavored tool calls.

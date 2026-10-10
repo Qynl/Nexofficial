@@ -124,6 +124,16 @@ CREATE TABLE IF NOT EXISTS project_graph (
     data TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS roblox_project_model (
+    conversation_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS roblox_asset_model (
+    conversation_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -213,6 +223,12 @@ class Store:
                 (cid,))
             self._db.execute(
                 "DELETE FROM project_graph WHERE conversation_id = ?",
+                (cid,))
+            self._db.execute(
+                "DELETE FROM roblox_project_model WHERE conversation_id = ?",
+                (cid,))
+            self._db.execute(
+                "DELETE FROM roblox_asset_model WHERE conversation_id = ?",
                 (cid,))
             cur = self._db.execute("DELETE FROM conversations WHERE id = ?",
                                    (cid,))
@@ -314,6 +330,75 @@ class Store:
         with self._lock:
             self._db.execute(
                 "INSERT INTO project_graph (conversation_id, data, "
+                "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
+                "DO UPDATE SET data = excluded.data, "
+                "updated_at = excluded.updated_at", (cid, payload, now))
+            self._db.commit()
+
+    # ----- Roblox project model (roblox/project_model.py) ------------------
+
+    def get_roblox_project_model(self, cid: str) -> Optional[Dict[str, Any]]:
+        """The persisted Roblox DataModel view for this conversation, or
+        None if no Roblox-flavored run has finished here yet."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM roblox_project_model "
+                "WHERE conversation_id = ?", (cid,)).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_roblox_project_model(self, cid: str, model: Dict[str, Any]
+                                  ) -> None:
+        """Upsert the bounded Roblox project model agent/loop.py produced
+        — see roblox/project_model.py merge_project_model(); Instances
+        named in real successful tool calls only."""
+        if not cid or not isinstance(model, dict):
+            return
+        payload = json.dumps(model, ensure_ascii=False)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO roblox_project_model (conversation_id, data, "
+                "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
+                "DO UPDATE SET data = excluded.data, "
+                "updated_at = excluded.updated_at", (cid, payload, now))
+            self._db.commit()
+
+    # ----- Roblox asset model (roblox/assets.py) ----------------------------
+
+    def get_roblox_asset_model(self, cid: str) -> Optional[Dict[str, Any]]:
+        """The persisted Roblox asset-reference model for this
+        conversation, or None if no Roblox-flavored run has finished here
+        yet."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM roblox_asset_model "
+                "WHERE conversation_id = ?", (cid,)).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_roblox_asset_model(self, cid: str, model: Dict[str, Any]
+                                ) -> None:
+        """Upsert the bounded Roblox asset model — see roblox/assets.py
+        merge_asset_model(); asset ids named in real successful tool
+        calls only."""
+        if not cid or not isinstance(model, dict):
+            return
+        payload = json.dumps(model, ensure_ascii=False)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO roblox_asset_model (conversation_id, data, "
                 "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
                 "DO UPDATE SET data = excluded.data, "
                 "updated_at = excluded.updated_at", (cid, payload, now))
@@ -490,6 +575,12 @@ class Store:
                     "DELETE FROM project_graph WHERE conversation_id = ?",
                     (old_cid,))
                 self._db.execute(
+                    "DELETE FROM roblox_project_model "
+                    "WHERE conversation_id = ?", (old_cid,))
+                self._db.execute(
+                    "DELETE FROM roblox_asset_model "
+                    "WHERE conversation_id = ?", (old_cid,))
+                self._db.execute(
                     "DELETE FROM conversations WHERE id = ?", (old_cid,))
                 removed += 1
         if self.max_conversations:
@@ -517,6 +608,12 @@ class Store:
                         "WHERE conversation_id = ?", (old_cid,))
                     self._db.execute(
                         "DELETE FROM project_graph "
+                        "WHERE conversation_id = ?", (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM roblox_project_model "
+                        "WHERE conversation_id = ?", (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM roblox_asset_model "
                         "WHERE conversation_id = ?", (old_cid,))
                     self._db.execute(
                         "DELETE FROM conversations WHERE id = ?", (old_cid,))
@@ -681,7 +778,9 @@ class Store:
             self._db.executescript(
                 "DELETE FROM messages; DELETE FROM conversations; "
                 "DELETE FROM project_memory; DELETE FROM regression_state; "
-                "DELETE FROM project_graph;")
+                "DELETE FROM project_graph; "
+                "DELETE FROM roblox_project_model; "
+                "DELETE FROM roblox_asset_model;")
             self._db.commit()
             self._reclaim_space_locked()
 

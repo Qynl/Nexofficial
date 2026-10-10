@@ -87,6 +87,19 @@ for root, _dirs, files in os.walk(os.path.join(NEX, "agent")):
             failures.append("%s imports %s (agent must not reach the HTTP "
                             "layer)" % (rel(path), sorted(bad)))
 
+# roblox/ is a pure domain package exactly like agent/ (engine-specific
+# project understanding, never the action path itself) — same rule: it
+# must never reach the HTTP layer either.
+for root, _dirs, files in os.walk(os.path.join(NEX, "roblox")):
+    for f in files:
+        if not f.endswith(".py"):
+            continue
+        path = os.path.join(root, f)
+        bad = _imports(path) & {"server", "store"}
+        if bad:
+            failures.append("%s imports %s (roblox must not reach the "
+                            "HTTP layer)" % (rel(path), sorted(bad)))
+
 # ── 2. the capability boundary ───────────────────────────────────────────
 
 for gone in ("tools.py", "mc.py", "mc_tools.py", "minecraft_mcp.py",
@@ -177,6 +190,7 @@ if failures:
 
 print("ok   - mcp/* imports nothing from agent/server (pure core)")
 print("ok   - agent/* free of server imports")
+print("ok   - roblox/* free of server imports")
 print("ok   - no local tool surface (tools/mc/minecraft/stdio gone)")
 print("ok   - agent/loop acts only through the manager")
 print("ok   - capability registry is metadata-only (no call bypass)")

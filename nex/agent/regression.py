@@ -26,11 +26,20 @@ _SYSTEM_KEYWORDS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("traffic", ("traffic", "crowd_spawn")),
     ("vehicles", ("vehicle", "drivable", "driving")),
     ("missions", ("mission", "quest", "objective")),
-    ("economy", ("economy", "currency", "shop", "inventory", "item_def")),
+    ("economy", ("economy", "currency", "shop", "inventory", "item_def",
+                 "purchase", "marketplace", "gamepass")),
     ("persistence", ("save_game", "savegame", "load_game", "persistence",
-                     "checkpoint_save")),
+                     "checkpoint_save", "datastore", "data_store",
+                     "memorystore", "memory_store")),
     ("player_interaction", ("interact", "possess", "input_action")),
-    ("ui", ("widget", "hud", "ui_")),
+    ("ui", ("widget", "hud", "ui_", "screen_gui", "screengui", "gui_")),
+    # Client/server message-passing (Roblox RemoteEvent/RemoteFunction,
+    # BindableEvent/BindableFunction; also covers generic RPC-flavored tool
+    # names). A silent break here tends to surface as economy, persistence,
+    # or UI going stale without any call itself failing.
+    ("networking", ("remote_event", "remoteevent", "remote_function",
+                    "remotefunction", "bindable_event", "bindableevent",
+                    "bindable_function", "bindablefunction")),
 )
 
 # Static, conservative dependency knowledge: when the KEY system changes,
@@ -46,6 +55,7 @@ DEPENDENTS: Dict[str, Tuple[str, ...]] = {
     "missions": ("economy", "persistence"),
     "economy": ("persistence", "ui"),
     "player_interaction": ("ui",),
+    "networking": ("economy", "persistence", "ui"),
 }
 
 

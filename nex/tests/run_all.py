@@ -33,6 +33,17 @@ SUITES = [
     "test_regression.py",     # system -> dependent-systems regression risk
     "test_project_graph.py",  # identifier co-occurrence dependency graph
     "test_playtest.py",       # canonical scripted gameplay-loop evidence
+    "test_roblox_capabilities.py",   # granular, evidence-gated Roblox capabilities
+    "test_roblox_project_model.py",  # Roblox DataModel from real evidence
+    "test_roblox_networking.py",     # RemoteEvent/RemoteFunction contracts
+    "test_roblox_playtest.py",       # Roblox playtest agent
+    "test_roblox_multiplayer.py",    # multiplayer correctness testing
+    "test_roblox_persistence.py",    # DataStore/MemoryStore testing
+    "test_roblox_test_generation.py",  # derive a test plan from systems touched
+    "test_roblox_performance.py",    # performance budgets + before/after
+    "test_roblox_assets.py",         # asset reference intelligence
+    "test_roblox_verification.py",   # Roblox-specific proof dimensions
+    "test_roblox_loop_integration.py",  # agent/loop.py end-to-end wiring
     "test_priority.py",       # bottleneck-aware dynamic priority advisory
     "test_debugger.py",       # deterministic compiler/log/crash parsing
     "test_verification.py",  # implementation-vs-proof verification matrix
