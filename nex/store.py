@@ -114,6 +114,16 @@ CREATE TABLE IF NOT EXISTS project_memory (
     data TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS regression_state (
+    conversation_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_graph (
+    conversation_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -198,6 +208,12 @@ class Store:
                              (cid,))
             self._db.execute(
                 "DELETE FROM project_memory WHERE conversation_id = ?", (cid,))
+            self._db.execute(
+                "DELETE FROM regression_state WHERE conversation_id = ?",
+                (cid,))
+            self._db.execute(
+                "DELETE FROM project_graph WHERE conversation_id = ?",
+                (cid,))
             cur = self._db.execute("DELETE FROM conversations WHERE id = ?",
                                    (cid,))
             self._db.commit()
@@ -232,6 +248,72 @@ class Store:
         with self._lock:
             self._db.execute(
                 "INSERT INTO project_memory (conversation_id, data, "
+                "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
+                "DO UPDATE SET data = excluded.data, "
+                "updated_at = excluded.updated_at", (cid, payload, now))
+            self._db.commit()
+
+    # ----- regression state (agent/regression.py — cross-run risk ledger) --
+
+    def get_regression_state(self, cid: str) -> Optional[Dict[str, Any]]:
+        """The persisted cross-run regression ledger for this conversation,
+        or None if this conversation has never finished a run yet."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM regression_state WHERE conversation_id = ?",
+                (cid,)).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_regression_state(self, cid: str, state: Dict[str, Any]) -> None:
+        """Upsert the bounded cross-run ledger agent/loop.py produced at
+        the end of a run — see agent/regression.py merge_regression_state();
+        static dependency bookkeeping only, never raw tool output."""
+        if not cid or not isinstance(state, dict):
+            return
+        payload = json.dumps(state, ensure_ascii=False)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO regression_state (conversation_id, data, "
+                "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
+                "DO UPDATE SET data = excluded.data, "
+                "updated_at = excluded.updated_at", (cid, payload, now))
+            self._db.commit()
+
+    # ----- project graph (agent/project_graph.py — identifier co-occurrence)-
+
+    def get_project_graph(self, cid: str) -> Optional[Dict[str, Any]]:
+        """The persisted cross-run identifier graph for this conversation,
+        or None if this conversation has never finished a run yet."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM project_graph WHERE conversation_id = ?",
+                (cid,)).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_project_graph(self, cid: str, graph: Dict[str, Any]) -> None:
+        """Upsert the bounded cross-run graph agent/loop.py produced at
+        the end of a run — see agent/project_graph.py merge_project_graph();
+        identifiers extracted from real successful tool calls only."""
+        if not cid or not isinstance(graph, dict):
+            return
+        payload = json.dumps(graph, ensure_ascii=False)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO project_graph (conversation_id, data, "
                 "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
                 "DO UPDATE SET data = excluded.data, "
                 "updated_at = excluded.updated_at", (cid, payload, now))
@@ -402,6 +484,12 @@ class Store:
                     "DELETE FROM project_memory WHERE conversation_id = ?",
                     (old_cid,))
                 self._db.execute(
+                    "DELETE FROM regression_state WHERE conversation_id = ?",
+                    (old_cid,))
+                self._db.execute(
+                    "DELETE FROM project_graph WHERE conversation_id = ?",
+                    (old_cid,))
+                self._db.execute(
                     "DELETE FROM conversations WHERE id = ?", (old_cid,))
                 removed += 1
         if self.max_conversations:
@@ -424,6 +512,12 @@ class Store:
                     self._db.execute(
                         "DELETE FROM project_memory WHERE conversation_id = ?",
                         (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM regression_state "
+                        "WHERE conversation_id = ?", (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM project_graph "
+                        "WHERE conversation_id = ?", (old_cid,))
                     self._db.execute(
                         "DELETE FROM conversations WHERE id = ?", (old_cid,))
                     removed += 1
@@ -586,7 +680,8 @@ class Store:
         with self._lock:
             self._db.executescript(
                 "DELETE FROM messages; DELETE FROM conversations; "
-                "DELETE FROM project_memory;")
+                "DELETE FROM project_memory; DELETE FROM regression_state; "
+                "DELETE FROM project_graph;")
             self._db.commit()
             self._reclaim_space_locked()
 

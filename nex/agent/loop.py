@@ -69,7 +69,11 @@ from agent.debugger import diagnose_failure
 from agent.failures import classify_failure, label as failure_label
 from agent.memory import merge_from_run, to_prompt_block as memory_prompt_block
 from agent.priority import bottleneck_note
-from agent.regression import regression_brief, regression_review
+from agent.regression import (
+    cross_run_risk, merge_regression_state, regression_brief,
+    regression_review,
+)
+from agent.project_graph import merge_project_graph, to_public as graph_to_public
 from agent.verification import verify_systems
 from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
@@ -376,7 +380,9 @@ class AgentRun:
                  eval_every_steps: int = DEFAULT_EVAL_EVERY_STEPS,
                  budget_s: float = DEFAULT_BUDGET_S,
                  on_summary: Optional[Callable] = None,
-                 project_memory: Optional[Dict[str, Any]] = None):
+                 project_memory: Optional[Dict[str, Any]] = None,
+                 regression_state: Optional[Dict[str, Any]] = None,
+                 project_graph: Optional[Dict[str, Any]] = None):
         self.run_id = run_id
         self.goal = goal
         self.manager = manager
@@ -388,6 +394,16 @@ class AgentRun:
         # never a substitute for re-inspecting the live project this run.
         self._memory_in: Optional[Dict[str, Any]] = (
             dict(project_memory) if project_memory else None)
+        # Cross-run regression ledger (agent/regression.py) — persisted
+        # risk bookkeeping across EARLIER runs in this same conversation,
+        # never an executed test result.
+        self._regression_state_in: Optional[Dict[str, Any]] = (
+            dict(regression_state) if regression_state else None)
+        # Cross-run identifier co-occurrence ledger (agent/project_graph.py)
+        # — deterministic, extracted from REAL tool-call arguments across
+        # earlier runs in this same conversation. Never an engine schema.
+        self._project_graph_in: Optional[Dict[str, Any]] = (
+            dict(project_graph) if project_graph else None)
         self.max_steps = max_steps
         self.max_replans = max_replans
         self.max_program_replans = max(max_replans, max_program_replans)
@@ -1636,6 +1652,12 @@ class AgentRun:
                 + [{"tool": t.tool, "ok": False} for t in failed if t.tool]),
             visual_public=visual_issues,
             performance_evidence=self._performance_notes(completed))
+        run_review = regression_review(tasks)
+        run_no = int(project_memory.get("runs_recorded") or 1)
+        regression_state = merge_regression_state(
+            self._regression_state_in, run_review, run_no)
+        project_graph = merge_project_graph(
+            self._project_graph_in, tasks, run_no)
         return {
             "status": status,
             "goal": self.goal,
@@ -1659,7 +1681,12 @@ class AgentRun:
             "engine_targets": list(self._engine_targets),
             "production_program": program,
             "project_memory": project_memory,
-            "regression": regression_review(tasks),
+            "regression": run_review,
+            "regression_state": regression_state,
+            "cross_run_regression_risk": cross_run_risk(
+                regression_state, run_no),
+            "project_graph": project_graph,
+            "project_graph_summary": graph_to_public(project_graph),
             "verification": verify_systems(
                 tasks, self.manager.registry(),
                 visual_critiques_recorded=len(self.visual_critiques)),

@@ -377,8 +377,9 @@ def _agent_llm() -> Optional[Callable]:
 
 def _on_run_summary(run: Any, text: str, report: Dict[str, Any]) -> None:
     """Persist the run's final summary as an assistant message, plus its
-    compact structured project memory (agent/memory.py) for the NEXT run
-    in this same conversation — never a raw history dump."""
+    compact structured project memory (agent/memory.py) and cross-run
+    regression ledger (agent/regression.py) for the NEXT run in this same
+    conversation — never a raw history dump."""
     cid = run.conversation_id
     if not cid:
         return
@@ -390,6 +391,18 @@ def _on_run_summary(run: Any, text: str, report: Dict[str, Any]) -> None:
         try:
             STORE.save_project_memory(cid, memory)
         except Exception:  # noqa: BLE001 - memory is advisory, never blocking
+            pass
+    regression_state = report.get("regression_state")
+    if isinstance(regression_state, dict) and regression_state:
+        try:
+            STORE.save_regression_state(cid, regression_state)
+        except Exception:  # noqa: BLE001 - advisory, never blocking
+            pass
+    project_graph = report.get("project_graph")
+    if isinstance(project_graph, dict) and project_graph:
+        try:
+            STORE.save_project_graph(cid, project_graph)
+        except Exception:  # noqa: BLE001 - advisory, never blocking
             pass
 
 
@@ -430,8 +443,18 @@ def _start_run(cid: str, goal: str, say: str, **run_opts: Any) -> None:
         prior_memory = STORE.get_project_memory(cid)
     except Exception:  # noqa: BLE001 - memory is advisory, never blocking
         prior_memory = None
+    try:
+        prior_regression_state = STORE.get_regression_state(cid)
+    except Exception:  # noqa: BLE001 - advisory, never blocking
+        prior_regression_state = None
+    try:
+        prior_project_graph = STORE.get_project_graph(cid)
+    except Exception:  # noqa: BLE001 - advisory, never blocking
+        prior_project_graph = None
     run_id = RUNS.start(goal, conversation_id=cid,
-                        project_memory=prior_memory, **run_opts)
+                        project_memory=prior_memory,
+                        regression_state=prior_regression_state,
+                        project_graph=prior_project_graph, **run_opts)
     STORE.update_message(run_message["id"], meta={
         "run": "starting", "run_id": run_id,
         "engine_targets": compact_targets,

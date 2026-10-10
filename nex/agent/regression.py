@@ -108,3 +108,92 @@ def regression_brief(review: Dict[str, Any], limit: int = 5) -> str:
         lines.append("- '%s' changed this run; re-verify: %s" %
                      (system_id, ", ".join(deps)))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Cross-run regression state — the within-run check above only sees ONE
+# run's tasks, so a system modified in run 3 whose dependent was verified
+# back in run 1 (and never since) looks "fine" to it even though two runs
+# of unrelated changes have landed in between. This closes that gap with a
+# small, bounded, persisted ledger — never a model's self-report, built
+# the same way as agent/memory.py: a plain dict this module can merge,
+# with persistence left entirely to store.py/server.py (agent/ must not
+# import store — tests/test_architecture.py enforces this).
+# ---------------------------------------------------------------------------
+
+MAX_TRACKED_SYSTEMS = 32
+
+
+def empty_regression_state() -> Dict[str, Any]:
+    return {"systems": {}}
+
+
+def merge_regression_state(previous: Any, review: Dict[str, Any],
+                           run_no: int) -> Dict[str, Any]:
+    """Fold one run's regression_review() into the persisted cross-run
+    ledger. For every system touched THIS run: record when it was last
+    touched, and track the run number since which it has had unverified
+    dependents (`since_run`) — cleared the moment ANY later run exercises
+    that dependent, regardless of which run originally changed the
+    parent system.
+    """
+    state = {"systems": dict((previous or {}).get("systems") or {})}
+    touched = (review or {}).get("systems_touched") or {}
+    at_risk = (review or {}).get("at_risk_dependents") or {}
+
+    for system_id in touched:
+        entry = dict(state["systems"].get(system_id) or {})
+        entry["last_touched_run"] = run_no
+        unverified = at_risk.get(system_id) or []
+        if unverified:
+            entry["since_run"] = entry.get("since_run") or run_no
+            entry["unverified_dependents"] = list(unverified)
+        else:
+            entry.pop("since_run", None)
+            entry["unverified_dependents"] = []
+        state["systems"][system_id] = entry
+
+    # A dependent exercised THIS run clears the flag on every system that
+    # still listed it as unverified, no matter which run first flagged it.
+    for touched_sys in touched:
+        for parent_id, deps in DEPENDENTS.items():
+            if touched_sys not in deps:
+                continue
+            parent = state["systems"].get(parent_id)
+            if not parent:
+                continue
+            remaining = [d for d in parent.get("unverified_dependents") or ()
+                        if d != touched_sys]
+            if remaining != (parent.get("unverified_dependents") or []):
+                parent["unverified_dependents"] = remaining
+                if not remaining:
+                    parent.pop("since_run", None)
+
+    # Bounded: keep the most recently touched systems only.
+    if len(state["systems"]) > MAX_TRACKED_SYSTEMS:
+        ordered = sorted(state["systems"].items(),
+                         key=lambda kv: kv[1].get("last_touched_run", 0),
+                         reverse=True)
+        state["systems"] = dict(ordered[:MAX_TRACKED_SYSTEMS])
+    return state
+
+
+def cross_run_risk(state: Any, run_no: int,
+                   stale_after: int = 2) -> List[Dict[str, Any]]:
+    """Systems whose dependents have been unverified for `stale_after` or
+    more runs — risk that has been accumulating ACROSS runs, not just
+    within the latest one. Still advisory, still never a verified result.
+    """
+    out: List[Dict[str, Any]] = []
+    for system_id, entry in ((state or {}).get("systems") or {}).items():
+        since = entry.get("since_run")
+        deps = entry.get("unverified_dependents") or []
+        if not since or not deps:
+            continue
+        age = run_no - int(since) + 1
+        if age >= stale_after:
+            out.append({"system": system_id, "unverified_dependents": deps,
+                        "runs_unverified": age,
+                        "since_run": int(since)})
+    return sorted(out, key=lambda e: e["runs_unverified"], reverse=True)
+

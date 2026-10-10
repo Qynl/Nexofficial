@@ -141,6 +141,81 @@ class StoreTests(unittest.TestCase):
             reopened.close()
             self.s = store.Store(self.db)   # tearDown() will close this
 
+    def test_regression_state_round_trips_and_upserts(self):
+        c = self.s.create_conversation()
+        self.assertIsNone(self.s.get_regression_state(c["id"]))
+        self.s.save_regression_state(c["id"], {"systems": {
+            "vehicles": {"since_run": 1, "unverified_dependents": ["traffic"]}
+        }})
+        got = self.s.get_regression_state(c["id"])
+        self.assertEqual(got["systems"]["vehicles"]["since_run"], 1)
+
+        # A later run's state replaces (upserts), it does not duplicate.
+        self.s.save_regression_state(c["id"], {"systems": {
+            "vehicles": {"since_run": 1, "unverified_dependents": []}
+        }})
+        got2 = self.s.get_regression_state(c["id"])
+        self.assertEqual(got2["systems"]["vehicles"]["unverified_dependents"],
+                         [])
+
+        other = self.s.create_conversation()
+        self.assertIsNone(self.s.get_regression_state(other["id"]))
+
+    def test_regression_state_is_deleted_with_its_conversation(self):
+        c = self.s.create_conversation()
+        self.s.save_regression_state(c["id"], {"systems": {}})
+        self.assertTrue(self.s.delete_conversation(c["id"]))
+        self.assertIsNone(self.s.get_regression_state(c["id"]))
+
+    def test_regression_state_survives_reopen(self):
+        c = self.s.create_conversation()
+        self.s.save_regression_state(
+            c["id"], {"systems": {"missions": {"since_run": 4}}})
+        self.s.close()
+        reopened = store.Store(self.db)
+        try:
+            got = reopened.get_regression_state(c["id"])
+            self.assertEqual(got["systems"]["missions"]["since_run"], 4)
+        finally:
+            reopened.close()
+            self.s = store.Store(self.db)   # tearDown() will close this
+
+    def test_project_graph_round_trips_and_upserts(self):
+        c = self.s.create_conversation()
+        self.assertIsNone(self.s.get_project_graph(c["id"]))
+        self.s.save_project_graph(c["id"], {"nodes": {
+            "BP_Car": {"systems": ["vehicles"], "mentions": 1}}, "edges": {}})
+        got = self.s.get_project_graph(c["id"])
+        self.assertEqual(got["nodes"]["BP_Car"]["mentions"], 1)
+
+        # A later run's graph replaces (upserts), it does not duplicate.
+        self.s.save_project_graph(c["id"], {"nodes": {
+            "BP_Car": {"systems": ["vehicles"], "mentions": 2}}, "edges": {}})
+        got2 = self.s.get_project_graph(c["id"])
+        self.assertEqual(got2["nodes"]["BP_Car"]["mentions"], 2)
+
+        other = self.s.create_conversation()
+        self.assertIsNone(self.s.get_project_graph(other["id"]))
+
+    def test_project_graph_is_deleted_with_its_conversation(self):
+        c = self.s.create_conversation()
+        self.s.save_project_graph(c["id"], {"nodes": {}, "edges": {}})
+        self.assertTrue(self.s.delete_conversation(c["id"]))
+        self.assertIsNone(self.s.get_project_graph(c["id"]))
+
+    def test_project_graph_survives_reopen(self):
+        c = self.s.create_conversation()
+        self.s.save_project_graph(
+            c["id"], {"nodes": {"BP_Car": {"mentions": 5}}, "edges": {}})
+        self.s.close()
+        reopened = store.Store(self.db)
+        try:
+            got = reopened.get_project_graph(c["id"])
+            self.assertEqual(got["nodes"]["BP_Car"]["mentions"], 5)
+        finally:
+            reopened.close()
+            self.s = store.Store(self.db)   # tearDown() will close this
+
     def test_search_finds_content(self):
         c = self.s.create_conversation()
         self.s.add_message(c["id"], "user",

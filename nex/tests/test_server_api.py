@@ -411,6 +411,84 @@ class APITests(unittest.TestCase):
               "prior project memory reached RunCoordinator.start: %r"
               % captured)
 
+    def test_run_summary_persists_regression_state(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        self.assertIsNone(server_mod.STORE.get_regression_state(cid))
+
+        class FakeRun:
+            conversation_id = cid
+            run_id = "run-fake-regression-test"
+
+        report = {"status": "completed",
+                 "regression_state": {"systems": {
+                     "vehicles": {"since_run": 1,
+                                 "unverified_dependents": ["traffic"]}}}}
+        server_mod._on_run_summary(FakeRun(), "done", report)
+        state = server_mod.STORE.get_regression_state(cid)
+        expect(state is not None
+              and state["systems"]["vehicles"]["since_run"] == 1,
+              "regression state persisted after a run: %r" % state)
+
+    def test_start_run_loads_prior_regression_state_for_the_new_run(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        server_mod.STORE.save_regression_state(
+            cid, {"systems": {"missions": {"since_run": 2}}})
+        captured = {}
+        real_start = server_mod.RUNS.start
+
+        def fake_start(goal, conversation_id=None, **opts):
+            captured["regression_state"] = opts.get("regression_state")
+            return "run-not-really-started"
+
+        server_mod.RUNS.start = fake_start
+        try:
+            server_mod._start_run(cid, "a test goal", "")
+        finally:
+            server_mod.RUNS.start = real_start
+        expect(captured.get("regression_state", {})
+              .get("systems", {}).get("missions", {}).get("since_run") == 2,
+              "prior regression state reached RunCoordinator.start: %r"
+              % captured)
+
+    def test_run_summary_persists_project_graph(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        self.assertIsNone(server_mod.STORE.get_project_graph(cid))
+
+        class FakeRun:
+            conversation_id = cid
+            run_id = "run-fake-graph-test"
+
+        report = {"status": "completed",
+                 "project_graph": {"nodes": {
+                     "BP_Car": {"systems": ["vehicles"], "mentions": 1}},
+                     "edges": {}}}
+        server_mod._on_run_summary(FakeRun(), "done", report)
+        graph = server_mod.STORE.get_project_graph(cid)
+        expect(graph is not None
+              and graph["nodes"]["BP_Car"]["mentions"] == 1,
+              "project graph persisted after a run: %r" % graph)
+
+    def test_start_run_loads_prior_project_graph_for_the_new_run(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        server_mod.STORE.save_project_graph(
+            cid, {"nodes": {"BP_Car": {"mentions": 3}}, "edges": {}})
+        captured = {}
+        real_start = server_mod.RUNS.start
+
+        def fake_start(goal, conversation_id=None, **opts):
+            captured["project_graph"] = opts.get("project_graph")
+            return "run-not-really-started"
+
+        server_mod.RUNS.start = fake_start
+        try:
+            server_mod._start_run(cid, "a test goal", "")
+        finally:
+            server_mod.RUNS.start = real_start
+        expect(captured.get("project_graph", {})
+              .get("nodes", {}).get("BP_Car", {}).get("mentions") == 3,
+              "prior project graph reached RunCoordinator.start: %r"
+              % captured)
+
     def test_run_resolve_unknown(self):
         s, _ = self.req("POST", "/api/runs/run-void/resolve",
                         body={"approved": True})
