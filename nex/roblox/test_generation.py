@@ -64,6 +64,40 @@ def generate_test_plan(systems: Iterable[str]) -> Dict[str, Any]:
     }
 
 
+def plan_step_brief(test_plan: Dict[str, Any]) -> List[str]:
+    """Render a generated test plan's catalog ids as concrete, grounded
+    plan-step suggestions: "[category] id: title -- expected: ...".
+
+    Every line is a literal lookup against roblox/playtest.py's,
+    roblox/multiplayer.py's, or roblox/persistence.py's existing scenario
+    catalogs -- never freshly-invented prose. This is what lets an open
+    production-stage playtest/persistence gate turn into concrete
+    candidate steps a plan can actually include, instead of the test
+    plan only being visible as report data after a run already ended.
+    An id with no catalog match (should not happen; defensive) is
+    silently skipped rather than fabricated.
+    """
+    lines: List[str] = []
+    functional_ids = list(test_plan.get("functional") or []) + \
+        list(test_plan.get("lifecycle") or [])
+    for case_id in functional_ids:
+        scenario = roblox_playtest._SCENARIO_BY_ID.get(case_id)
+        if scenario is not None:
+            lines.append("[playtest] %s: %s -- expected: %s" %
+                         (scenario.id, scenario.title, scenario.expected))
+    for case_id in test_plan.get("multiplayer") or []:
+        scenario = roblox_multiplayer._SCENARIO_BY_ID.get(case_id)
+        if scenario is not None:
+            lines.append("[multiplayer] %s: %s -- expected: %s" %
+                         (scenario.id, scenario.title, scenario.expected))
+    for case_id in test_plan.get("persistence") or []:
+        case = roblox_persistence._CASE_BY_ID.get(case_id)
+        if case is not None:
+            lines.append("[persistence] %s: %s -- expected: %s" %
+                         (case.id, case.title, case.expected))
+    return lines
+
+
 def affected_systems_for_feature(tool_names: Iterable[str]) -> Set[str]:
     """Convenience: classify a feature's intended tool surface into
     systems before it has even run, using the SAME classifier

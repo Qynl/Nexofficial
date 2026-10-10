@@ -92,7 +92,10 @@ from roblox.playtest import playtest_review as roblox_playtest_review
 from roblox.multiplayer import multiplayer_review as roblox_multiplayer_review
 from roblox.persistence import persistence_review as roblox_persistence_review
 from roblox.verification import roblox_verify_systems
-from roblox.test_generation import generate_test_plan as roblox_test_plan
+from roblox.test_generation import (
+    generate_test_plan as roblox_test_plan,
+    plan_step_brief as roblox_plan_step_brief,
+)
 from agent.checkpoints import make_checkpoint
 from agent.visual_evidence import before_after_coverage
 from agent.task_graph import (
@@ -630,6 +633,7 @@ class AgentRun:
         if self._program_active:
             parts.append(production_stage_brief(
                 self.goal, self._program_stage, registry))
+            parts.append(self._roblox_test_plan_brief(registry))
         parts.append(engine_planning_brief(self.goal, registry))
         parts.append(self._visual_board.planning_note())
         parts.append(regression_brief(regression_review(self.graph.all())))
@@ -650,6 +654,50 @@ class AgentRun:
         return bottleneck_note(failure_kinds=failure_kinds,
                                quality_missing=quality_missing,
                                visual_open_count=visual_open)
+
+    def _roblox_test_plan_brief(self, registry: Any) -> str:
+        """Turn an open playtest/persistence stage gate into concrete,
+        catalog-grounded candidate plan steps — not only report-visible
+        advisory data that shows up after a run already ended.
+
+        Only fires for a Roblox-targeted production run, and only once the
+        current stage actually requires gate:playtest or
+        discipline:data_progression AND that requirement is still missing
+        from this stage's own successful work. The suggested steps come
+        straight from roblox/test_generation.py's catalog lookup over
+        systems this run has already touched — never a freshly invented
+        test, and never a claim that a suggested step will pass.
+        """
+        if not self._program_active:
+            return ""
+        if not any(t.get("id") == "roblox_studio"
+                  for t in self._engine_targets):
+            return ""
+        stage = PRODUCTION_STAGES[self._program_stage]
+        open_gates = [r for r in stage.requirements
+                     if r in ("gate:playtest", "discipline:data_progression")]
+        if not open_gates:
+            return ""
+        stage_tasks = [t for t in self.graph.all() if t.phase == stage.id]
+        review = assess_stage_evidence(stage, registry, stage_tasks)
+        missing = set(review.get("missing") or [])
+        relevant = [g for g in open_gates if g in missing]
+        if not relevant:
+            return ""
+        systems = mutated_systems(self.graph.all()).keys()
+        if not systems:
+            return ""
+        lines = roblox_plan_step_brief(roblox_test_plan(systems))
+        if not lines:
+            return ""
+        return (
+            "Roblox test-plan steps available for this stage's open "
+            "evidence requirement(s) (%s), derived from systems this run "
+            "has already touched. Consider including concrete plan steps "
+            "for these — ONLY if a connected MCP tool can actually run "
+            "them; this is a deterministic catalog lookup, not proof any "
+            "of them will pass:\n" % ", ".join(relevant) +
+            "\n".join("- " + line for line in lines))
 
     def _project_context(self, registry: Any) -> str:
         """Read a bounded set of MCP resources describing the live project.
