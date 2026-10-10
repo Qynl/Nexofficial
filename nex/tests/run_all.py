@@ -30,6 +30,8 @@ SUITES = [
     "test_visual.py",         # iterative visual-defect tracking + feedback
     "test_failures.py",       # failure-taxonomy classification
     "test_memory.py",         # cross-run structured project memory
+    "test_regression.py",     # system -> dependent-systems regression risk
+    "test_priority.py",       # bottleneck-aware dynamic priority advisory
     "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
     "test_jsonreply.py",      # model-reply JSON extraction (ACT directive, plans)

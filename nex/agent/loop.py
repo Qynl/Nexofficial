@@ -67,6 +67,8 @@ from agent.quality import (
 )
 from agent.failures import classify_failure, label as failure_label
 from agent.memory import merge_from_run, to_prompt_block as memory_prompt_block
+from agent.priority import bottleneck_note
+from agent.regression import regression_brief, regression_review
 from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
 from agent.task_graph import (
@@ -568,6 +570,10 @@ class AgentRun:
 
     def _planning_brief(self, registry: Any) -> str:
         parts: List[str] = []
+        # The single biggest current bottleneck (if any) goes first — it
+        # overrides nothing structurally, but it is the most decision-
+        # relevant line in this whole brief and should not get buried.
+        parts.append(self._bottleneck_note())
         # Early studio stages should not waste calls proving an intentionally
         # incomplete foundation. The full evidence contract joins the program
         # for validation and polish, then remains active for final scoring.
@@ -580,9 +586,24 @@ class AgentRun:
                 self.goal, self._program_stage, registry))
         parts.append(engine_planning_brief(self.goal, registry))
         parts.append(self._visual_board.planning_note())
+        parts.append(regression_brief(regression_review(self.graph.all())))
         parts.append(memory_prompt_block(self._memory_in))
         parts.append(self._project_context(registry))
         return "\n\n".join(p for p in parts if p)
+
+    def _bottleneck_note(self) -> str:
+        """Compose agent/priority.py's single-bottleneck advisory from
+        signals this run already computes for other purposes — never a
+        new measurement, just a prioritized reading of existing evidence.
+        """
+        failure_kinds = [t.failure_kind for t in self.graph.all()
+                         if t.status == FAILED and t.failure_kind]
+        quality_missing = (self._quality_scorecard() or {}).get(
+            "missing") or []
+        visual_open = len(self._visual_board.open_issues())
+        return bottleneck_note(failure_kinds=failure_kinds,
+                               quality_missing=quality_missing,
+                               visual_open_count=visual_open)
 
     def _project_context(self, registry: Any) -> str:
         """Read a bounded set of MCP resources describing the live project.
@@ -1628,6 +1649,7 @@ class AgentRun:
             "engine_targets": list(self._engine_targets),
             "production_program": program,
             "project_memory": project_memory,
+            "regression": regression_review(tasks),
             "duration_s": round(time.time() - self.started_at, 1),
         }
 
