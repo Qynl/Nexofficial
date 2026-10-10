@@ -370,6 +370,47 @@ class APITests(unittest.TestCase):
 
     # ── runs ─────────────────────────────────────────────────────
 
+    def test_run_summary_persists_project_memory(self):
+        # The server-layer hook, not agent/loop.py directly (agent/ must
+        # not import store.py — tests/test_architecture.py enforces that),
+        # is what turns a run's structured memory into something the NEXT
+        # run in the same conversation can see.
+        cid = server_mod.STORE.create_conversation()["id"]
+        self.assertIsNone(server_mod.STORE.get_project_memory(cid))
+
+        class FakeRun:
+            conversation_id = cid
+            run_id = "run-fake-memory-test"
+
+        report = {"status": "completed",
+                 "project_memory": {"runs_recorded": 1,
+                                    "milestones_done": ["discovery"],
+                                    "risks": []}}
+        server_mod._on_run_summary(FakeRun(), "done", report)
+        mem = server_mod.STORE.get_project_memory(cid)
+        expect(mem is not None and mem.get("runs_recorded") == 1,
+              "project memory persisted after a run: %r" % mem)
+
+    def test_start_run_loads_prior_project_memory_for_the_new_run(self):
+        cid = server_mod.STORE.create_conversation()["id"]
+        server_mod.STORE.save_project_memory(
+            cid, {"runs_recorded": 1, "milestones_done": ["discovery"]})
+        captured = {}
+        real_start = server_mod.RUNS.start
+
+        def fake_start(goal, conversation_id=None, **opts):
+            captured["project_memory"] = opts.get("project_memory")
+            return "run-not-really-started"
+
+        server_mod.RUNS.start = fake_start
+        try:
+            server_mod._start_run(cid, "a test goal", "")
+        finally:
+            server_mod.RUNS.start = real_start
+        expect(captured.get("project_memory", {}).get("runs_recorded") == 1,
+              "prior project memory reached RunCoordinator.start: %r"
+              % captured)
+
     def test_run_resolve_unknown(self):
         s, _ = self.req("POST", "/api/runs/run-void/resolve",
                         body={"approved": True})

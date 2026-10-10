@@ -29,6 +29,7 @@ SUITES = [
     "test_mcp_production.py", # balanced catalog, plan proof, context safety
     "test_visual.py",         # iterative visual-defect tracking + feedback
     "test_failures.py",       # failure-taxonomy classification
+    "test_memory.py",         # cross-run structured project memory
     "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
     "test_jsonreply.py",      # model-reply JSON extraction (ACT directive, plans)

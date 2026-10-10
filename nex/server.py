@@ -376,13 +376,21 @@ def _agent_llm() -> Optional[Callable]:
 
 
 def _on_run_summary(run: Any, text: str, report: Dict[str, Any]) -> None:
-    """Persist the run's final summary as an assistant message."""
+    """Persist the run's final summary as an assistant message, plus its
+    compact structured project memory (agent/memory.py) for the NEXT run
+    in this same conversation — never a raw history dump."""
     cid = run.conversation_id
     if not cid:
         return
     STORE.add_message(cid, "assistant", text, kind="text",
                       meta={"run_id": run.run_id,
                             "run_status": report.get("status")})
+    memory = report.get("project_memory")
+    if isinstance(memory, dict) and memory:
+        try:
+            STORE.save_project_memory(cid, memory)
+        except Exception:  # noqa: BLE001 - memory is advisory, never blocking
+            pass
 
 
 RUNS = RunCoordinator(MANAGER, _agent_llm, bus=BUS.publish,
@@ -418,7 +426,12 @@ def _start_run(cid: str, goal: str, say: str, **run_opts: Any) -> None:
     } for target in targets]
     run_message = STORE.add_message(
         cid, "assistant", goal, kind="run", meta={"run": "starting"})
-    run_id = RUNS.start(goal, conversation_id=cid, **run_opts)
+    try:
+        prior_memory = STORE.get_project_memory(cid)
+    except Exception:  # noqa: BLE001 - memory is advisory, never blocking
+        prior_memory = None
+    run_id = RUNS.start(goal, conversation_id=cid,
+                        project_memory=prior_memory, **run_opts)
     STORE.update_message(run_message["id"], meta={
         "run": "starting", "run_id": run_id,
         "engine_targets": compact_targets,

@@ -109,6 +109,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv
     ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated
     ON conversations(updated_at);
+CREATE TABLE IF NOT EXISTS project_memory (
+    conversation_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -191,10 +196,46 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM messages WHERE conversation_id = ?",
                              (cid,))
+            self._db.execute(
+                "DELETE FROM project_memory WHERE conversation_id = ?", (cid,))
             cur = self._db.execute("DELETE FROM conversations WHERE id = ?",
                                    (cid,))
             self._db.commit()
             return cur.rowcount > 0
+
+    # ----- project memory (agent/memory.py — compact, structured, bounded) --
+
+    def get_project_memory(self, cid: str) -> Optional[Dict[str, Any]]:
+        """The most recent persisted project memory for this conversation,
+        or None if this conversation has never finished a run yet."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM project_memory WHERE conversation_id = ?",
+                (cid,)).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_project_memory(self, cid: str, memory: Dict[str, Any]) -> None:
+        """Upsert the bounded structured memory agent/loop.py produced at
+        the end of a run. `memory` is already small and JSON-safe — see
+        agent/memory.py merge_from_run(); this never stores raw tool output
+        or conversation text."""
+        if not cid or not isinstance(memory, dict):
+            return
+        payload = json.dumps(memory, ensure_ascii=False)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO project_memory (conversation_id, data, "
+                "updated_at) VALUES (?, ?, ?) ON CONFLICT(conversation_id) "
+                "DO UPDATE SET data = excluded.data, "
+                "updated_at = excluded.updated_at", (cid, payload, now))
+            self._db.commit()
 
     def get_conversation(self, cid: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -358,6 +399,9 @@ class Store:
                     "DELETE FROM messages WHERE conversation_id = ?",
                     (old_cid,))
                 self._db.execute(
+                    "DELETE FROM project_memory WHERE conversation_id = ?",
+                    (old_cid,))
+                self._db.execute(
                     "DELETE FROM conversations WHERE id = ?", (old_cid,))
                 removed += 1
         if self.max_conversations:
@@ -376,6 +420,9 @@ class Store:
                 for old_cid in oldest:
                     self._db.execute(
                         "DELETE FROM messages WHERE conversation_id = ?",
+                        (old_cid,))
+                    self._db.execute(
+                        "DELETE FROM project_memory WHERE conversation_id = ?",
                         (old_cid,))
                     self._db.execute(
                         "DELETE FROM conversations WHERE id = ?", (old_cid,))
@@ -538,7 +585,8 @@ class Store:
     def wipe(self) -> None:
         with self._lock:
             self._db.executescript(
-                "DELETE FROM messages; DELETE FROM conversations;")
+                "DELETE FROM messages; DELETE FROM conversations; "
+                "DELETE FROM project_memory;")
             self._db.commit()
             self._reclaim_space_locked()
 

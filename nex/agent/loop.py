@@ -66,6 +66,7 @@ from agent.quality import (
     tool_gates,
 )
 from agent.failures import classify_failure, label as failure_label
+from agent.memory import merge_from_run, to_prompt_block as memory_prompt_block
 from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
 from agent.task_graph import (
@@ -370,13 +371,19 @@ class AgentRun:
                  max_production_stages: int = DEFAULT_MAX_PRODUCTION_STAGES,
                  eval_every_steps: int = DEFAULT_EVAL_EVERY_STEPS,
                  budget_s: float = DEFAULT_BUDGET_S,
-                 on_summary: Optional[Callable] = None):
+                 on_summary: Optional[Callable] = None,
+                 project_memory: Optional[Dict[str, Any]] = None):
         self.run_id = run_id
         self.goal = goal
         self.manager = manager
         self.llm = llm
         self.bus = bus
         self.conversation_id = conversation_id
+        # Compact structured memory from EARLIER runs in this same
+        # conversation (see agent/memory.py) — never a raw history dump,
+        # never a substitute for re-inspecting the live project this run.
+        self._memory_in: Optional[Dict[str, Any]] = (
+            dict(project_memory) if project_memory else None)
         self.max_steps = max_steps
         self.max_replans = max_replans
         self.max_program_replans = max(max_replans, max_program_replans)
@@ -573,6 +580,7 @@ class AgentRun:
                 self.goal, self._program_stage, registry))
         parts.append(engine_planning_brief(self.goal, registry))
         parts.append(self._visual_board.planning_note())
+        parts.append(memory_prompt_block(self._memory_in))
         parts.append(self._project_context(registry))
         return "\n\n".join(p for p in parts if p)
 
@@ -1572,6 +1580,31 @@ class AgentRun:
                 out_reasons.append(
                     "production evidence incomplete: " +
                     ", ".join(missing_gates))
+        failed_entries = (
+            [{"name": t.name, "tool": t.tool,
+              "error": (t.error or "")[:200],
+              "failure_kind": t.failure_kind or "unknown",
+              "failure_label": failure_label(t.failure_kind or "unknown")}
+             for t in failed]
+            + [{"name": t.name, "tool": t.tool,
+                "error": "step was not executed (plan stalled)",
+                "failure_kind": "", "failure_label": ""}
+               for t in unfinished])
+        visual_issues = self._visual_board.to_public()
+        done_stages = list(program.get("completed_stages") or []) \
+            if self._program_active else []
+        open_stages = [s.id for s in PRODUCTION_STAGES
+                      if s.id not in done_stages] if self._program_active \
+            else []
+        project_memory = merge_from_run(
+            self._memory_in, conversation_id=self.conversation_id or "",
+            milestones_done=done_stages, milestones_open=open_stages,
+            failed=[f for f in failed_entries if f.get("tool")],
+            tool_outcomes=(
+                [{"tool": t.tool, "ok": True} for t in completed if t.tool]
+                + [{"tool": t.tool, "ok": False} for t in failed if t.tool]),
+            visual_public=visual_issues,
+            performance_evidence=self._performance_notes(completed))
         return {
             "status": status,
             "goal": self.goal,
@@ -1579,15 +1612,7 @@ class AgentRun:
             "completed": [{"name": t.name, "tool": t.tool,
                            "preview": result_preview(t.result)}
                           for t in completed],
-            "failed": ([{"name": t.name, "tool": t.tool,
-                         "error": (t.error or "")[:200],
-                         "failure_kind": t.failure_kind or "unknown",
-                         "failure_label": failure_label(
-                             t.failure_kind or "unknown")} for t in failed]
-                       + [{"name": t.name, "tool": t.tool,
-                           "error": "step was not executed (plan stalled)",
-                           "failure_kind": "", "failure_label": ""}
-                          for t in unfinished]),
+            "failed": failed_entries,
             "skipped": [{"name": t.name, "note": t.notes} for t in skipped],
             "reasons": out_reasons,
             "missing": missing,
@@ -1597,13 +1622,30 @@ class AgentRun:
             "quality_passes": self._quality_passes,
             "quality": quality,
             "visual_critiques": list(self.visual_critiques),
-            "visual_issues": self._visual_board.to_public(),
+            "visual_issues": visual_issues,
             "mcp_production_review": plan_meta.get("production_review") or {},
             "reversal": self._reversal_plan(),
             "engine_targets": list(self._engine_targets),
             "production_program": program,
+            "project_memory": project_memory,
             "duration_s": round(time.time() - self.started_at, 1),
         }
+
+    def _performance_notes(self, completed: List[Task]) -> List[str]:
+        """One-line notes from successful performance-flavored tool calls.
+
+        Deterministic keyword match on the tool name only — never a claim
+        that a number was 'good'; just a bounded pointer to real evidence
+        this run actually captured, carried forward for the next run.
+        """
+        keywords = ("performance", "fps", "profil", "insight", "stat_gpu",
+                   "frame_time", "frametime", "benchmark")
+        notes: List[str] = []
+        for t in completed:
+            name = (t.tool or "").lower()
+            if any(k in name for k in keywords):
+                notes.append("%s: %s" % (t.tool, result_preview(t.result, 160)))
+        return notes[-10:]
 
     def _reversal_plan(self) -> Dict[str, Any]:
         """Compensating actions for this run's mutations (never executed here)."""

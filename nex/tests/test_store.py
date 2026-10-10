@@ -100,6 +100,47 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.s.get_messages(c["id"]), [])
         self.assertFalse(self.s.delete_conversation(c["id"]))
 
+    def test_project_memory_round_trips_and_upserts(self):
+        c = self.s.create_conversation()
+        self.assertIsNone(self.s.get_project_memory(c["id"]))
+        self.s.save_project_memory(c["id"], {"runs_recorded": 1,
+                                             "milestones_done": ["discovery"]})
+        got = self.s.get_project_memory(c["id"])
+        self.assertEqual(got["runs_recorded"], 1)
+        self.assertEqual(got["milestones_done"], ["discovery"])
+
+        # A second run's memory replaces (upserts), it does not duplicate.
+        self.s.save_project_memory(c["id"], {"runs_recorded": 2,
+                                             "milestones_done": ["discovery",
+                                                                "foundation"]})
+        got2 = self.s.get_project_memory(c["id"])
+        self.assertEqual(got2["runs_recorded"], 2)
+        self.assertEqual(len(got2["milestones_done"]), 2)
+
+        # Another conversation never sees this one's memory.
+        other = self.s.create_conversation()
+        self.assertIsNone(self.s.get_project_memory(other["id"]))
+
+    def test_project_memory_is_deleted_with_its_conversation(self):
+        c = self.s.create_conversation()
+        self.s.save_project_memory(c["id"], {"runs_recorded": 1})
+        self.assertTrue(self.s.delete_conversation(c["id"]))
+        self.assertIsNone(self.s.get_project_memory(c["id"]))
+
+    def test_project_memory_survives_reopen(self):
+        c = self.s.create_conversation()
+        self.s.save_project_memory(c["id"], {"runs_recorded": 3,
+                                             "risks": ["x breaks y"]})
+        self.s.close()
+        reopened = store.Store(self.db)
+        try:
+            got = reopened.get_project_memory(c["id"])
+            self.assertEqual(got["runs_recorded"], 3)
+            self.assertEqual(got["risks"], ["x breaks y"])
+        finally:
+            reopened.close()
+            self.s = store.Store(self.db)   # tearDown() will close this
+
     def test_search_finds_content(self):
         c = self.s.create_conversation()
         self.s.add_message(c["id"], "user",
