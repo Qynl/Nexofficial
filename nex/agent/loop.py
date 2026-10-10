@@ -74,6 +74,7 @@ from agent.regression import (
     regression_review,
 )
 from agent.project_graph import merge_project_graph, to_public as graph_to_public
+from agent.playtest import playtest_review
 from agent.verification import verify_systems
 from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
@@ -1687,6 +1688,7 @@ class AgentRun:
                 regression_state, run_no),
             "project_graph": project_graph,
             "project_graph_summary": graph_to_public(project_graph),
+            "playtest": playtest_review(tasks, self.manager.registry()),
             "verification": verify_systems(
                 tasks, self.manager.registry(),
                 visual_critiques_recorded=len(self.visual_critiques)),

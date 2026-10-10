@@ -32,6 +32,7 @@ SUITES = [
     "test_memory.py",         # cross-run structured project memory
     "test_regression.py",     # system -> dependent-systems regression risk
     "test_project_graph.py",  # identifier co-occurrence dependency graph
+    "test_playtest.py",       # canonical scripted gameplay-loop evidence
     "test_priority.py",       # bottleneck-aware dynamic priority advisory
     "test_debugger.py",       # deterministic compiler/log/crash parsing
     "test_verification.py",  # implementation-vs-proof verification matrix
