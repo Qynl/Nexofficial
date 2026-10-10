@@ -119,6 +119,26 @@ class TaskGraphTests(unittest.TestCase):
         self.assertEqual(restored.get("A").status, FAILED)
         self.assertEqual(restored.get("B").status, SKIPPED)
 
+    def test_mark_failed_carries_failure_kind_and_diagnostic_through_round_trip(self):
+        g = TaskGraph()
+        g.add(Task(id="A", name="A"))
+        g.mark_failed("A", "Vehicle.cpp(1): error C2065: bad",
+                     failure_kind="compilation",
+                     diagnostic={"deterministic": True, "file": "Vehicle.cpp",
+                                "line": 1, "code": "C2065"})
+        self.assertEqual(g.get("A").failure_kind, "compilation")
+        self.assertEqual(g.get("A").diagnostic["code"], "C2065")
+        restored = TaskGraph.from_dict(g.to_dict())
+        self.assertEqual(restored.get("A").failure_kind, "compilation")
+        self.assertEqual(restored.get("A").diagnostic["file"], "Vehicle.cpp")
+        self.assertEqual(restored.get("A").diagnostic["line"], 1)
+
+    def test_mark_failed_without_a_diagnostic_leaves_it_empty(self):
+        g = TaskGraph()
+        g.add(Task(id="A", name="A"))
+        g.mark_failed("A", "boom")
+        self.assertEqual(g.get("A").diagnostic, {})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)

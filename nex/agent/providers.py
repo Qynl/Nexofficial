@@ -121,6 +121,12 @@ _VISION_MODEL_PATTERNS = (
     # multimodal (K2 / K2 Thinking / K2.5 / K2.7 Code are text-only) —
     # "kimi-k2" bare is deliberately NOT matched here.
     "kimi-k3", "kimi-k2.6",
+    # Gemma: every released Gemma 4 size (e2b/e4b/12b/26b/31b) is natively
+    # multimodal (text+vision+audio), so the bare family name is enough.
+    # Gemma 3 only made 4B/12B/27B multimodal (270M/1B are text-only), so
+    # those sizes are matched explicitly rather than the bare "gemma3".
+    "gemma4", "gemma3:4b", "gemma3:12b", "gemma3:27b",
+    "gemma3-4b", "gemma3-12b", "gemma3-27b",
 )
 
 
@@ -332,13 +338,19 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "label": "Local model",
         "kind": KIND_OLLAMA,
         "base_url": "http://127.0.0.1:11434",
-        "model": "gpt-oss:20b",
+        # Gemma 4 12B (Google, released June 2026): natively multimodal
+        # (text + vision + audio), 256K context, runs on a 16GB GPU/Mac at
+        # Q4 — the local lane now gets real screenshot critique out of the
+        # box too, not just NIM/GPT. An operator who has not pulled it yet
+        # gets today's exact behavior: Router.chat() skips an unavailable
+        # model cleanly rather than guessing.
+        "model": "gemma4:12b",
         "api_key_env": "",
         "rpm": 0,             # local: no quota
         "timeout": 120.0,
         "cooldown_s": 5.0,
         "structured_outputs": False,
-        "note": "Routine lane: private chat, summaries and small plans; terminal fallback for hard work.",
+        "note": "Routine lane: private chat, summaries and small plans; terminal fallback for hard work. Default model (Gemma 4 12B) is vision-capable, so local screenshot critique works without a cloud key.",
     },
     "nim": {
         "label": "NVIDIA NIM",
@@ -395,6 +407,17 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         # it anyway.
         "model": "ling-3.1-flash-free",
         "api_key_env": "OPENCODE_API_KEY",
+        # Big Pickle is NOT the general default (see the note above it
+        # stays out of that role deliberately), but it is still the best
+        # FREE vision option Zen offers, so it is wired in specifically
+        # for calls that carry a real screenshot (agent/loop.py's visual
+        # critique) — never for ordinary chat/agent traffic. This is an
+        # explicit operator-facing declaration, not the name-pattern
+        # heuristic in model_supports_vision(): if this week's rotation
+        # cannot actually see images, the critique call fails and is
+        # honestly skipped/reported, exactly like any other provider
+        # outage — it is never silently sent text-only.
+        "vision_model": "big-pickle",
         # No published per-model RPM; a conservative local ceiling avoids
         # hammering a free, no-card gateway into a hard 429/ban.
         "rpm": 20,
@@ -405,8 +428,10 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
                 "$0/token today — Ling 3.1 Flash (default, named and "
                 "stable), Nemotron 3 Ultra/Lightning, Ling 3.0 Flash Fin, "
                 "Big Pickle (rotating identity, unverifiable quality/"
-                "vision) — but a free listing can change or retire; "
-                "Settings → Model pulls the live catalog.",
+                "vision — but wired in as the free vision_model anyway: "
+                "it is Zen's only free option that ever sees images) — a "
+                "free listing can change or retire; Settings → Model "
+                "pulls the live catalog.",
     },
 
     "openrouter": {
@@ -1031,7 +1056,7 @@ class ProviderSpec:
               # interactive/manual calls, how close two requests may sit,
               # and how long a single call may WAIT instead of spending quota.
               "reserve", "min_interval_s", "max_chill_s",
-              "structured_outputs")
+              "structured_outputs", "vision_model")
 
     def __init__(self, name: str, **kw: Any) -> None:
         base = dict(DEFAULT_PROVIDERS.get(name, {}))
@@ -1064,6 +1089,15 @@ class ProviderSpec:
         self.structured_outputs = bool(base.get("structured_outputs", False))
         self.enabled = bool(base.get("enabled", True))
         self.note = str(base.get("note") or "")
+        # An explicit, OPERATOR-declared (or Nex-default) vision model for
+        # this provider, used ONLY for calls carrying real images, in
+        # addition to (never instead of) the regular `model`. This is a
+        # deliberate, explicit override — it is trusted without re-running
+        # model_supports_vision()'s conservative name-pattern heuristic,
+        # the same way an explicit setting always outranks a guess
+        # elsewhere in Nex. Empty means "no separate vision model"; the
+        # regular `model` is still checked by the heuristic as before.
+        self.vision_model = str(base.get("vision_model") or "").strip()
 
     # -- key resolution ---------------------------------------------------
     @property
@@ -1168,6 +1202,7 @@ class ProviderSpec:
             "cooldown_s": self.cooldown_s, "enabled": self.enabled,
             "reserve": self.reserve, "min_interval_s": self.min_interval_s,
             "structured_outputs": self.structured_outputs,
+            "vision_model": self.vision_model,
             "configured": self.configured, "note": self.note,
         }
 
@@ -2141,7 +2176,7 @@ class Router:
             if not state.available():
                 attempts.append({"provider": name, "error": state.status})
                 continue
-            if images and not model_supports_vision(
+            if images and not spec.vision_model and not model_supports_vision(
                     self.model_for(role, name)):
                 attempts.append({"provider": name, "error": "no_vision"})
                 continue
@@ -2157,7 +2192,9 @@ class Router:
                             "roles": self.role_snapshot(),
                             "note": "budget exhausted"})
                 continue
-            selected_model = self.model_for(role, name)
+            selected_model = (spec.vision_model if images and
+                             spec.vision_model else
+                             self.model_for(role, name))
             call_messages = (_attach_images(messages, spec.kind, images)
                              if images else messages)
             try:

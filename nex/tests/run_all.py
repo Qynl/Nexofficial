@@ -32,6 +32,8 @@ SUITES = [
     "test_memory.py",         # cross-run structured project memory
     "test_regression.py",     # system -> dependent-systems regression risk
     "test_priority.py",       # bottleneck-aware dynamic priority advisory
+    "test_debugger.py",       # deterministic compiler/log/crash parsing
+    "test_verification.py",  # implementation-vs-proof verification matrix
     "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
     "test_jsonreply.py",      # model-reply JSON extraction (ACT directive, plans)

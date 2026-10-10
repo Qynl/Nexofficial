@@ -39,6 +39,9 @@ class Task:
     error: Optional[str] = None
     error_signature: Optional[str] = None
     failure_kind: str = ""        # agent/failures.py taxonomy, best-effort
+    # agent/debugger.py's deterministic file/line/code/message extraction
+    # (or an honest "deterministic": False record) for a FAILED task.
+    diagnostic: Dict[str, Any] = field(default_factory=dict)
     tried_alts: List[str] = field(default_factory=list)
     llm_diagnosed: bool = False   # bounded: LLM repair runs at most once/task
     expect: Optional[Any] = None  # what success should look like (from plan)
@@ -54,6 +57,7 @@ class Task:
             "contract_pinned": bool(self.contract_fingerprint),
             "why": self.why, "expect": self.expect, "phase": self.phase,
             "error": self.error, "failure_kind": self.failure_kind,
+            "diagnostic": self.diagnostic,
             "notes": self.notes,
         }
 
@@ -148,13 +152,16 @@ class TaskGraph:
 
     def mark_failed(self, tid: str, error: str,
                     signature: Optional[str] = None,
-                    failure_kind: Optional[str] = None) -> None:
+                    failure_kind: Optional[str] = None,
+                    diagnostic: Optional[Dict[str, Any]] = None) -> None:
         t = self._tasks[tid]
         t.status = FAILED
         t.error = error
         t.error_signature = signature
         if failure_kind is not None:
             t.failure_kind = failure_kind
+        if diagnostic is not None:
+            t.diagnostic = dict(diagnostic)
         # Dependency-aware failure propagation: dependents are skipped,
         # not re-executed.
         self._propagate_skip(tid)
@@ -204,6 +211,7 @@ class TaskGraph:
                     "result": t.result, "error": t.error,
                     "error_signature": t.error_signature,
                     "failure_kind": t.failure_kind,
+                    "diagnostic": t.diagnostic,
                     "llm_diagnosed": t.llm_diagnosed,
                     "expect": t.expect, "why": t.why,
                     "phase": t.phase, "notes": t.notes,
@@ -226,6 +234,7 @@ class TaskGraph:
                 result=td.get("result"), error=td.get("error"),
                 error_signature=td.get("error_signature"),
                 failure_kind=td.get("failure_kind", "") or "",
+                diagnostic=dict(td.get("diagnostic") or {}),
                 llm_diagnosed=bool(td.get("llm_diagnosed", False)),
                 expect=td.get("expect"),
                 why=td.get("why", "") or "",

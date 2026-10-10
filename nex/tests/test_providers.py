@@ -911,9 +911,13 @@ except ValueError as exc:
     _expect("ghost" in str(exc),
             "an unknown fallback name is refused: %s" % str(exc)[:60])
 
-# --- 🟡 THE DEFAULT LOCAL MODEL IS gpt-oss:20b ---------------------------
-_expect(providers.DEFAULT_PROVIDERS["local"]["model"] == "gpt-oss:20b",
-        "the shipped local default is gpt-oss:20b (the small brain)")
+# --- 🟡 THE DEFAULT LOCAL MODEL IS gemma4:12b (vision-capable) -----------
+_expect(providers.DEFAULT_PROVIDERS["local"]["model"] == "gemma4:12b",
+        "the shipped local default is gemma4:12b (native text+vision+audio)")
+_expect(providers.model_supports_vision(
+        providers.DEFAULT_PROVIDERS["local"]["model"]) is True,
+        "the local default model is recognised as vision-capable, so "
+        "screenshot critique works fully offline with no cloud key")
 _expect(providers.DEFAULT_PROVIDERS["nim"]["model"] == "moonshotai/kimi-k3",
         "NIM's default is Kimi K3 — a vision-capable flagship model, so a "
         "plain NVIDIA key is enough for the real-screenshot critique")
@@ -927,8 +931,8 @@ with tempfile.TemporaryDirectory() as td:
         r_def = providers.build_router(
             store=providers.SettingsStore(os.path.join(td, "none.json")),
             load_dot_env=False)
-        _expect(r_def.role_model("chat") == "gpt-oss:20b"
-                and r_def.status()["agent"]["active_model"] == "gpt-oss:20b",
+        _expect(r_def.role_model("chat") == "gemma4:12b"
+                and r_def.status()["agent"]["active_model"] == "gemma4:12b",
                 "a fresh install actually serves routine and hard work locally")
     finally:
         for k, v in saved2.items():
@@ -1902,11 +1906,68 @@ _expect(providers.model_supports_vision("nvidia/nemotron-3-super-120b-a12b")
 _expect(providers.model_supports_vision("llama-3.3-70b-versatile") is False,
         "Llama 3.3 (text-only) is not misdetected as vision-capable")
 _expect(providers.model_supports_vision("gpt-oss:20b") is False,
-        "the local gpt-oss default is not misdetected as vision-capable")
+        "the OLD local gpt-oss default is not misdetected as vision-capable")
 _expect(providers.model_supports_vision("") is False,
         "an empty/unknown model name defaults to text-only (the safe side)")
 _expect(providers.model_supports_vision(None) is False,
         "None never crashes the check and defaults to text-only")
+_expect(providers.model_supports_vision("gemma4:12b") is True,
+        "Gemma 4 12B (the new local default) is recognised as vision-capable")
+_expect(providers.model_supports_vision("gemma4:e2b") is True,
+        "every released Gemma 4 size is natively multimodal")
+_expect(providers.model_supports_vision("gemma3:12b") is True,
+        "Gemma 3 12B is a documented multimodal size")
+_expect(providers.model_supports_vision("gemma3:1b") is False,
+        "Gemma 3 1B is a TEXT-ONLY size and must not be misdetected just "
+        "because it shares the 'gemma3' family name")
+_expect(providers.model_supports_vision("gemma3:270m") is False,
+        "Gemma 3 270M is likewise text-only")
+
+# --- vision_model: an explicit per-provider override for image calls -----
+_expect(providers.DEFAULT_PROVIDERS["opencode"].get("vision_model")
+        == "big-pickle",
+        "OpenCode Zen's free vision option (big-pickle) is wired in as an "
+        "explicit vision_model override, without changing its ordinary "
+        "chat/agent default (ling-3.1-flash-free)")
+spec_oc = providers.ProviderSpec("opencode", api_key="oc-key")
+_expect(spec_oc.vision_model == "big-pickle",
+        "ProviderSpec parses vision_model from DEFAULT_PROVIDERS")
+_expect(spec_oc.masked()["vision_model"] == "big-pickle",
+        "vision_model is visible in the masked settings view")
+_expect(providers.ProviderSpec("gpt", api_key="x").vision_model == "",
+        "a provider with no declared vision_model defaults to empty, not "
+        "a guess")
+
+vision_probe_image = [{"mime_type": "image/png", "data": "Zm9v"}]
+h_oc_vision = FakeHTTP()
+h_oc_vision.push("opencode.ai", "a real critique of the screenshot")
+r_oc_vision = providers.Router(
+    {"opencode": providers.ProviderSpec(
+        "opencode", api_key="oc-key", min_interval_s=0.0, max_chill_s=0.0)},
+    {"agent": {"provider": "opencode", "fallbacks": []}},
+    transport={"post": h_oc_vision.post, "get": h_oc_vision.get})
+out_oc_vision = r_oc_vision.chat("agent", MESSAGES,
+                                 images=vision_probe_image)
+_expect(out_oc_vision == "a real critique of the screenshot",
+        "an image request to OpenCode succeeds using its vision_model "
+        "override, even though its ordinary default model has no "
+        "recognised vision support")
+_expect(h_oc_vision.calls[-1][1]["model"] == "big-pickle",
+        "the ACTUAL request sent 'big-pickle' as the model for the image "
+        "call, not the ordinary ling-3.1-flash-free default: %r"
+        % h_oc_vision.calls[-1][1])
+
+h_oc_text = FakeHTTP()
+h_oc_text.push("opencode.ai", "ordinary text reply")
+r_oc_text = providers.Router(
+    {"opencode": providers.ProviderSpec(
+        "opencode", api_key="oc-key", min_interval_s=0.0, max_chill_s=0.0)},
+    {"agent": {"provider": "opencode", "fallbacks": []}},
+    transport={"post": h_oc_text.post, "get": h_oc_text.get})
+r_oc_text.chat("agent", MESSAGES)
+_expect(h_oc_text.calls[-1][1]["model"] == "ling-3.1-flash-free",
+        "a NORMAL (non-image) call still uses the ordinary default model, "
+        "never the vision_model override: %r" % h_oc_text.calls[-1][1])
 
 # --- _attach_images(): per-kind multimodal payload construction ----------
 base_msgs = [{"role": "user", "content": "describe this screenshot"}]

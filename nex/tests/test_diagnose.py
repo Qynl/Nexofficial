@@ -221,6 +221,22 @@ def main() -> None:
            "an enormous error string is bounded, not forwarded whole into "
            "the prompt")
 
+    # --- deterministic diagnostic facts (agent/debugger.py) reach the ----
+    # --- LLM context instead of being re-parsed by the model itself -----
+    ctx3 = diagnose.build_failure_context(
+        task, "Vehicle.cpp(42): error C2065: 'Speed': undeclared identifier",
+        registry,
+        diagnostic_summary="Vehicle.cpp:42 [C2065] 'Speed': undeclared "
+                           "identifier")
+    expect("deterministic extraction:" in ctx3[1]["content"],
+           "a deterministic diagnostic fact is included as its own line")
+    expect("Vehicle.cpp:42" in ctx3[1]["content"],
+           "the extracted file:line reaches the diagnosis prompt")
+
+    ctx4 = diagnose.build_failure_context(task, "boom", registry)
+    expect("deterministic extraction:" not in ctx4[1]["content"],
+           "omitting diagnostic_summary adds nothing extra to the prompt")
+
     class ExplodingRegistry:
         def all_tools(self):
             raise RuntimeError("registry is on fire")

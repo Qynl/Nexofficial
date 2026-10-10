@@ -65,10 +65,12 @@ from agent.quality import (
     profile_for_goal,
     tool_gates,
 )
+from agent.debugger import diagnose_failure
 from agent.failures import classify_failure, label as failure_label
 from agent.memory import merge_from_run, to_prompt_block as memory_prompt_block
 from agent.priority import bottleneck_note
 from agent.regression import regression_brief, regression_review
+from agent.verification import verify_systems
 from agent.visual import VisualIssueBoard
 from agent.workload import planning_purpose
 from agent.task_graph import (
@@ -1064,7 +1066,9 @@ class AgentRun:
             except Exception:  # noqa: BLE001 - classification is advisory
                 gates = set()
         kind = classify_failure(error, tool_name, gates)
-        self.graph.mark_failed(tid, error, signature, failure_kind=kind)
+        diagnostic = diagnose_failure(error, kind).to_public()
+        self.graph.mark_failed(tid, error, signature, failure_kind=kind,
+                               diagnostic=diagnostic)
 
     def _retry_is_safe(self, task: Task) -> bool:
         """Only repeat a call automatically when live policy says read-only.
@@ -1178,8 +1182,13 @@ class AgentRun:
         # C. model diagnosis: repair args or switch to an alternative tool
         if not task.llm_diagnosed:
             task.llm_diagnosed = True
+            # Deterministic facts first (agent/debugger.py); the LLM call
+            # reasons from them instead of re-parsing the raw blob itself.
+            diag_kind = classify_failure(error, task.tool or "")
+            diag_summary = diagnose_failure(error, diag_kind).summary()
             decision = diagnose.diagnose(task, error,
-                                         self.manager.registry(), self.llm)
+                                         self.manager.registry(), self.llm,
+                                         diagnostic_summary=diag_summary)
             if decision and decision["kind"] == "correct_args":
                 task.args = decision["args"]
                 self._emit("run.tool", step_id=task.id, tool=task.tool,
@@ -1605,11 +1614,12 @@ class AgentRun:
             [{"name": t.name, "tool": t.tool,
               "error": (t.error or "")[:200],
               "failure_kind": t.failure_kind or "unknown",
-              "failure_label": failure_label(t.failure_kind or "unknown")}
+              "failure_label": failure_label(t.failure_kind or "unknown"),
+              "diagnostic": dict(t.diagnostic or {})}
              for t in failed]
             + [{"name": t.name, "tool": t.tool,
                 "error": "step was not executed (plan stalled)",
-                "failure_kind": "", "failure_label": ""}
+                "failure_kind": "", "failure_label": "", "diagnostic": {}}
                for t in unfinished])
         visual_issues = self._visual_board.to_public()
         done_stages = list(program.get("completed_stages") or []) \
@@ -1650,6 +1660,9 @@ class AgentRun:
             "production_program": program,
             "project_memory": project_memory,
             "regression": regression_review(tasks),
+            "verification": verify_systems(
+                tasks, self.manager.registry(),
+                visual_critiques_recorded=len(self.visual_critiques)),
             "duration_s": round(time.time() - self.started_at, 1),
         }
 
