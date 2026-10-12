@@ -898,13 +898,16 @@ def load_env_file(path: str, environ: Optional[Dict[str, str]] = None) -> int:
 
 def load_env(paths: Optional[Iterable[str]] = None) -> int:
     """Load the default .env chain (nex/.env, repo .env, NEX_HOME/.env)."""
+    global DEFAULT_SETTINGS_PATH
     if paths is not None:
-        return sum(load_env_file(path) for path in env_file_paths(paths))
-
-    # The first two files may set NEX_HOME. Resolve its .env only after they
-    # load so every persistent path follows the same operator override.
-    total = sum(load_env_file(path) for path in env_file_paths()[:2])
-    return total + load_env_file(env_file_paths()[-1])
+        total = sum(load_env_file(path) for path in env_file_paths(paths))
+    else:
+        # The first two files may set NEX_HOME. Resolve its .env only after
+        # they load so every persistent path follows the same override.
+        total = sum(load_env_file(path) for path in env_file_paths()[:2])
+        total += load_env_file(env_file_paths()[-1])
+    DEFAULT_SETTINGS_PATH = default_settings_path()
+    return total
 
 
 # ---------------------------------------------------------------------------

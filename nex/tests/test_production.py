@@ -266,6 +266,8 @@ class ProgramLoopTests(unittest.TestCase):
         self.assertEqual(len(plans), 3)
         self.assertIn("Complete the plan's user-visible creative_brief", plans[1])
         self.assertIn("stage evidence is incomplete", plans[2])
+        self.assertNotIn("lacks evidence", plans[2])
+        self.assertIn("MUST NOT be rerun", plans[2])
         self.assertEqual(report["replans"], 1)
         review = report["production_program"]["stage_reviews"]["discovery"]
         self.assertTrue(review["passed"])

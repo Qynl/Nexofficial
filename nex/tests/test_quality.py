@@ -88,6 +88,9 @@ class CatalogAndScoreTests(unittest.TestCase):
                          "the static planner prompt is the sole source for "
                          "creative-brief field requirements")
         self.assertIn("smallest coherent vertical", PLANNER_SYSTEM)
+        self.assertIn("connected tools, existing assets", PLANNER_SYSTEM)
+        self.assertIn("run budget", PLANNER_SYSTEM)
+        self.assertIn("placeholder content", PLANNER_SYSTEM)
         self.assertNotIn("vertical-slice sequence", brief,
                          "dependency ordering is specified once by the "
                          "planner contract, not repeated in every quality brief")
@@ -224,7 +227,9 @@ class LoopQualityTests(unittest.TestCase):
         self.assertIn("GAME PRODUCTION QUALITY CONTRACT", planner_calls[0])
         self.assertIn("Complete the plan's user-visible creative_brief",
                       planner_calls[1])
-        self.assertIn("do NOT repeat", planner_calls[2])
+        self.assertNotIn("do NOT repeat", planner_calls[2])
+        self.assertEqual(planner_calls[2].count("MUST NOT be rerun"), 1)
+        self.assertIn("$create_level", planner_calls[2])
         self.assertEqual(
             [name for _, name, _ in mgr.calls].count("capture_frame"), 1)
         capture_args = [args for _, name, args in mgr.calls

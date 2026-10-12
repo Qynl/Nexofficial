@@ -14,6 +14,7 @@ from agent.game_brief import (  # noqa: E402
 )
 from agent.mock_mcp import MockMCPServer  # noqa: E402
 from agent.model_planner import model_driven_planner  # noqa: E402
+from agent.prompts import PLANNER_SYSTEM  # noqa: E402
 from test_agent_loop import FakeManager  # noqa: E402
 
 
@@ -128,8 +129,16 @@ class CreativeBriefTests(unittest.TestCase):
             game_production=True)
         self.assertIsNotNone(parsed)
         self.assertEqual(len(calls), 2)
+        self.assertIn("Goal: Create a polished co-op game", calls[0])
+        self.assertNotIn("Produce the plan JSON now", calls[0])
         self.assertNotIn("GAME CREATIVE CONTRACT", calls[0])
+        self.assertIn("Reply with a single JSON object", PLANNER_SYSTEM)
         self.assertIn("do not change, add, remove, or reorder", calls[1])
+        self.assertIn("Return the same plan with only", calls[1])
+        self.assertNotIn("same plan JSON", calls[1])
+        self.assertIn("Each item is an object with `criterion` and", PLANNER_SYSTEM)
+        self.assertNotIn("Acceptance criteria must be objects", calls[1])
+        self.assertNotIn("never claim unavailable tests can run", calls[1])
         self.assertEqual(len(graph.all()), 1)
         self.assertEqual(graph.all()[0].tool, "create_level")
         self.assertTrue(graph.plan_meta["creative_brief_health"]["complete"])

@@ -37,6 +37,7 @@ from agent.loop import (                                       # noqa: E402
 )
 from agent.task_graph import Task                                # noqa: E402
 from agent.model_planner import plan_to_graph                   # noqa: E402
+from agent.prompts import EVALUATOR_SYSTEM                      # noqa: E402
 from agent.workload import planning_purpose                     # noqa: E402
 from mcp.registry import CapabilityRegistry                    # noqa: E402
 from mcp.capability import capability_for_tool                 # noqa: E402
@@ -268,9 +269,12 @@ class PlanningTests(unittest.TestCase):
 
     def test_provider_receives_exact_agent_job_purpose(self):
         purposes = []
+        evaluator_messages = []
 
         def llm(messages, purpose=""):
             purposes.append(purpose)
+            if purpose == "evaluation":
+                evaluator_messages.append(messages[-1]["content"])
             if purpose == "planning-routine":
                 return ('{"steps":['
                         '{"name":"say","tool":"echo.echo",'
@@ -287,6 +291,8 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(report["status"], "completed")
         self.assertEqual(
             purposes, ["planning-routine", "evaluation", "summary"])
+        self.assertIn("Reply with a single JSON object", EVALUATOR_SYSTEM)
+        self.assertNotIn("Decide: done?", evaluator_messages[0])
 
     def test_workload_classifier_keeps_routine_local_and_debug_hard(self):
         self.assertEqual(planning_purpose("echo hello"), "planning-routine")

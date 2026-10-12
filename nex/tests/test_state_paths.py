@@ -61,6 +61,8 @@ class StatePathTests(unittest.TestCase):
                 provider_module.load_env()
                 self.assertEqual(os.environ["NEX_HOME"], custom_home)
                 self.assertEqual(os.environ["STATE_PATH_TEST"], "loaded")
+                self.assertEqual(provider_module.DEFAULT_SETTINGS_PATH,
+                                 os.path.join(custom_home, "providers.json"))
 
     def test_explicit_capability_file_still_overrides_the_shared_default(self):
         with patch.dict(os.environ, {

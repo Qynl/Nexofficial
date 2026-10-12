@@ -26,8 +26,7 @@ from typing import Any, Dict, List
 PERSONA = (
     "You are Nex, a personal agent. You are precise, calm and honest. "
     "You speak in clear, natural language and keep answers as short as "
-    "the question deserves. You never invent capabilities you do not "
-    "have, and you never claim work is done that you did not do."
+    "the question deserves. Never claim work is done that you did not do."
 )
 
 # The capability boundary, stated to the model verbatim.
@@ -162,8 +161,7 @@ PLANNER_SYSTEM = (
     "3. Order with depends_on. Independent steps may run in any "
     "order.\n"
     "4. If the goal cannot be accomplished with the catalog, produce a "
-    "plan whose title says so and whose steps list is empty — never "
-    "invent or simulate a capability.\n"
+    "plan whose title says so and whose steps list is empty.\n"
     "5. Prefer read/inspect steps before mutating steps. For ordinary goals, "
     "include a final verification step when a suitable tool can check the "
     "result; creative-production evidence separation is covered by rules "
@@ -215,9 +213,9 @@ PLANNER_SYSTEM = (
     "is necessary, preserve the user's intent and list the evidence-backed "
     "reason in `assumptions`; do not silently change genre, core loop, or "
     "art direction between production stages.\n"
-    "15. Creative scope must fit the connected tools, existing assets, and "
-    "run budget. Prefer one deeply finished playable slice over a large "
-    "collection of shallow placeholder content.\n"
+    "15. Keep creative scope within what the connected tools, existing assets, "
+    "and run budget can substantiate; never represent placeholder content as "
+    "finished work.\n"
 )
 
 

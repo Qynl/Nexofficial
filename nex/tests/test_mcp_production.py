@@ -253,6 +253,8 @@ class PlanAuditTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(len(calls), 2)
         self.assertIn("Deterministic MCP production validation", calls[1])
+        self.assertIn("Return one corrected plan.", calls[1])
+        self.assertNotIn("Return one corrected plan JSON.", calls[1])
         self.assertEqual(len(graph.all()), 5)
         self.assertTrue(all(task.contract_fingerprint
                             for task in graph.all()))

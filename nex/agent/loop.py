@@ -1394,12 +1394,8 @@ class AgentRun:
             parts.append("\nGame-production evidence scorecard:\n" +
                          _jsonish(scorecard))
         elif scorecard.get("active"):
-            parts.append("\nFinal quality scoring is deferred until the "
-                         "validation stage; evaluate only the current "
-                         "production-stage acceptance criteria.")
-        parts.append(
-            "\nDecide: done? continue? replan? stop? Reply with the JSON "
-            "object only.")
+            parts.append(
+                "\nFinal quality scoring is deferred until the validation stage.")
         messages = [
             {"role": "system", "content": EVALUATOR_SYSTEM},
             {"role": "user", "content": "\n".join(parts)},
@@ -1455,21 +1451,23 @@ class AgentRun:
         self._program_reviews[stage.id] = review
         if not review.get("passed"):
             missing = ", ".join(review.get("missing") or [])
-            self.context.failures.append(
-                "production stage '%s' lacks evidence: %s" %
-                (stage.label, missing))
             correctable = review.get("correctable") or []
             if (correctable and self.llm is not None and
                     self._replans < self._replan_budget and not self._check_stop()):
                 note = (
                     "Current production stage '%s' is not complete. Add only "
                     "work proving these missing machine-audited requirements: "
-                    "%s. Reuse all successful work."
+                    "%s."
                     % (stage.label, ", ".join(correctable)))
                 self._eval_note = note
-                return self._replan({
+                replanned = self._replan({
                     "done": False, "adjust": "replan",
                     "reason": "stage evidence is incomplete", "note": note})
+                if replanned:
+                    return True
+            self.context.failures.append(
+                "production stage '%s' lacks evidence: %s" %
+                (stage.label, missing))
             return False
         if stage.id not in self._program_completed:
             self._program_completed.append(stage.id)
@@ -1510,8 +1508,7 @@ class AgentRun:
         graph, _ = model_driven_planner(
             self.goal, reg, llm=self.llm,
             purpose="planning-hard",
-            note=("The previous production stage completed. Preserve and "
-                  "reuse these results; plan only the newly assigned stage:\n"
+            note=("Previous production-stage outcomes:\n"
                   + (summary or "(no reusable outputs)")),
             quality_brief=self._planning_brief(reg),
             completed_refs=completed_refs,
@@ -1616,8 +1613,8 @@ class AgentRun:
         graph, _ = model_driven_planner(
             self.goal, reg, llm=self.llm,
             purpose=self._plan_purpose(reg),
-            note=("Previous attempt: %s\nWhat already succeeded (do NOT "
-                  "repeat it):\n%s\nWhat to change: %s"
+            note=("Previous attempt: %s\nSuccessful outcomes:\n%s\n"
+                  "What to change: %s"
                   % (verdict.get("reason", ""), summary or "(nothing)",
                      note or "")),
             feedback=feedback,
