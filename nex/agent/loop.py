@@ -47,7 +47,7 @@ from agent.llm import call as call_llm, call_with_images
 from agent.mcp_production import (
     context_block, rank_context_resources, server_prompt_names,
 )
-from agent.model_planner import model_driven_planner, validate_plan_deep
+from agent.model_planner import model_driven_planner
 from agent.planner import plan as skeleton_plan
 from agent.reversal import plan_reversal
 from agent.prompts import EVALUATOR_SYSTEM, SUMMARIZER_SYSTEM
@@ -68,6 +68,7 @@ from agent.quality import (
 from agent.debugger import diagnose_failure
 from agent.failures import classify_failure, label as failure_label
 from agent.game_brief import brief_health, normalize_game_brief
+from agent.tool_lookup import lookup_tool
 from agent.memory import merge_from_run, to_prompt_block as memory_prompt_block
 from agent.priority import bottleneck_note
 from agent.regression import (
@@ -797,13 +798,12 @@ class AgentRun:
         # not permission to substitute an unrelated keyword-matched action.
         if not graph.all() and model_plan is None:
             graph = skeleton_plan(self.goal, reg)
-        if graph.all():
-            errors, warnings = validate_plan_deep(
-                _plan_as_dict(graph), reg) if model_plan else ([], [])
-            # Missing-required-arg errors: keep the step; the recovery
-            # ladder may still fix it at runtime. Report as warnings.
-            for w in warnings:
-                self.context.failures.append("plan: " + w)
+        if graph.all() and model_plan:
+            # Schema warnings were collected during plan_to_graph's single
+            # live-registry lookup; omitted required args stay repairable by
+            # the runtime recovery ladder.
+            for warning in graph.plan_meta.get("warnings", []):
+                self.context.failures.append("plan: " + warning)
         if self._program_active and graph.all():
             stage = PRODUCTION_STAGES[self._program_stage]
             for task in graph.all():
@@ -833,7 +833,7 @@ class AgentRun:
         for task in self.graph.all():
             if not task.server or not task.tool:
                 continue
-            tv = reg.by_name("%s.%s" % (task.server, task.tool))
+            tv = lookup_tool(reg, task.tool, task.server)
             if tv is None:
                 continue
             decision = authorize_tool(task.server, task.tool, tv.capability)
@@ -1069,11 +1069,11 @@ class AgentRun:
         or fails a gate) and costs nothing when no vision-capable
         provider is configured — no call is attempted in that case.
         """
-        if not self._quality_profile.active or self.llm is None:
+        if (not self._quality_profile.active or self.llm is None
+                or not task.server or not task.tool):
             return
-        server_view = self.manager.registry().server(task.server or "")
-        tool_view = server_view.by_name(task.tool or "") if server_view \
-            else None
+        tool_view = lookup_tool(self.manager.registry(), task.tool,
+                                task.server)
         if tool_view is None or "visual" not in tool_gates(tool_view):
             return
         images = _extract_screenshot_images(result)
@@ -1177,8 +1177,7 @@ class AgentRun:
         tool_name = (task.tool if task else "") or ""
         if task is not None and task.server and task.tool:
             try:
-                tv = self.manager.registry().by_name(
-                    "%s.%s" % (task.server, task.tool))
+                tv = lookup_tool(self.manager.registry(), task.tool, task.server)
                 if tv is not None:
                     gates = tool_gates(tv)
             except Exception:  # noqa: BLE001 - classification is advisory
@@ -1197,10 +1196,7 @@ class AgentRun:
         cannot downgrade that ambiguity.
         """
         reg = self.manager.registry()
-        tv = reg.by_name("%s.%s" % (task.server, task.tool)) \
-            if task.server and task.tool else None
-        if tv is None and task.tool:
-            tv = reg.by_name(task.tool)
+        tv = lookup_tool(reg, task.tool, task.server)
         return bool(tv is not None and tv.capability
                     and tv.capability.read_only)
 
@@ -1351,10 +1347,7 @@ class AgentRun:
 
     def _schema_props(self, task: Task) -> Optional[set]:
         reg = self.manager.registry()
-        tv = reg.by_name("%s.%s" % (task.server, task.tool)) \
-            if task.server else None
-        if tv is None and task.tool:
-            tv = reg.by_name(task.tool)
+        tv = lookup_tool(reg, task.tool, task.server)
         if tv is None:
             return None
         schema = tv.schema if isinstance(tv.schema, dict) else {}
@@ -2059,13 +2052,6 @@ def _fallback_summary(report: Dict[str, Any]) -> str:
             ", ".join(i.get("label", i.get("category", "?"))
                      for i in resolved_issues[:5]))
     return "\n".join(lines)
-
-
-def _plan_as_dict(graph: TaskGraph) -> Dict[str, Any]:
-    return {"steps": [
-        {"name": t.id, "tool": (t.server + "." + t.tool) if t.server
-         else (t.tool or ""), "args": t.args}
-        for t in graph.all()]}
 
 
 # ---------------------------------------------------------------------------

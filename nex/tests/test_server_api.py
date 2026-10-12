@@ -51,6 +51,10 @@ class APITests(unittest.TestCase):
 
     # ── helpers ─────────────────────────────────────────────────
 
+    def test_server_token_path_uses_the_shared_operator_state_root(self):
+        self.assertEqual(server_mod._token_file_path(),
+                         os.path.join(HOME, "server_token"))
+
     def req(self, method, path, body=None, headers=None, auth=True,
             csrf=True):
         h = {}

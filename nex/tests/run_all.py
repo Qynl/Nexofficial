@@ -52,6 +52,7 @@ SUITES = [
     "test_verification.py",  # implementation-vs-proof verification matrix
     "test_reversal.py",       # compensating actions + honest undo coverage
     "test_store.py",          # conversation persistence
+    "test_state_paths.py",    # shared NEX_HOME resolution across layers
     "test_jsonreply.py",      # model-reply JSON extraction (ACT directive, plans)
     "test_audit.py",          # structured audit log: redaction, bounded ring
     "test_diagnose.py",       # LLM-driven failure recovery: validated escapes

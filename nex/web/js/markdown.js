@@ -32,7 +32,6 @@ function renderInline(text, doc) {
     if (ch === '`') {
       const end = text.indexOf('`', i + 1);
       if (end > i) {
-        pushText(text.slice(i, i + 1) === '`' ? '' : '');
         const code = doc.createElement('code');
         code.textContent = text.slice(i + 1, end);
         frag.appendChild(code);
@@ -277,7 +276,8 @@ function splitRow(line) {
   return line.trim().replace(/^\||\|$/g, '').split('|');
 }
 
-function buildCode(lang, body, doc) {
+function buildCode(lang, body, doc,
+                  {copyable = true, trimTrailingNewline = true} = {}) {
   const pre = doc.createElement('pre');
   if (lang) {
     const l = doc.createElement('span');
@@ -286,9 +286,9 @@ function buildCode(lang, body, doc) {
     pre.appendChild(l);
   }
   const code = doc.createElement('code');
-  code.textContent = body.replace(/\n$/, '');
+  code.textContent = trimTrailingNewline ? body.replace(/\n$/, '') : body;
   pre.appendChild(code);
-  if (body.trim()) {
+  if (copyable && body.trim()) {
     const copy = doc.createElement('button');
     copy.className = 'code-copy';
     copy.textContent = 'copy';
@@ -319,17 +319,10 @@ export function renderStreaming(text, doc = document) {
       const parts = p.trimStart().split('\n');
       const lang = (parts[0].slice(3) || '').trim();
       const body = parts.slice(1).join('\n').replace(/```$/m, '');
-      const pre = doc.createElement('pre');
-      if (lang) {
-        const l = doc.createElement('span');
-        l.className = 'code-lang';
-        l.textContent = lang;
-        pre.appendChild(l);
-      }
-      const code = doc.createElement('code');
-      code.textContent = body;
-      pre.appendChild(code);
-      root.appendChild(pre);
+      root.appendChild(buildCode(lang, body, doc, {
+        copyable: false,
+        trimTrailingNewline: false,
+      }));
     } else {
       const el = doc.createElement('p');
       el.appendChild(renderInline(p.replace(/\n/g, ' '), doc));

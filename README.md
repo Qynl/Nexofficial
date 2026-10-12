@@ -998,7 +998,7 @@ multiple `allOf` branches used to have those branches silently skipped.
 
 ### 7. The browser is authenticated and hardened
 
-- generated server token stored `0600` under `~/.nex`;
+- generated server token stored `0600` under `$NEX_HOME` (default `~/.nex`);
 - token exchanged for an `HttpOnly`, `SameSite=Strict` cookie;
 - mutation requests require the `X-Nex: 1` anti-CSRF header;
 - query-string credentials are not accepted by APIs;
@@ -1519,7 +1519,7 @@ All settings are optional unless your chosen model provider requires a key.
 | `NEX_TRUSTED_SERVERS` | empty | Servers permitted for autonomous operation |
 | `NEX_ALLOW_CODE_EXECUTION` | empty | Servers explicitly approved for engine/language code tools |
 | `NEX_ALLOW_CONFIRMATIONS` | empty | Servers pre-approved for non-code confirmation categories |
-| `NEX_CAPABILITY_FILE` | `~/.nex/capabilities.json` | Operator classification pins; escalation only |
+| `NEX_CAPABILITY_FILE` | `$NEX_HOME/capabilities.json` (`~/.nex/capabilities.json` by default) | Operator classification pins; escalation only |
 | `NEX_MAX_STEPS` | `64` | Base tool-step ceiling for the 30-minute default run; scales up with an explicitly approved longer run length (see "For a genuinely long session" above) |
 | `NEX_MAX_REPLANS` | `3` | Base structural-replan ceiling for a focused (non-studio-scale) goal; scales the same way |
 | `NEX_MAX_PROGRAM_REPLANS` | `16` | Base structural-replan ceiling for a studio-scale production program (shared across all 8 stages, not per stage); scales the same way |

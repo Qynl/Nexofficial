@@ -11,6 +11,7 @@ os.environ.setdefault("NEX_HOME", "/tmp/nex-quality-tests")
 
 from agent.loop import AgentRun                                  # noqa: E402
 from agent.mock_mcp import MockMCPServer                         # noqa: E402
+from agent.prompts import PLANNER_SYSTEM                         # noqa: E402
 from agent.quality import (                                      # noqa: E402
     assess, gate_catalog, is_game_production_goal, planning_brief,
     profile_for_goal,
@@ -82,6 +83,14 @@ class CatalogAndScoreTests(unittest.TestCase):
         self.assertIn("GAME PRODUCTION QUALITY CONTRACT", brief)
         self.assertIn("engine.capture_frame", brief)
         self.assertIn("literal AAA quality", brief)
+        self.assertIn("creative_brief", PLANNER_SYSTEM)
+        self.assertNotIn("creative_brief", brief,
+                         "the static planner prompt is the sole source for "
+                         "creative-brief field requirements")
+        self.assertIn("smallest coherent vertical", PLANNER_SYSTEM)
+        self.assertNotIn("vertical-slice sequence", brief,
+                         "dependency ordering is specified once by the "
+                         "planner contract, not repeated in every quality brief")
 
         sparse = FakeManager([
             MockMCPServer("engine", [tool("create_level")])

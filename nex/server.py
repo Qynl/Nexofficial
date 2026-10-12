@@ -12,7 +12,8 @@ One process, stdlib only:
 Security posture
 ----------------
 * Every /api request is authenticated (HttpOnly cookie, X-Nex-Auth
-  header, or Bearer). The token lives in ~/.nex/server_token (0600).
+  header, or Bearer). The token lives in $NEX_HOME/server_token (0600;
+  $NEX_HOME defaults to ~/.nex).
 * Mutating requests must carry the `X-Nex: 1` header — a cross-site
   page can submit a form POST but cannot set custom headers, so the
   cookie alone is never enough to act.
@@ -67,7 +68,8 @@ from agent.engines import public_targets as public_engine_targets
 from agent.jsonreply import extract_json_with_key
 from agent.loop import RunCoordinator, budget_for_minutes
 from agent.production import readiness as production_readiness
-from mcp.manager import get_manager
+from mcp.manager import env_name_set as _env_set, get_manager
+from mcp.paths import nex_home
 from mcp.policy import Policy, set_policy
 from store import Store
 
@@ -84,17 +86,6 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 # ---------------------------------------------------------------------------
 
 
-def _nex_dir() -> str:
-    base = os.environ.get("NEX_HOME") or os.path.join(
-        os.path.expanduser("~"), ".nex")
-    os.makedirs(base, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
-    return base
-
-
 def _is_loopback_host(host: str) -> bool:
     h = (host or "").strip().lower().strip("[]")
     if h in ("localhost", ""):
@@ -106,7 +97,7 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _token_file_path() -> str:
-    return os.path.join(_nex_dir(), "server_token")
+    return os.path.join(nex_home(), "server_token")
 
 
 def _load_or_create_auth_token() -> str:
@@ -248,11 +239,6 @@ BUS = EventBus()
 STORE = Store()
 ROUTER = _providers.build_router(bus=BUS)
 MANAGER = get_manager(bus=BUS)
-
-
-def _env_set(name: str) -> set:
-    return {v.strip() for v in (os.environ.get(name, "") or "").split(",")
-            if v.strip()}
 
 
 # Operator standing approvals are composition-root configuration, never model
@@ -1331,7 +1317,7 @@ def main() -> None:
     print("Open: http://localhost:%s/?nex_token=%s   (one click sets the "
           "auth cookie)" % (PORT, AUTH_TOKEN))
     print("Token: %s" % AUTH_TOKEN)
-    print("Config: %s" % _nex_dir())
+    print("Config: %s" % nex_home())
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -62,6 +62,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from mcp.paths import nex_home
+
 
 def _env_int(name: str, default: int) -> int:
     """0 (or unset/invalid) falls back to default; negative clamps to 0
@@ -83,10 +85,7 @@ DEFAULT_CONVERSATION_TTL_DAYS = _env_int("NEX_CONVERSATION_TTL_DAYS", 0)
 
 
 def _db_path() -> str:
-    base = os.environ.get("NEX_HOME") or os.path.join(
-        os.path.expanduser("~"), ".nex")
-    os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "nex.db")
+    return os.path.join(nex_home(), "nex.db")
 
 
 _SCHEMA = """

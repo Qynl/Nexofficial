@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NEX = os.path.dirname(HERE)
@@ -13,16 +14,20 @@ from agent.context import result_to_text, truncate_text                  # noqa:
 from agent.loop import AgentRun, _result_value                          # noqa: E402
 from agent.mcp_production import (                                      # noqa: E402
     audit_production_plan, context_block, contract_health,
-    production_catalog, rank_context_resources, schema_signature,
+    production_catalog, rank_context_resources, redact_untrusted_text,
+    sanitize_untrusted_text, schema_signature,
     server_prompt_names,
 )
 from agent.planner import plan as skeleton_plan                          # noqa: E402
 from agent.mock_mcp import MockMCPServer                                 # noqa: E402
-from agent.model_planner import catalog_text, model_driven_planner       # noqa: E402
+from agent.model_planner import (                                      # noqa: E402
+    catalog_text, model_driven_planner, plan_to_graph, resolve_plan_tools,
+)
 from agent.quality import (                                              # noqa: E402
     assess, profile_for_goal, result_has_evidence, tool_gates,
 )
 from agent.task_graph import SUCCESS, Task                               # noqa: E402
+from agent.tool_lookup import lookup_tool                                # noqa: E402
 from test_agent_loop import FakeManager                                  # noqa: E402
 
 
@@ -56,6 +61,36 @@ PRODUCTION_TOOLS = [
     tool("verify_game"),
     tool("get_performance_metrics"),
 ]
+
+
+class ToolLookupTests(unittest.TestCase):
+    def test_explicit_server_namespaces_never_fall_back_to_another_server(self):
+        registry = FakeManager([
+            MockMCPServer("engine_a", [tool("inspect_project")]),
+            MockMCPServer("engine_b", [tool("inspect_project")]),
+        ]).registry()
+
+        tool_a = lookup_tool(registry, "inspect_project", "engine_a")
+        tool_b = lookup_tool(registry, "engine_b.inspect_project", "engine_b")
+        self.assertIsNotNone(tool_a)
+        self.assertIsNotNone(tool_b)
+        self.assertEqual(tool_a.server, "engine_a")
+        self.assertEqual(tool_b.server, "engine_b")
+        self.assertIsNone(lookup_tool(registry, "engine_b.inspect_project",
+                                      "engine_a"))
+        self.assertIsNone(lookup_tool(registry, "inspect_project",
+                                      "missing_server"))
+
+    def test_lookup_failures_are_closed(self):
+        class BrokenRegistry:
+            def by_name(self, _name):
+                raise RuntimeError("registry not ready")
+
+            def server(self, _name):
+                raise RuntimeError("registry not ready")
+
+        self.assertIsNone(lookup_tool(BrokenRegistry(), "tool"))
+        self.assertIsNone(lookup_tool(BrokenRegistry(), "tool", "server"))
 
 
 class CatalogTests(unittest.TestCase):
@@ -176,6 +211,23 @@ class PlanAuditTests(unittest.TestCase):
         self.assertTrue(review["valid"], review["errors"])
         self.assertEqual(review["errors"], [])
 
+    def test_resolved_tools_are_shared_by_audit_and_graph_builder(self):
+        plan = {"steps": [self._step("inspect_project")]}
+        resolved = resolve_plan_tools(plan, self.registry)
+
+        # Once the one canonical resolution pass completes, both consumers
+        # should use the returned views rather than repeat registry lookups.
+        with patch.object(self.registry, "by_name",
+                          side_effect=AssertionError("duplicate lookup")):
+            review = audit_production_plan(
+                plan, self.registry, resolved_tools=resolved)
+            graph = plan_to_graph(plan, self.registry,
+                                  resolved_tools=resolved)
+
+        self.assertTrue(review["valid"], review["errors"])
+        self.assertEqual(len(graph.all()), 1)
+        self.assertEqual(graph.all()[0].tool, "inspect_project")
+
     def test_planner_gets_one_bounded_repair_round(self):
         calls = []
 
@@ -208,6 +260,21 @@ class PlanAuditTests(unittest.TestCase):
 
 
 class EvidenceAndContextTests(unittest.TestCase):
+    def test_both_context_renderers_share_the_same_secret_redactor(self):
+        sample = (
+            "Bearer abcdefghijklmnopqrstuvwxyz123456\n"
+            "api_key=provider-secret-value\n"
+            "sk-abcdefghijklmnopqrstuvwxyz123456\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nprivate-material\n"
+            "-----END RSA PRIVATE KEY-----")
+        compact = sanitize_untrusted_text(sample, limit=500)
+        multiline = redact_untrusted_text(sample)
+        for secret in ("abcdefghijklmnopqrstuvwxyz123456",
+                       "provider-secret-value", "private-material"):
+            self.assertNotIn(secret, compact)
+            self.assertNotIn(secret, multiline)
+        self.assertNotIn("\n", compact)
+
     def test_empty_success_is_not_quality_evidence(self):
         registry = FakeManager([
             MockMCPServer("engine", PRODUCTION_TOOLS)

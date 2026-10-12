@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 from agent.jsonreply import extract_json_with_key
 from agent.llm import call as call_llm
 from agent.prompts import DIAGNOSE_SYSTEM
+from agent.tool_lookup import lookup_tool
 
 
 def _safe_json(obj: Any) -> str:
@@ -135,7 +136,7 @@ def apply_decision(decision: Dict[str, Any], task: Any, registry
             return None
         # Qualified names are exact; never strip a model-supplied server
         # namespace and silently execute the same bare name elsewhere.
-        tv = registry.by_name(tool)
+        tv = lookup_tool(registry, tool)
         if tv is None:
             return None      # hallucinated escape hatch — rejected
         if tv.name == getattr(task, "tool", None) \

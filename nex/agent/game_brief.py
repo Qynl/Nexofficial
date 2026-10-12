@@ -32,14 +32,18 @@ _LIST_LIMITS: Dict[str, Tuple[int, int]] = {
 _CRITERION_LIMIT = 6
 _CRITERION_TEXT_LIMIT = 260
 
-# The most important fields for a usable, differentiated production target.
+# Completeness mirrors PLANNER_SYSTEM's required fields. No prompted section
+# in this stage-shared contract silently becomes optional.
 _REQUIRED_SCALARS = (
-    "pitch", "player_fantasy", "signature_mechanic", "visual_direction",
-    "progression",
+    "pitch", "player_fantasy", "target_audience", "target_platform",
+    "signature_mechanic", "visual_direction", "audio_direction",
+    "session_shape", "progression",
 )
 _REQUIRED_LISTS = {
     "core_loop": 3,
     "design_pillars": 3,
+    "accessibility": 1,
+    "assumptions": 1,
     "acceptance_criteria": 4,
 }
 
@@ -114,25 +118,27 @@ def normalize_game_brief(value: Any) -> Dict[str, Any]:
     return out
 
 
-def missing_brief_fields(value: Any) -> List[str]:
-    """List the creative-contract pieces still missing or too thin to use."""
-    brief = normalize_game_brief(value)
+def _missing_normalized(brief: Dict[str, Any]) -> List[str]:
+    """Check a normalized brief without repeating its allowlist pass."""
     missing = [field for field in _REQUIRED_SCALARS if not brief.get(field)]
     for field, minimum in _REQUIRED_LISTS.items():
         if len(brief.get(field) or []) < minimum:
             missing.append(field)
     criteria = brief.get("acceptance_criteria") or []
-    if len(criteria) < _REQUIRED_LISTS["acceptance_criteria"]:
-        if "acceptance_criteria" not in missing:
-            missing.append("acceptance_criteria")
-    elif any(not item.get("verification") for item in criteria):
+    if (len(criteria) >= _REQUIRED_LISTS["acceptance_criteria"]
+            and any(not item.get("verification") for item in criteria)):
         missing.append("acceptance_criteria.verification")
     return missing
 
 
+def missing_brief_fields(value: Any) -> List[str]:
+    """List the creative-contract pieces still missing or too thin to use."""
+    return _missing_normalized(normalize_game_brief(value))
+
+
 def brief_health(value: Any) -> Dict[str, Any]:
     brief = normalize_game_brief(value)
-    missing = missing_brief_fields(brief)
+    missing = _missing_normalized(brief)
     return {
         "complete": not missing,
         "missing": missing,

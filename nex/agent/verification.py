@@ -33,6 +33,7 @@ from typing import Any, Dict, Iterable, List, Set
 
 from agent.quality import tool_gates
 from agent.regression import DEPENDENTS, classify_system
+from agent.tool_lookup import lookup_tool
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -46,15 +47,6 @@ DIMENSIONS = ("implemented", "compiled", "runtime_tested",
 # many systems have no meaningful visual/performance proof requirement,
 # so their absence is a note, not an automatic failure.
 _REQUIRED = ("implemented", "compiled", "runtime_tested")
-
-
-def _tool_view(registry: Any, server: Any, tool: str) -> Any:
-    try:
-        if server:
-            return registry.by_name("%s.%s" % (server, tool))
-        return registry.by_name(tool)
-    except Exception:  # noqa: BLE001 - evidence lookup must not crash a run
-        return None
 
 
 def verify_systems(tasks: Iterable[Any], registry: Any,
@@ -79,7 +71,7 @@ def verify_systems(tasks: Iterable[Any], registry: Any,
         status = getattr(t, "status", None)
         systems = classify_system(tool_name)
 
-        tv = _tool_view(registry, getattr(t, "server", None), tool_name)
+        tv = lookup_tool(registry, tool_name, getattr(t, "server", None))
         gates = tool_gates(tv) if tv is not None else set()
         if status == "success":
             if "build" in gates:

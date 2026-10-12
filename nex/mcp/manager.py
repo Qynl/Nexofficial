@@ -7,10 +7,10 @@ on the world. This module owns their lifecycle:
 
 Design rules
 ------------
-* CONFIG is an operator act. Servers live in ``~/.nex/servers.json``
-  (0600) plus ``NEX_SERVERS`` env entries. The model can never add,
-  remove, or reconfigure a server — there is no path from model output
-  to this module's config.
+* CONFIG is an operator act. Servers live in ``$NEX_HOME/servers.json``
+  (0600; default ``~/.nex``) plus ``NEX_SERVERS`` env entries. The model
+  can never add, remove, or reconfigure a server — there is no path from
+  model output to this module's config.
 * CONNECTED != TRUSTED. New UI-added servers default to untrusted. A server
   marked ``trusted`` (an explicit toggle, environment config, or
   NEX_TRUSTED_SERVERS) may serve autonomous calls; an untrusted server needs
@@ -53,6 +53,7 @@ from mcp.schema import (
     tool_contract_fingerprint, validate_arguments, validate_tool_output,
 )
 from mcp.transport import Upstream, UpstreamError
+from mcp.paths import nex_home as _nex_dir
 
 # Statuses a server can be in.
 ST_CONNECTED = "connected"
@@ -150,17 +151,6 @@ def _is_metadata_target(host: str) -> bool:
         return addr.is_link_local or str(addr) in _METADATA_HOSTS
     except ValueError:
         return False
-
-
-def _nex_dir() -> str:
-    base = os.environ.get("NEX_HOME") or os.path.join(
-        os.path.expanduser("~"), ".nex")
-    os.makedirs(base, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(base, 0o700)
-    except OSError:
-        pass
-    return base
 
 
 def servers_config_path() -> str:

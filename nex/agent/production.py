@@ -23,6 +23,7 @@ from agent.quality import (
     gate_catalog, is_game_production_goal, result_declares_failure,
     result_has_evidence, tool_gates,
 )
+from agent.tool_lookup import lookup_tool
 from mcp.capability import BUILD, CODE_EXECUTION, CREATE, MODIFY, READ, TEST
 
 
@@ -283,9 +284,7 @@ def stage_evidence(stage: ProductionStage, registry: Any,
             continue
         server = str(getattr(task, "server", "") or "")
         name = str(getattr(task, "tool", "") or "")
-        tv = (registry.by_name(server + "." + name) if registry is not None
-              and server else registry.by_name(name) if registry is not None
-              else None)
+        tv = lookup_tool(registry, name, server or None)
         if tv is None:
             continue
         if result_declares_failure(getattr(task, "result", None)):
@@ -389,14 +388,6 @@ def stage_brief(goal: str, stage_index: int, registry: Any) -> str:
         "product finished." % stage.id.replace("_", "-"),
         "Every mutation must contribute to an integrated playable product; "
         "prefer reusable/data-driven systems over disconnected showcase props.",
-        "Use successful historical $step references instead of recreating prior "
-        "outputs. Inspect before changing unfamiliar state.",
-        "CREATE BEFORE YOU USE, even inside one stage. A step that places, "
-        "configures, scripts, animates, lights, or tests a mesh/level/actor/ "
-        "system must depend on the step that created, imported, or inspected "
-        "it first. Never collapse authoring and use into one call to save a "
-        "step; a stage that produces many assets at once but never proves any "
-        "one of them works is not progress.",
         "Available production disciplines: %s" %
         (", ".join(available) if available else "none identified"),
         "Readiness gaps: %s" %

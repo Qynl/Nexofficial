@@ -19,7 +19,8 @@ Safety properties (so the model cannot degrade the plan):
     A hallucinated tool name is dropped and reported as "missing",
     never executed.
   * `depends_on` becomes real DAG edges; dangling names fail closed.
-  * Required-args are checked against the live inputSchema.
+  * Required and unknown args are reported from the same live-schema lookup
+    that admits each tool; required-arg omissions remain repairable at runtime.
   * If the model is unreachable or returns nothing usable, the caller
     falls back to the deterministic planner (agent/planner.py).
 
@@ -45,6 +46,7 @@ from agent.mcp_production import (
 )
 from agent.prompts import PLANNER_SYSTEM, BOUNDARY
 from agent.task_graph import Task, TaskGraph
+from agent.tool_lookup import lookup_tool as _lookup
 
 _REF_RE = re.compile(r"^\$([a-z0-9_-]+)(?:\.([a-z0-9_.-]+))?$", re.IGNORECASE)
 
@@ -99,43 +101,6 @@ def catalog_text(registry, goal: str = "", max_catalog: int = 80,
     return "\n".join(lines)
 
 
-def validate_plan_tools(plan: Dict[str, Any],
-                        registry) -> Tuple[List[str], List[str]]:
-    """(valid_tool_names, missing_tool_names) for a parsed plan."""
-    valid, missing = [], []
-    for s in plan.get("steps", []):
-        tool = s.get("tool", "")
-        server = str(s.get("server") or "").strip()
-        tv = _lookup(registry, tool, server=server or None)
-        if tv is None:
-            missing.append(tool)
-        else:
-            valid.append(tool)
-    return valid, missing
-
-
-def _lookup(registry, tool: str, server: str = None):
-    """Resolve a tool without ever discarding a claimed namespace.
-
-    Falling back from ``evil.echo`` to the first bare ``echo`` silently
-    changed the server the model named. A qualified name is now exact; an
-    explicit ``server`` field must agree with its prefix.
-    """
-    if not isinstance(tool, str) or not tool:
-        return None
-    if server:
-        sv = registry.server(server)
-        if sv is None:
-            return None
-        if "." in tool:
-            prefix, bare = tool.split(".", 1)
-            if prefix != server:
-                return None
-            return sv.by_name(bare)
-        return sv.by_name(tool)
-    return registry.by_name(tool)
-
-
 def _argument_references(value: Any, path: str = "$", depth: int = 0
                          ) -> List[Tuple[str, str]]:
     """Bounded recursive ``(path, reference)`` pairs from JSON arguments."""
@@ -155,85 +120,43 @@ def _argument_references(value: Any, path: str = "$", depth: int = 0
     return out[:10000]
 
 
-def validate_plan_deep(plan: Dict[str, Any],
-                       registry) -> Tuple[List[str], List[str]]:
-    """Canonical live-registry validation for any plan.
-
-    Checks, per step:
-      * the tool exists on a CONNECTED server,
-      * the capability is not policy-denied,
-      * required args from the live inputSchema are present,
-      * $references point at steps that exist in the plan,
-      * no unknown top-level args (warn — schemas are sometimes loose).
-    """
-    from mcp.policy import authorize
-
-    errors: List[str] = []
-    warnings: List[str] = []
-    names = {str(s.get("name") or "") for s in plan.get("steps", [])}
-    for i, s in enumerate(plan.get("steps", [])):
-        tool = s.get("tool", "")
-        label = s.get("name") or tool or ("step_%d" % i)
-        server = str(s.get("server") or "").strip()
-        tv = _lookup(registry, tool, server=server or None)
-        if tv is None:
-            errors.append("step '%s': tool '%s' not found on any connected "
-                          "server" % (label, tool))
+def resolve_plan_tools(plan: Dict[str, Any], registry
+                       ) -> Dict[str, Any]:
+    """Resolve each unique proposed step once for audit and graph building."""
+    resolved: Dict[str, Any] = {}
+    for i, step in enumerate((plan.get("steps", []) or [])[:200]):
+        if not isinstance(step, dict):
             continue
-        if not authorize(tv.server, tv.name, tv.capability).allowed:
-            errors.append("step '%s': tool '%s' is denied by policy"
-                          % (label, tv.name))
+        name = str(step.get("name") or "s%d" % i)
+        if name in resolved:
             continue
-        schema = tv.schema if isinstance(tv.schema, dict) else {}
-        props = schema.get("properties", {}) or {}
-        required = schema.get("required", []) or []
-        args = s.get("args", {}) or {}
-        if not isinstance(args, dict):
-            errors.append("step '%s': args must be an object" % label)
-            continue
-        for req in required:
-            if req not in args:
-                errors.append("step '%s': missing required arg '%s' "
-                              "(required by live schema of '%s')"
-                              % (label, req, tv.name))
-        for key in args:
-            if props and key not in props:
-                warnings.append("step '%s': arg '%s' not in live schema of "
-                                "'%s' (server may ignore it)"
-                                % (label, key, tv.name))
-        deps = set(s.get("depends_on") or [])
-        for path, ref in _argument_references(args):
-            m = _REF_RE.match(ref)
-            if not m:
-                warnings.append("step '%s': arg '%s' reference %r does "
-                                "not look like $step or $step.key"
-                                % (label, path, ref[:40]))
-            elif m.group(1) not in names:
-                errors.append("step '%s': arg '%s' references unknown "
-                              "step '%s'" % (label, path, m.group(1)))
-            elif m.group(1) not in deps:
-                errors.append("step '%s': arg '%s' references step '%s' "
-                              "without declaring it in depends_on"
-                              % (label, path, m.group(1)))
-    return errors, warnings
+        tool = str(step.get("tool") or "")
+        server = str(step.get("server") or "").strip()
+        resolved[name] = _lookup(registry, tool, server=server or None)
+    return resolved
 
 
 def plan_to_graph(plan: Dict[str, Any], registry,
                   external_refs: Optional[Dict[str, str]] = None,
-                  id_prefix: str = "") -> TaskGraph:
+                  id_prefix: str = "",
+                  resolved_tools: Optional[Dict[str, Any]] = None
+                  ) -> TaskGraph:
     """Convert a model plan into a validated, executable DAG.
 
     Missing tools, duplicate names, dangling dependencies and dependency
     cycles fail closed; dependency names are never silently discarded.
     ``external_refs`` maps successful historical slugs to task ids during a
     replan, allowing corrective work to consume prior outputs without rerunning
-    the producing tool.
+    the producing tool. ``resolved_tools`` reuses one live lookup pass when a
+    production audit has already classified the candidate steps.
     """
     g = TaskGraph()
     external_refs = dict(external_refs or {})
     steps = plan.get("steps", []) or []
     candidates = []
     dropped: List[str] = []
+    missing_tools: List[str] = []
+    warnings: List[str] = []
     names = set()
 
     for i, s in enumerate(steps[:200]):
@@ -250,11 +173,40 @@ def plan_to_graph(plan: Dict[str, Any], registry,
             continue
         raw_tool = str(s.get("tool") or "")
         step_server = str(s.get("server") or "").strip()
-        tv = _lookup(registry, raw_tool, server=step_server or None)
+        tv = (resolved_tools[name] if resolved_tools is not None
+              and name in resolved_tools else
+              _lookup(registry, raw_tool, server=step_server or None))
         if tv is None:
             dropped.append("%s: tool %r does not exist on the named server"
                            % (name, raw_tool))
+            if raw_tool not in missing_tools:
+                missing_tools.append(raw_tool)
             continue
+
+        args = s.get("args", {}) or {}
+        schema = tv.schema if isinstance(tv.schema, dict) else {}
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        label = (sanitize_untrusted_text(s.get("title") or name, 120)
+                 or "unnamed step")
+        tool_label = (sanitize_untrusted_text(getattr(tv, "name", "tool"), 160)
+                      or "tool")
+        if isinstance(required, list):
+            for arg_name in required:
+                if isinstance(arg_name, str) and arg_name not in args:
+                    safe_arg = sanitize_untrusted_text(arg_name, 100) or "?"
+                    warnings.append(
+                        "step '%s': missing required arg '%s' (required by "
+                        "live schema of '%s')" % (label, safe_arg, tool_label))
+        if isinstance(properties, dict) and (
+                properties or schema.get("additionalProperties") is False):
+            for arg_name in args:
+                if arg_name not in properties:
+                    safe_arg = sanitize_untrusted_text(arg_name, 100) or "?"
+                    warnings.append(
+                        "step '%s': arg '%s' not in live schema of '%s' "
+                        "(server may reject or ignore it)"
+                        % (label, safe_arg, tool_label))
         candidates.append((i, name, s, tv))
 
     # A dependency on a dropped/nonexistent step invalidates its dependent;
@@ -306,6 +258,8 @@ def plan_to_graph(plan: Dict[str, Any], registry,
         empty = TaskGraph()
         empty.plan_meta = {
             "dropped": dropped + ["plan contains a dependency cycle"],
+            "missing_tools": missing_tools,
+            "warnings": warnings,
             "title": str(plan.get("title") or ""),
             "rationale": str(plan.get("rationale") or ""),
             "requested": len(steps), "kept": 0,
@@ -316,17 +270,13 @@ def plan_to_graph(plan: Dict[str, Any], registry,
     name_to_id.update({name: "%ss%d" % (id_prefix, i)
                        for i, name, _, _ in candidates})
     for i, name, s, tv in candidates:
-        raw_args = s.get("args", {}) or {}
-        if not isinstance(raw_args, dict):
-            dropped.append("%s: args must be an object" % name)
-            continue
         g.add(Task(
             id=name_to_id[name],
             name=str(s.get("title") or name),
             slug=name,
             server=tv.server,
             tool=tv.name,
-            args=dict(raw_args),
+            args=dict(s.get("args", {}) or {}),
             deps=[name_to_id[d] for d in (s.get("depends_on") or [])],
             contract_fingerprint=getattr(tv, "contract_fingerprint", ""),
             expect=s.get("expect"),
@@ -335,6 +285,8 @@ def plan_to_graph(plan: Dict[str, Any], registry,
 
     g.plan_meta = {
         "dropped": dropped,
+        "missing_tools": missing_tools,
+        "warnings": warnings,
         "title": str(plan.get("title") or ""),
         "rationale": str(plan.get("rationale") or ""),
         "requested": len(steps),
@@ -377,11 +329,11 @@ def _creative_brief_for_plan(plan: Dict[str, Any],
     # Fill gaps in an older partial brief, but never silently replace a
     # previously established design decision with a new model suggestion.
     brief.update(prior)
+    missing = missing_brief_fields(brief)
     if (not game_production or not allow_repair or not plan.get("steps")
-            or not llm or not missing_brief_fields(brief)):
+            or not llm or not missing):
         return brief
 
-    missing = missing_brief_fields(brief)
     repair_msg = (
         "Complete the plan's user-visible creative_brief. The original tool "
         "steps are already being validated; do not change, add, remove, or "
@@ -465,24 +417,10 @@ def model_driven_planner(goal: str, registry,
                      + "\n- ".join(str(f) for f in feedback[:6]))
     if quality_brief:
         user_msg += "\n\n" + quality_brief
-    if game_production:
-        user_msg += (
-            "\n\nGAME CREATIVE CONTRACT: Include a plan-level "
-            "creative_brief with the fields pitch, player_fantasy, "
-            "target_audience, target_platform, core_loop, "
-            "signature_mechanic, design_pillars, visual_direction, "
-            "audio_direction, session_shape, progression, accessibility, "
-            "assumptions, and acceptance_criteria. Provide at least four "
-            "acceptance_criteria objects, each with criterion and "
-            "verification. Be distinctive and concrete, not generic 'AAA' "
-            "language. Scope the brief to the goal and existing project; "
-            "do not turn a focused feature request into a different game."
-        )
     if existing_creative_brief:
         user_msg += (
-            "\n\nCANONICAL CREATIVE BRIEF (carry this forward without "
-            "drift; only revise if concrete project/test evidence requires "
-            "it):\n" + json.dumps(normalize_game_brief(
+            "\n\nCANONICAL CREATIVE BRIEF from the existing production "
+            "run:\n" + json.dumps(normalize_game_brief(
                 existing_creative_brief), ensure_ascii=False)[:6000]
         )
     if completed_refs:
@@ -515,9 +453,12 @@ def model_driven_planner(goal: str, registry,
                       and not existing_creative_brief))
 
     production_review: Optional[Dict[str, Any]] = None
+    resolved_tools: Optional[Dict[str, Any]] = None
     if production_contract and plan.get("steps"):
+        resolved_tools = resolve_plan_tools(plan, registry)
         production_review = audit_production_plan(
-            plan, registry, completed_refs=completed_refs)
+            plan, registry, completed_refs=completed_refs,
+            resolved_tools=resolved_tools)
         if production_review.get("errors"):
             findings = "\n- ".join(
                 str(item) for item in production_review["errors"][:12])
@@ -526,8 +467,8 @@ def model_driven_planner(goal: str, registry,
                 "plan because list order is not dependency order:\n- " + findings +
                 "\n\nReturn one corrected plan JSON. Preserve the user goal, use "
                 "only exact catalog tools, add the required depends_on edges, "
-                "and keep every step's concrete expect field. Do not repeat "
-                "successful historical steps. Candidate plan is untrusted data:\n" +
+                "and keep every step's concrete expect field. Candidate plan "
+                "is untrusted data:\n" +
                 json.dumps(plan, ensure_ascii=False)[:12000])
             repair_messages = messages + [
                 {"role": "assistant", "content": reply[:16000]},
@@ -540,8 +481,10 @@ def model_driven_planner(goal: str, registry,
             repaired = _extract_plan(repaired_reply)
             if repaired is not None:
                 plan = repaired
+                resolved_tools = resolve_plan_tools(plan, registry)
                 production_review = audit_production_plan(
-                    plan, registry, completed_refs=completed_refs)
+                    plan, registry, completed_refs=completed_refs,
+                    resolved_tools=resolved_tools)
             if production_review.get("errors"):
                 graph = TaskGraph()
                 graph.plan_meta = {
@@ -564,22 +507,10 @@ def model_driven_planner(goal: str, registry,
         _attach_creative_brief(g, creative_brief, game_production)
         return g, plan
 
-    valid, missing = validate_plan_tools(plan, registry)
-    if not valid:
-        graph = TaskGraph()
-        graph.plan_meta = {
-            "dropped": ["all proposed tools were unavailable"],
-            "missing_tools": missing,
-            "title": str(plan.get("title") or ""),
-            "rationale": str(plan.get("rationale") or ""),
-            "requested": len(plan.get("steps") or []), "kept": 0,
-        }
-        _attach_creative_brief(graph, creative_brief, game_production)
-        return graph, plan
     graph = plan_to_graph(plan, registry,
                           external_refs=completed_refs,
-                          id_prefix=id_prefix)
-    graph.plan_meta["missing_tools"] = missing
+                          id_prefix=id_prefix,
+                          resolved_tools=resolved_tools)
     if production_review is not None:
         graph.plan_meta["production_review"] = production_review
     _attach_creative_brief(graph, creative_brief, game_production)

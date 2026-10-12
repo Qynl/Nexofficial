@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Sequence, Set
 
+from agent.tool_lookup import lookup_tool
 from mcp.capability import BUILD, CODE_EXECUTION, CREATE, MODIFY, READ, TEST
 
 
@@ -224,20 +225,6 @@ def planning_brief(profile: QualityProfile, registry: Any) -> str:
         "GAME PRODUCTION QUALITY CONTRACT",
         "Target: %s. This is a workflow target, not permission to claim "
         "literal AAA quality." % profile.label,
-        "Use a vertical-slice sequence: inspect -> establish explicit "
-        "acceptance criteria -> implement systems/content -> integrate -> "
-        "build/run -> observe -> verify -> correct once if evidence fails.",
-        "Include a structured creative_brief in the plan JSON. It must define "
-        "a specific pitch, player fantasy, audience/platform, core loop, "
-        "signature mechanic, design pillars, visual/audio direction, session "
-        "shape, progression, accessibility, assumptions, and at least four "
-        "observable acceptance criteria with a concrete verification method. "
-        "Use the live project and tools to ground it; mark assumptions and "
-        "unavailable checks plainly. This is a proposed target, never proof "
-        "that the game meets it.",
-        "Each evidence gate below must be a separate dependency-ordered MCP "
-        "step when a suitable live tool exists. Use only catalog tools and "
-        "do not substitute prose or implementation success for observation.",
     ]
     for gate in profile.required_gates:
         tools = catalog.get(gate, [])
@@ -246,8 +233,8 @@ def planning_brief(profile: QualityProfile, registry: Any) -> str:
             lines.append("- %s: AVAILABLE via %s" %
                          (_GATE_LABELS[gate], names))
         else:
-            lines.append("- %s: UNAVAILABLE in the live MCP catalog; do not "
-                         "invent it" % _GATE_LABELS[gate])
+            lines.append("- %s: UNAVAILABLE in the live MCP catalog" %
+                         _GATE_LABELS[gate])
     if "playtest" in profile.required_gates:
         lines.append(
             "A playtest step must be a concrete objective, not a vague "
@@ -263,15 +250,14 @@ def planning_brief(profile: QualityProfile, registry: Any) -> str:
             "would not reveal. A playtest that only confirms the game "
             "launched is not evidence the feature under test works.")
     lines.extend([
-        "Plan the smallest coherent playable slice first. Prefer inspecting "
-        "before mutation and reuse existing project conventions/assets.",
+        "Reuse existing project conventions and assets rather than creating "
+        "parallel structures.",
         "Make acceptance criteria concrete (gameplay behavior, visual result, "
         "runtime errors, and performance where measurable). A create/build "
         "call is not a playtest; a playtest is not a screenshot; capturing a "
         "screenshot is not reviewing it; and a visual review is not a "
         "performance profile.",
-        "Do not repeat already-successful work during a corrective pass. Keep "
-        "polish bounded and report every unverified dimension honestly.",
+        "Report every unverified dimension honestly.",
     ])
     return "\n".join(lines)
 
@@ -355,10 +341,7 @@ def assess(profile: QualityProfile, registry: Any,
             continue
         server = str(getattr(task, "server", "") or "")
         name = str(getattr(task, "tool", "") or "")
-        tv: Optional[Any] = None
-        if registry is not None:
-            tv = registry.by_name(server + "." + name) if server else \
-                registry.by_name(name)
+        tv = lookup_tool(registry, name, server or None)
         if tv is None:
             continue
         result = getattr(task, "result", None)
@@ -466,6 +449,6 @@ def correction_note(scorecard: Dict[str, Any]) -> str:
     return (
         "Quality review found available evidence gates that were not run: %s. "
         "Add only the missing inspect/build/playtest/observation/verification "
-        "steps; do not repeat successful implementation work."
+        "steps."
         % "; ".join(labels)
     )

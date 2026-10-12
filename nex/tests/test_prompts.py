@@ -117,6 +117,11 @@ def main() -> None:
            "CREATE BEFORE YOU USE", 1)[1][:400],
            "the create-before-use rule actually tells the model to use "
            "depends_on to enforce the ordering, not just assert it")
+    expect(prompts.PLANNER_SYSTEM.count("supply all required fields") == 1
+           and "Respect the declared arg contract exactly" not in
+           prompts.PLANNER_SYSTEM,
+           "required args, schema constraints, and extra-field rules are "
+           "stated once in the canonical planner rule")
 
     # --- the chat model is told to ask before committing to a long,
     # --- unattended run, and how to express the approved length ------------

@@ -11,6 +11,7 @@ os.environ.setdefault("NEX_HOME", "/tmp/nex-production-tests")
 
 from agent.loop import AgentRun                                  # noqa: E402
 from agent.mock_mcp import MockMCPServer                         # noqa: E402
+from agent.prompts import PLANNER_SYSTEM                          # noqa: E402
 from agent.model_planner import catalog_text                     # noqa: E402
 from agent.production import (                                  # noqa: E402
     STAGES, is_large_game_goal, readiness, stage_brief, stage_evidence,
@@ -101,18 +102,17 @@ class ScopeAndReadinessTests(unittest.TestCase):
         self.assertNotIn("Dependency-aware system order", discovery)
         self.assertNotIn("Dependency-aware system order", foundation)
 
-    def test_stage_brief_forbids_authoring_and_using_an_asset_in_one_step(self):
-        # The whole point of staging is that a game gets built in a real
-        # order (create the thing, then use the thing) instead of one giant
-        # simultaneous blob. Every stage's brief must say so, explicitly,
-        # every time — not just the production-wide planner prompt.
+    def test_asset_ordering_rule_has_one_canonical_planner_source(self):
+        # Every production-stage planning call includes PLANNER_SYSTEM; the
+        # stage brief should not restate its create-before-use contract.
+        self.assertIn("CREATE BEFORE YOU USE", PLANNER_SYSTEM)
         registry = FakeManager([
             MockMCPServer("engine", STUDIO_TOOLS)
         ]).registry()
         for index in range(len(STAGES)):
             brief = stage_brief("Make GTA 7", index, registry)
-            self.assertIn("CREATE BEFORE YOU USE", brief,
-                          "stage %d brief is missing the ordering rule" % index)
+            self.assertNotIn("CREATE BEFORE YOU USE", brief,
+                             "stage %d redundantly repeats the planner rule" % index)
 
     def test_one_broad_tool_cannot_certify_a_vertical_slice(self):
         broad = tool(

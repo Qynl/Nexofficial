@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from agent.engines import detect_engine_targets, profile_readiness
 from agent.quality import GATE_ORDER, gate_catalog, tool_gates
+from agent.tool_lookup import lookup_tool as _lookup
 from mcp.capability import (
     BUILD, CODE_EXECUTION, CREATE, MODIFY, NETWORK, READ, TEST,
 )
@@ -25,12 +26,16 @@ _SHIP_TERMS = (
     "push_live", "promote_release", "go_live",
 )
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)\b(bearer)\s+[a-z0-9._~+/=-]{12,}"),
-    re.compile(r"\b(?:sk|nvapi|ghp|github_pat)-?[A-Za-z0-9_\-]{16,}\b"),
-    re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|"
-               r"secret|authorization)\s*[:=]\s*([^\s,;]{6,})"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?"
-               r"-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+    (re.compile(r"(?i)\b(bearer)\s+[a-z0-9._~+/=-]{12,}"),
+     "Bearer [REDACTED]"),
+    (re.compile(r"\b(?:sk|nvapi|ghp|github_pat)-?[A-Za-z0-9_\-]{16,}\b"),
+     "[REDACTED]"),
+    (re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|"
+                r"secret|authorization)\s*[:=]\s*([^\s,;]{6,})"),
+     lambda match: match.group(1) + "=[REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?"
+                r"-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+     "[REDACTED]"),
 )
 
 
@@ -39,31 +44,24 @@ def safe_identifier(value: Any) -> bool:
     return isinstance(value, str) and bool(_SAFE_IDENTIFIER.fullmatch(value))
 
 
+def _redact_credentials(text: str) -> str:
+    """Apply the one canonical set of credential redactions."""
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def sanitize_untrusted_text(value: Any, limit: int = 240) -> str:
     """One-line, control-free, credential-redacted untrusted prose."""
     text = str(value or "").replace("\x00", " ")
     text = " ".join(text.split())
-    for pattern in _SECRET_PATTERNS:
-        if pattern.pattern.startswith("(?i)\\b(api"):
-            text = pattern.sub(lambda m: m.group(1) + "=[REDACTED]", text)
-        elif "bearer" in pattern.pattern.lower():
-            text = pattern.sub("Bearer [REDACTED]", text)
-        else:
-            text = pattern.sub("[REDACTED]", text)
-    return text[:max(0, limit)]
+    return _redact_credentials(text)[:max(0, limit)]
 
 
 def redact_untrusted_text(value: Any) -> str:
     """Credential redaction without the one-line/length transformation."""
     text = str(value or "").replace("\x00", " ")
-    for pattern in _SECRET_PATTERNS:
-        if pattern.pattern.startswith("(?i)\\b(api"):
-            text = pattern.sub(lambda m: m.group(1) + "=[REDACTED]", text)
-        elif "bearer" in pattern.pattern.lower():
-            text = pattern.sub("Bearer [REDACTED]", text)
-        else:
-            text = pattern.sub("[REDACTED]", text)
-    return text
+    return _redact_credentials(text)
 
 
 def _schema_type(schema: Dict[str, Any]) -> str:
@@ -175,7 +173,7 @@ def production_catalog(registry: Any, goal: str,
         state = profile_readiness(registry, target_id)
         for names in (state.get("evidence") or {}).values():
             for full_name in list(names or [])[:2]:
-                tool = registry.by_name(full_name)
+                tool = _lookup(registry, full_name)
                 if tool is not None:
                     _append_unique(selected, seen, tool)
 
@@ -209,20 +207,6 @@ def production_catalog(registry: Any, goal: str,
     return selected, omitted, meta
 
 
-def _lookup(registry: Any, full_name: str, server: str = "") -> Any:
-    if not isinstance(full_name, str) or not full_name:
-        return None
-    if server:
-        view = registry.server(server)
-        if view is None:
-            return None
-        if "." in full_name:
-            prefix, bare = full_name.split(".", 1)
-            return view.by_name(bare) if prefix == server else None
-        return view.by_name(full_name)
-    return registry.by_name(full_name)
-
-
 def _tool_ship_role(tool: Any) -> bool:
     name = str(getattr(tool, "name", "") or "").lower()
     category = getattr(getattr(tool, "capability", None), "category", None)
@@ -248,13 +232,16 @@ def _ancestors(name: str, deps: Dict[str, List[str]],
 
 
 def audit_production_plan(plan: Dict[str, Any], registry: Any,
-                          completed_refs: Optional[Dict[str, str]] = None
+                          completed_refs: Optional[Dict[str, str]] = None,
+                          resolved_tools: Optional[Dict[str, Any]] = None
                           ) -> Dict[str, Any]:
     """Audit whether a game plan's evidence steps are causally ordered.
 
     A list position is not ordering in a DAG. If inspection, build, runtime,
     capture, review, verification, and profiling tools are present together,
     their dependencies must establish that the evidence belongs to the work.
+    The planner may pass its existing live tool resolution to avoid repeating
+    registry lookups before graph construction.
     """
     raw_steps = plan.get("steps") if isinstance(plan, dict) else []
     steps = raw_steps if isinstance(raw_steps, list) else []
@@ -262,7 +249,6 @@ def audit_production_plan(plan: Dict[str, Any], registry: Any,
     by_name: Dict[str, Dict[str, Any]] = {}
     deps: Dict[str, List[str]] = {}
     roles: Dict[str, Set[str]] = {}
-    tools: Dict[str, Any] = {}
     errors: List[str] = []
     warnings: List[str] = []
 
@@ -276,9 +262,10 @@ def audit_production_plan(plan: Dict[str, Any], registry: Any,
         raw_deps = step.get("depends_on") or []
         deps[name] = [str(dep) for dep in raw_deps
                       if isinstance(dep, str)] if isinstance(raw_deps, list) else []
-        tool = _lookup(registry, str(step.get("tool") or ""),
-                       str(step.get("server") or ""))
-        tools[name] = tool
+        tool = (resolved_tools[name] if resolved_tools is not None
+                and name in resolved_tools else
+                _lookup(registry, str(step.get("tool") or ""),
+                        str(step.get("server") or "")))
         roles[name] = set(tool_gates(tool)) if tool is not None else set()
         if tool is not None and _tool_ship_role(tool):
             roles[name].add("shipping")

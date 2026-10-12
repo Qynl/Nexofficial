@@ -19,22 +19,14 @@ before/after difference was reviewed or what it showed.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from mcp.capability import BUILD, CREATE, DESTRUCTIVE, MODIFY
+from agent.tool_lookup import lookup_tool
 
 _CAPTURE_HINTS = ("screenshot", "viewport_capture", "capture_frame",
                   "snapshot")
 _VISUALLY_RELEVANT_CATEGORIES = {CREATE, MODIFY, DESTRUCTIVE, BUILD}
-
-
-def _tool_view(registry: Any, server: Optional[str], tool: str) -> Any:
-    try:
-        if server:
-            return registry.by_name("%s.%s" % (server, tool))
-        return registry.by_name(tool)
-    except Exception:  # noqa: BLE001 - evidence lookup must not crash a run
-        return None
 
 
 def _is_capture(tool_name: str) -> bool:
@@ -60,7 +52,7 @@ def before_after_coverage(tasks: Iterable[Any], registry: Any
         tool_name = getattr(t, "tool", None)
         if not tool_name or _is_capture(tool_name):
             continue
-        tv = _tool_view(registry, getattr(t, "server", None), tool_name)
+        tv = lookup_tool(registry, tool_name, getattr(t, "server", None))
         category = (getattr(getattr(tv, "capability", None), "category", "")
                    if tv is not None else "")
         if category not in _VISUALLY_RELEVANT_CATEGORIES:

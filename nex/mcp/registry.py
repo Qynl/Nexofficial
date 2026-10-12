@@ -108,9 +108,8 @@ class CapabilityRegistry:
         (tools, omitted).
 
         Scoring is intentionally dumb-but-honest — it FILTERS, it never
-        invents. Validation (validate_plan_deep) always runs against the
-        FULL registry, so a filtered-out tool remains usable if the model
-        names it anyway.
+        invents. Each proposed tool is resolved against the FULL registry,
+        so a filtered-out tool remains usable if the model names it anyway.
         """
         import re as _re
         words = [w for w in _re.findall(r"[a-z0-9]+", (goal or "").lower())

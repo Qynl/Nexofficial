@@ -30,6 +30,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
 
+from mcp.paths import nex_home
+
 _log = logging.getLogger(__name__)
 
 # --- category constants ----------------------------------------------------
@@ -426,7 +428,8 @@ def category_hints() -> Dict[str, tuple]:
 # where the heuristics + (untrusted) annotations are not enough — e.g. to
 # escalate a suspiciously-named tool:
 #
-#     $NEX_CAPABILITY_FILE  (default: ~/.nex/capabilities.json)
+#     $NEX_CAPABILITY_FILE  (default: $NEX_HOME/capabilities.json;
+#                            $NEX_HOME defaults to ~/.nex)
 #     {
 #       "blender": {
 #         "apply_decision": {"category": "destructive"},
@@ -452,7 +455,7 @@ def capability_registry_path() -> str:
     p = os.environ.get("NEX_CAPABILITY_FILE", "").strip()
     if p:
         return p
-    return os.path.join(os.path.expanduser("~"), ".nex", "capabilities.json")
+    return os.path.join(nex_home(create=False), "capabilities.json")
 
 
 def capability_registry() -> Dict[str, Dict[str, Dict[str, Any]]]:

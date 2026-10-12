@@ -46,8 +46,8 @@ machine — the only action surface remains the MCP registry.
 Configuration precedence (highest first):
     1. explicit settings push (POST /api/settings/providers)
     2. process environment
-    3. .env files  (nex/.env, repo-root .env, ~/.nex/.env)
-    4. ~/.nex/providers.json
+    3. .env files  (nex/.env, repo-root .env, NEX_HOME/.env)
+    4. NEX_HOME/providers.json (default NEX_HOME: ~/.nex)
     5. built-in defaults (see DEFAULT_PROVIDERS)
 
 stdlib only. No subprocess, no shell, no eval — this module makes HTTP calls
@@ -66,6 +66,8 @@ import urllib.request
 from collections import deque
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
+
+from mcp.paths import nex_home
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -322,8 +324,15 @@ def _safe_usage(value: Any) -> Dict[str, int]:
 
 
 NEX_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".nex",
-                                     "providers.json")
+
+
+def default_settings_path() -> str:
+    """Resolve provider settings under the same operator state root as Nex."""
+    return os.path.join(nex_home(create=False), "providers.json")
+
+
+# Compatibility snapshot; stores resolve this dynamically after .env loading.
+DEFAULT_SETTINGS_PATH = default_settings_path()
 
 # ---------------------------------------------------------------------------
 # Built-in providers + a curated model catalog
@@ -864,7 +873,7 @@ def env_file_paths(explicit: Optional[Iterable[str]] = None) -> List[str]:
     return [
         os.path.join(NEX_DIR, ".env"),                     # nex/.env
         os.path.join(os.path.dirname(NEX_DIR), ".env"),    # repo-root .env
-        os.path.join(os.path.expanduser("~"), ".nex", ".env"),
+        os.path.join(nex_home(create=False), ".env"),
     ]
 
 
@@ -888,15 +897,18 @@ def load_env_file(path: str, environ: Optional[Dict[str, str]] = None) -> int:
 
 
 def load_env(paths: Optional[Iterable[str]] = None) -> int:
-    """Load the default .env chain (nex/.env, repo .env, ~/.nex/.env)."""
-    total = 0
-    for p in env_file_paths(paths):
-        total += load_env_file(p)
-    return total
+    """Load the default .env chain (nex/.env, repo .env, NEX_HOME/.env)."""
+    if paths is not None:
+        return sum(load_env_file(path) for path in env_file_paths(paths))
+
+    # The first two files may set NEX_HOME. Resolve its .env only after they
+    # load so every persistent path follows the same operator override.
+    total = sum(load_env_file(path) for path in env_file_paths()[:2])
+    return total + load_env_file(env_file_paths()[-1])
 
 
 # ---------------------------------------------------------------------------
-# Settings store — ~/.nex/providers.json (0600)
+# Settings store — $NEX_HOME/providers.json (0600; default ~/.nex)
 # ---------------------------------------------------------------------------
 
 class SettingsStore:
@@ -904,7 +916,7 @@ class SettingsStore:
 
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = path or os.environ.get("NEX_PROVIDERS_FILE") \
-            or DEFAULT_SETTINGS_PATH
+            or default_settings_path()
 
     def load(self) -> Dict[str, Any]:
         try:
@@ -2460,7 +2472,7 @@ class Router:
 
     def store_path(self) -> str:
         return getattr(self, "_store_path", "") or os.environ.get(
-            "NEX_PROVIDERS_FILE") or DEFAULT_SETTINGS_PATH
+            "NEX_PROVIDERS_FILE") or default_settings_path()
 
     def apply(self, patch: Dict[str, Any], store: Optional[SettingsStore] = None
               ) -> Dict[str, Any]:

@@ -85,6 +85,15 @@ class CreativeBriefTests(unittest.TestCase):
                       missing_brief_fields(brief))
         self.assertFalse(brief_health(brief)["complete"])
 
+    def test_every_prompted_contract_section_is_required_for_completeness(self):
+        brief = complete_brief()
+        for field in ("target_audience", "target_platform", "audio_direction",
+                      "session_shape", "accessibility", "assumptions"):
+            incomplete = dict(brief)
+            incomplete.pop(field)
+            self.assertIn(field, missing_brief_fields(incomplete), field)
+            self.assertFalse(brief_health(incomplete)["complete"], field)
+
     def test_planner_repairs_brief_without_changing_validated_tool_steps(self):
         registry = FakeManager([
             MockMCPServer("engine", [tool("create_level")])
@@ -119,6 +128,7 @@ class CreativeBriefTests(unittest.TestCase):
             game_production=True)
         self.assertIsNotNone(parsed)
         self.assertEqual(len(calls), 2)
+        self.assertNotIn("GAME CREATIVE CONTRACT", calls[0])
         self.assertIn("do not change, add, remove, or reorder", calls[1])
         self.assertEqual(len(graph.all()), 1)
         self.assertEqual(graph.all()[0].tool, "create_level")
@@ -138,13 +148,22 @@ class CreativeBriefTests(unittest.TestCase):
             }],
             "creative_brief": complete_brief("A completely different game"),
         }}
+        prompts = []
+
+        def llm(messages):
+            prompts.append(messages)
+            return json.dumps(response)
+
         graph, _ = model_driven_planner(
-            "Continue the game", registry,
-            llm=lambda _messages: json.dumps(response),
+            "Continue the game", registry, llm=llm,
             game_production=True, existing_creative_brief=canonical)
         self.assertEqual(graph.plan_meta["creative_brief"]["title"],
                          canonical["title"])
         self.assertTrue(graph.plan_meta["creative_brief_health"]["complete"])
+        user_message = prompts[0][1]["content"]
+        self.assertIn("CANONICAL CREATIVE BRIEF from the existing production",
+                      user_message)
+        self.assertNotIn("carry this forward without drift", user_message)
 
 
 if __name__ == "__main__":

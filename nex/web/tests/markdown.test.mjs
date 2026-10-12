@@ -99,3 +99,12 @@ test('renderStreaming never throws on degenerate input', () => {
     assert.doesNotThrow(() => renderStreaming(input, doc));
   }
 });
+
+test('streaming code shares safe block construction without copy controls', () => {
+  const doc = dom();
+  const root = renderStreaming('```js\nconsole.log(1)\n```', doc);
+  assert.equal(root.querySelector('pre .code-lang').textContent, 'js');
+  assert.equal(root.querySelector('pre code').textContent,
+    'console.log(1)\n');
+  assert.equal(root.querySelectorAll('.code-copy').length, 0);
+});

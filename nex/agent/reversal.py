@@ -31,6 +31,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.tool_lookup import lookup_tool
 from mcp.capability import (
     CREATE, DESTRUCTIVE, MODIFY, BUILD, CODE_EXECUTION, NETWORK,
 )
@@ -239,7 +240,7 @@ def plan_reversal(tasks: Any, registry: Any,
             continue
         if not getattr(task, "server", None) or not getattr(task, "tool", None):
             continue
-        tv = registry.by_name("%s.%s" % (task.server, task.tool))
+        tv = lookup_tool(registry, task.tool, task.server)
         if tv is None:
             continue
         category = getattr(getattr(tv, "capability", None), "category", "")
