@@ -1002,6 +1002,43 @@ body.user-scrolled #scroller { scroll-behavior: auto; }
   font-size: 10.5px;
 }
 
+/* user-visible game-design target shared across production stages */
+.run-creative-brief {
+  margin: 2px 15px 12px;
+  padding: 10px 13px;
+  border: 1px solid rgba(249, 177, 92, 0.22);
+  border-radius: var(--r-md);
+  background: linear-gradient(135deg, rgba(249, 177, 92, 0.07),
+                                      rgba(139, 124, 246, 0.05));
+}
+.creative-brief-details > summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+.creative-brief-status {
+  margin: 8px 0;
+  color: var(--fg-faint);
+  font: 10px var(--font-mono);
+}
+.creative-brief-row,
+.creative-brief-group {
+  margin: 7px 0;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.creative-brief-row strong,
+.creative-brief-group > strong {
+  color: var(--fg);
+}
+.creative-brief-group ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.creative-brief-group li + li { margin-top: 3px; }
+
 /* evidence-backed quality review for game-production runs */
 .run-quality {
   margin: 0 15px 14px;

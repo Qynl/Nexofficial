@@ -15,7 +15,7 @@
 ![Roblox Studio](https://img.shields.io/badge/Roblox-Studio-E2231A?style=for-the-badge&logo=roblox)
 ![NVIDIA NIM](https://img.shields.io/badge/NVIDIA%20NIM-hard%20work-76B900?style=for-the-badge)
 ![Free cloud models](https://img.shields.io/badge/OpenCode%20Zen%20%2B%20OpenRouter-free%2C%20no%20card-F97316?style=for-the-badge)
-![Test suites](https://img.shields.io/badge/test%20suites-14-8B7CF6?style=for-the-badge)
+![Test suites](https://img.shields.io/badge/test%20suites-47-8B7CF6?style=for-the-badge)
 ![Shell access](https://img.shields.io/badge/model%20shell-NONE-20242C?style=for-the-badge)
 
 <br>
@@ -528,6 +528,14 @@ Most “AI made a game” demos stop after files exist. Nex asks a less flatteri
 > **What independent evidence do we have that this is a coherent, playable, stable result?**
 
 For game-authoring requests, `agent/quality.py` derives a production contract from the **goal plus the live MCP catalog**. It is engine-agnostic and deterministic. A tool is never invented because a workflow would look nicer with it.
+
+### A creative contract that survives replanning
+
+Game plans now carry a bounded, structured `creative_brief`: pitch, player fantasy, target audience/platform, core loop, signature mechanic, design pillars, visual/audio direction, session shape, progression, accessibility, assumptions, and at least four acceptance criteria with explicit verification methods. The run card exposes this as a user-visible **design target**, not hidden model reasoning.
+
+A missing or thin first brief gets one bounded completion attempt that is allowed to fill the brief but **cannot replace or smuggle changes into the validated tool steps**. The accepted brief is carried into later production stages and replans so the game does not silently change genre, core loop, or art direction halfway through. Existing-project feature requests are instructed to preserve the project's identity and keep their brief scoped to that feature.
+
+This improves planning coherence, not engine capability: a brief is a proposal, and the report explicitly does not treat it as proof that the implementation meets the design.
 
 ### The nine evidence gates
 
@@ -1540,7 +1548,7 @@ cd nex
 python3 tests/run_all.py
 ```
 
-Twenty-three suites run in isolated processes because several intentionally configure different state homes and policies:
+Forty-seven suites run in isolated processes because several intentionally configure different state homes and policies:
 
 | Suite | What it proves |
 | --- | --- |
@@ -1553,6 +1561,7 @@ Twenty-three suites run in isolated processes because several intentionally conf
 | `test_task_graph` | Dependency graph: ready/deps_met, transitive skip propagation on failure (including diamond-shaped graphs), serialization round-trip |
 | `test_context` | Bounded run memory: truncation and the retention cap |
 | `test_quality` | Game intent detection, separate capture/review gates, evidence-only scoring, unavailable gates, bounded corrective polish |
+| `test_game_brief` | Creative-brief field bounds, acceptance-verification requirements, brief-only repair, and no design drift across replans |
 | `test_production` | Large-scope detection, MCP studio readiness, eight-stage execution, cross-stage dataflow, bounded honest completion |
 | `test_engine_profiles` | Unreal 5.8 / Roblox detection, readiness, description distrust, planning contracts, events, and report metadata |
 | `test_mcp_production` | Balanced capability portfolios, schema-signature fidelity, causal plan auditing with one bounded repair, contract pinning, empty-success rejection, structured dataflow, context redaction, MCP resource/prompt context priming, deterministic production DAGs, pre-flight consent manifests, and cross-server corroboration |
@@ -1578,12 +1587,13 @@ npm install
 npm test
 ```
 
-Eighteen tests, Node's built-in test runner plus `jsdom` as the only dev dependency — no bundler, no browser automation, nothing shipped to the app itself (it is still plain ES modules with zero build step).
+Nineteen tests, Node's built-in test runner plus `jsdom` as the only dev dependency — no bundler, no browser automation, nothing shipped to the app itself (it is still plain ES modules with zero build step).
 
 | Suite | What it proves |
 | --- | --- |
 | `imports.test.mjs` | Every named import across `nex/web/js` resolves to a real export — formalizes the exact bug class that once broke the whole chat UI (see below) |
 | `boot.test.mjs` | The real `index.html` + `main.js` boot end-to-end in jsdom without throwing or logging an uncaught error |
+| `creative-brief.test.mjs` | The run card renders proposed creative briefs as inert text and exposes missing design fields |
 | `markdown.test.mjs` | `renderMarkdown`/`renderStreaming` never produce a live `<script>`/`onerror`/`javascript:`/`data:` vector, and headings/lists/tables/fenced code render as real structural DOM |
 | `state.test.mjs` | `createStore`'s get/set/update/subscribe contract, including that a throwing subscriber cannot break the store or other subscribers |
 
@@ -1613,6 +1623,7 @@ Nexofficial/
     │   ├── loop.py                 plan → act → observe → evaluate → adapt
     │   ├── engines.py              Unreal 5.8 + Roblox contracts/readiness
     │   ├── production.py           eight-stage studio program + MCP readiness
+    │   ├── game_brief.py            bounded creative contract + acceptance checks
     │   ├── quality.py              production contracts, gates, scorecards
     │   ├── mcp_production.py       balanced catalogs, schema signatures, plan audit
     │   ├── model_planner.py        model plan + deterministic live validation
@@ -1638,7 +1649,7 @@ Nexofficial/
     │   ├── index.html              accessible application shell
     │   ├── css/app.css             complete visual system
     │   └── js/                     face, chat, runs, capabilities, settings
-    └── tests/                       thirteen isolated suites + HTTP echo MCP
+    └── tests/                       47 isolated suites + HTTP echo MCP
 ```
 
 ## Honest limits
@@ -1656,6 +1667,7 @@ law of nature, it is a to-do item.
 | A server's work was graded **on its own homework** | Every evidence item records which server produced it, and the scorecard reports whether any observation came from a server that did **not** perform the changes | `agent/quality.py` |
 | Approvals arrived **one surprise at a time** | A pre-flight manifest ships with the plan: exactly which steps will pause, which category they fall into, and why — before a single call executes | `agent/loop.py` |
 | A finished run was **one-way** — no way back | Every run reports **compensating actions**: inverse tools discovered in the live catalog, targeted by the identity the server itself returned, executed newest-first through the normal approval gate. Coverage is always stated, never implied | `agent/reversal.py` |
+| A multi-stage game could **drift in concept** between plans | Game runs now carry a bounded creative brief—core loop, signature mechanic, art direction, progression, and observable acceptance checks—through later stages and replans. It is surfaced in the run card as a proposed design target, not a claim of implementation quality | `agent/game_brief.py`, `agent/model_planner.py`, `agent/loop.py` |
 
 Each of those is covered by regression tests in `tests/test_mcp_production.py`,
 including the unhappy paths: opaque binary resources are never inlined, project
@@ -1667,6 +1679,7 @@ invent arguments it cannot honestly supply.
 
 - **Nex orchestrates capabilities; it does not contain an engine.** It now reads project state through MCP resources, but if the server cannot manipulate navmeshes, animate characters, capture a viewport, or profile a build, Nex cannot synthesize those powers. Reading about a lightmap is not baking one.
 - **The quality score is evidence coverage, not a review score.** `100/100` means all required tool-backed checks ran successfully. It does not mean the art is beautiful, the combat is fun, the story is good, accessibility is complete, or customers will buy it.
+- **The creative brief is a design proposal, not a design validator.** It gives the planner a more stable target, but the model can still produce a weak concept and no deterministic checker can prove that the resulting game is fun or distinctive.
 - **Autonomous is not the same as unattended.** The pre-flight manifest tells you where the run will stop; it does not remove the stops. Risky tools still wait for a person unless the operator explicitly grants a standing approval.
 - **MCP servers run with your permissions — first-party ones included.** Epic's and Roblox's servers are first-party and trustworthy, but they are also *powerful*: both expose arbitrary code execution inside the editor (`run_code`, `execute_python`), and Epic ships theirs as experimental with no authentication layer. Nex controls what it sends and how it interprets responses, but a server can still be wrong about what happened. Cross-server corroboration raises the cost of a lie — a second, independent witness now has to agree — but it only works when you actually connect a second server, and colluding servers defeat it. Keep servers untrusted until reviewed. A local stdio server still runs with the OS permissions of the user who launched Nex; the minimal environment prevents accidental token inheritance, not all OS-level access.
 - **Resource content is data, never instruction.** Project context is bounded, redacted, and explicitly fenced as untrusted — which blunts prompt injection, but no fence is proof against a model that decides to be creative.

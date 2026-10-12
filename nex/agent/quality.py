@@ -227,6 +227,14 @@ def planning_brief(profile: QualityProfile, registry: Any) -> str:
         "Use a vertical-slice sequence: inspect -> establish explicit "
         "acceptance criteria -> implement systems/content -> integrate -> "
         "build/run -> observe -> verify -> correct once if evidence fails.",
+        "Include a structured creative_brief in the plan JSON. It must define "
+        "a specific pitch, player fantasy, audience/platform, core loop, "
+        "signature mechanic, design pillars, visual/audio direction, session "
+        "shape, progression, accessibility, assumptions, and at least four "
+        "observable acceptance criteria with a concrete verification method. "
+        "Use the live project and tools to ground it; mark assumptions and "
+        "unavailable checks plainly. This is a proposed target, never proof "
+        "that the game meets it.",
         "Each evidence gate below must be a separate dependency-ordered MCP "
         "step when a suitable live tool exists. Use only catalog tools and "
         "do not substitute prose or implementation success for observation.",

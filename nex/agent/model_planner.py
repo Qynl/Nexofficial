@@ -35,6 +35,9 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.jsonreply import extract_json_with_key
+from agent.game_brief import (
+    brief_health, missing_brief_fields, normalize_game_brief,
+)
 from agent.llm import call as call_llm
 from agent.mcp_production import (
     audit_production_plan, production_catalog, safe_identifier,
@@ -353,6 +356,68 @@ def _extract_plan(reply: Any) -> Optional[Dict[str, Any]]:
         and isinstance(plan.get("steps"), list) else None
 
 
+def _creative_brief_for_plan(plan: Dict[str, Any],
+                             messages: List[Dict[str, str]],
+                             llm: Callable,
+                             purpose: str,
+                             game_production: bool,
+                             existing: Optional[Dict[str, Any]],
+                             allow_repair: bool) -> Dict[str, Any]:
+    """Normalize a proposed brief and make one bounded completion attempt.
+
+    A prior run's brief is canonical across stages. On the initial game plan,
+    a missing/incomplete brief gets one repair request that may only add the
+    brief; its replacement tool steps are deliberately ignored. Replans and
+    later stages do not spend another auxiliary call on the same repair.
+    """
+    prior = normalize_game_brief(existing)
+    if prior and not missing_brief_fields(prior):
+        return prior
+    brief = normalize_game_brief(plan.get("creative_brief"))
+    # Fill gaps in an older partial brief, but never silently replace a
+    # previously established design decision with a new model suggestion.
+    brief.update(prior)
+    if (not game_production or not allow_repair or not plan.get("steps")
+            or not llm or not missing_brief_fields(brief)):
+        return brief
+
+    missing = missing_brief_fields(brief)
+    repair_msg = (
+        "Complete the plan's user-visible creative_brief. The original tool "
+        "steps are already being validated; do not change, add, remove, or "
+        "reorder any step. Return the same plan JSON with only "
+        "creative_brief completed. Fill these missing or thin fields: %s. "
+        "Acceptance criteria must be objects with both criterion and "
+        "verification. Use only the live project/tool context; label "
+        "assumptions and never claim unavailable tests can run. Candidate "
+        "plan data:\n%s"
+    ) % (", ".join(missing), json.dumps(plan, ensure_ascii=False)[:14000])
+    repair_messages = messages + [
+        {"role": "assistant", "content": json.dumps(
+            plan, ensure_ascii=False)[:16000]},
+        {"role": "user", "content": repair_msg},
+    ]
+    try:
+        repaired_reply = call_llm(llm, repair_messages, purpose)
+    except Exception:  # noqa: BLE001 - brief repair is bounded/advisory
+        return brief
+    repaired_plan = _extract_plan(repaired_reply)
+    if repaired_plan is None:
+        return brief
+    candidate = normalize_game_brief(repaired_plan.get("creative_brief"))
+    candidate.update(prior)
+    if len(missing_brief_fields(candidate)) < len(missing):
+        return candidate
+    return brief
+
+
+def _attach_creative_brief(graph: TaskGraph, brief: Dict[str, Any],
+                           game_production: bool) -> None:
+    if game_production or brief:
+        graph.plan_meta["creative_brief"] = normalize_game_brief(brief)
+        graph.plan_meta["creative_brief_health"] = brief_health(brief)
+
+
 def model_driven_planner(goal: str, registry,
                          llm: Optional[Callable] = None,
                          max_catalog: int = 80,
@@ -362,7 +427,9 @@ def model_driven_planner(goal: str, registry,
                          quality_brief: str = "",
                          completed_refs: Optional[Dict[str, str]] = None,
                          id_prefix: str = "",
-                         production_contract: bool = False
+                         production_contract: bool = False,
+                         game_production: bool = False,
+                         existing_creative_brief: Optional[Dict[str, Any]] = None
                          ) -> Tuple[TaskGraph, Optional[Dict[str, Any]]]:
     """Ask the LLM for a plan; validate it; return (graph, plan_dict).
 
@@ -382,6 +449,9 @@ def model_driven_planner(goal: str, registry,
     keeps newly planned task ids distinct from retained history.
     `production_contract` activates balanced MCP catalog selection plus one
     bounded repair round for causally unordered production evidence.
+    `game_production` requests a bounded, structured creative brief; an
+    incomplete first brief gets one repair attempt. `existing_creative_brief`
+    is carried unchanged across production stages and replans.
     """
     if llm is None:
         return TaskGraph(), None
@@ -395,6 +465,26 @@ def model_driven_planner(goal: str, registry,
                      + "\n- ".join(str(f) for f in feedback[:6]))
     if quality_brief:
         user_msg += "\n\n" + quality_brief
+    if game_production:
+        user_msg += (
+            "\n\nGAME CREATIVE CONTRACT: Include a plan-level "
+            "creative_brief with the fields pitch, player_fantasy, "
+            "target_audience, target_platform, core_loop, "
+            "signature_mechanic, design_pillars, visual_direction, "
+            "audio_direction, session_shape, progression, accessibility, "
+            "assumptions, and acceptance_criteria. Provide at least four "
+            "acceptance_criteria objects, each with criterion and "
+            "verification. Be distinctive and concrete, not generic 'AAA' "
+            "language. Scope the brief to the goal and existing project; "
+            "do not turn a focused feature request into a different game."
+        )
+    if existing_creative_brief:
+        user_msg += (
+            "\n\nCANONICAL CREATIVE BRIEF (carry this forward without "
+            "drift; only revise if concrete project/test evidence requires "
+            "it):\n" + json.dumps(normalize_game_brief(
+                existing_creative_brief), ensure_ascii=False)[:6000]
+        )
     if completed_refs:
         user_msg += (
             "\n\nSuccessful historical steps available to this replan:\n- " +
@@ -417,6 +507,12 @@ def model_driven_planner(goal: str, registry,
     plan = _extract_plan(reply)
     if plan is None:
         return TaskGraph(), None
+
+    creative_brief = _creative_brief_for_plan(
+        plan, messages, llm, purpose, game_production,
+        existing_creative_brief,
+        allow_repair=(not note and not completed_refs
+                      and not existing_creative_brief))
 
     production_review: Optional[Dict[str, Any]] = None
     if production_contract and plan.get("steps"):
@@ -455,6 +551,7 @@ def model_driven_planner(goal: str, registry,
                     "rationale": str(plan.get("rationale") or ""),
                     "requested": len(plan.get("steps") or []), "kept": 0,
                 }
+                _attach_creative_brief(graph, creative_brief, game_production)
                 return graph, plan
 
     if not plan.get("steps"):
@@ -464,6 +561,7 @@ def model_driven_planner(goal: str, registry,
                        "rationale": str(plan.get("rationale") or ""),
                        "requested": 0, "kept": 0,
                        "empty_reason": str(plan.get("rationale") or "")}
+        _attach_creative_brief(g, creative_brief, game_production)
         return g, plan
 
     valid, missing = validate_plan_tools(plan, registry)
@@ -476,6 +574,7 @@ def model_driven_planner(goal: str, registry,
             "rationale": str(plan.get("rationale") or ""),
             "requested": len(plan.get("steps") or []), "kept": 0,
         }
+        _attach_creative_brief(graph, creative_brief, game_production)
         return graph, plan
     graph = plan_to_graph(plan, registry,
                           external_refs=completed_refs,
@@ -483,4 +582,5 @@ def model_driven_planner(goal: str, registry,
     graph.plan_meta["missing_tools"] = missing
     if production_review is not None:
         graph.plan_meta["production_review"] = production_review
+    _attach_creative_brief(graph, creative_brief, game_production)
     return graph, plan

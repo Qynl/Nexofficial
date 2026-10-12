@@ -24,6 +24,7 @@ SUITES = [
     "test_task_graph.py",     # dependency graph: transitive skip propagation
     "test_context.py",        # bounded run memory: truncation, retention cap
     "test_quality.py",        # game production gates + bounded polish pass
+    "test_game_brief.py",    # structured creative contract + continuity
     "test_production.py",     # multi-stage studio program + MCP readiness
     "test_engine_profiles.py", # Unreal 5.8 + Roblox Studio contracts/readiness
     "test_mcp_production.py", # balanced catalog, plan proof, context safety

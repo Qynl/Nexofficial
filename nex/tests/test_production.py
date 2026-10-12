@@ -263,7 +263,9 @@ class ProgramLoopTests(unittest.TestCase):
         report = AgentRun(
             "studio-correct", "Make GTA 7", mgr, llm=llm,
             max_production_stages=1, max_steps=8).run()
-        self.assertEqual(len(plans), 2)
+        self.assertEqual(len(plans), 3)
+        self.assertIn("Complete the plan's user-visible creative_brief", plans[1])
+        self.assertIn("stage evidence is incomplete", plans[2])
         self.assertEqual(report["replans"], 1)
         review = report["production_program"]["stage_reviews"]["discovery"]
         self.assertTrue(review["passed"])

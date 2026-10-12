@@ -104,6 +104,11 @@ function renderCard(card) {
   body.className = 'run-body';
   const inner = document.createElement('div');
   inner.className = 'run-body-inner';
+  const creative = document.createElement('section');
+  creative.className = 'run-creative-brief';
+  creative.hidden = true;
+  creative.setAttribute('aria-label', 'Game creative contract');
+  inner.appendChild(creative);
   const program = document.createElement('section');
   program.className = 'run-program';
   program.hidden = true;
@@ -120,6 +125,7 @@ function renderCard(card) {
   body.appendChild(inner);
   el.appendChild(body);
   card.stepsEl = steps;
+  card.creativeBriefEl = creative;
   card.programEl = program;
   card.qualityEl = quality;
 
@@ -191,6 +197,8 @@ export function onRunPlan(ev) {
   for (const s of ev.plan.steps || []) {
     upsertStep(card, s);
   }
+  renderCreativeBrief(card, ev.plan.creative_brief,
+                      ev.plan.creative_brief_health);
   updateCounts(card);
   scrollFollow();
 }
@@ -336,6 +344,78 @@ export function onRunProgress(ev) {
 }
 
 export function onRunEval() { /* verdict details stay internal */ }
+
+function renderCreativeBrief(card, brief = {}, health = null) {
+  if (!card || !card.creativeBriefEl || (!health && !brief)) return;
+  const el = card.creativeBriefEl;
+  const fields = brief && typeof brief === 'object' ? brief : {};
+  const hasContent = Object.keys(fields).length > 0;
+  if (!hasContent && !health) return;
+  el.hidden = false;
+  el.innerHTML = '';
+
+  const details = document.createElement('details');
+  details.className = 'creative-brief-details';
+  const summary = document.createElement('summary');
+  summary.textContent = fields.title
+    ? `Creative contract · ${fields.title}` : 'Creative contract';
+  details.appendChild(summary);
+
+  const status = document.createElement('p');
+  status.className = 'creative-brief-status';
+  status.textContent = health && health.complete
+    ? 'Structured design target · complete, not yet verified in the game.'
+    : `Design target incomplete · ${(health?.missing || []).join(', ') || 'awaiting model output'}`;
+  details.appendChild(status);
+
+  const addText = (label, value) => {
+    if (!value) return;
+    const row = document.createElement('p');
+    row.className = 'creative-brief-row';
+    const heading = document.createElement('strong');
+    heading.textContent = `${label}: `;
+    row.appendChild(heading);
+    row.appendChild(document.createTextNode(String(value)));
+    details.appendChild(row);
+  };
+  const addList = (label, values, format = (value) => String(value)) => {
+    if (!Array.isArray(values) || !values.length) return;
+    const group = document.createElement('div');
+    group.className = 'creative-brief-group';
+    const heading = document.createElement('strong');
+    heading.textContent = label;
+    group.appendChild(heading);
+    const list = document.createElement('ul');
+    for (const value of values) {
+      const item = document.createElement('li');
+      item.textContent = format(value);
+      list.appendChild(item);
+    }
+    group.appendChild(list);
+    details.appendChild(group);
+  };
+
+  addText('Pitch', fields.pitch);
+  addText('Player fantasy', fields.player_fantasy);
+  addText('Audience / platform',
+    [fields.target_audience, fields.target_platform].filter(Boolean).join(' · '));
+  addList('Core loop', fields.core_loop);
+  addText('Signature mechanic', fields.signature_mechanic);
+  addList('Design pillars', fields.design_pillars);
+  addText('Visual direction', fields.visual_direction);
+  addText('Audio direction', fields.audio_direction);
+  addText('Session shape', fields.session_shape);
+  addText('Progression', fields.progression);
+  addList('Accessibility', fields.accessibility);
+  addList('Acceptance criteria', fields.acceptance_criteria, (item) => {
+    if (!item || typeof item !== 'object') return String(item || '');
+    const verification = item.verification
+      ? ` — Verify: ${item.verification}` : ' — verification missing';
+    return `${item.criterion || 'Criterion missing'}${verification}`;
+  });
+  addList('Assumptions', fields.assumptions);
+  el.appendChild(details);
+}
 
 export function onRunProgram(ev) {
   const card = runCards.get(ev.run_id);
@@ -559,6 +639,8 @@ export function onRunCompleted(ev) {
     updateStatusLine(card);
     updateCounts(card);
     updateAgentPill(null);
+    renderCreativeBrief(card, report.creative_brief,
+                        report.creative_brief_health);
     renderReversal(card, ev.run_id, report.reversal);
     // The summary arrives as a normal assistant message (chat flow).
   }

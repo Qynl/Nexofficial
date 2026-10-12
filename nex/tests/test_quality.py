@@ -211,9 +211,11 @@ class LoopQualityTests(unittest.TestCase):
         self.assertEqual(report["quality"]["score"], 100)
         self.assertEqual(report["quality_passes"], 1)
         self.assertEqual(report["replans"], 1)
-        self.assertEqual(len(planner_calls), 2)
+        self.assertEqual(len(planner_calls), 3)
         self.assertIn("GAME PRODUCTION QUALITY CONTRACT", planner_calls[0])
-        self.assertIn("do NOT repeat", planner_calls[1])
+        self.assertIn("Complete the plan's user-visible creative_brief",
+                      planner_calls[1])
+        self.assertIn("do NOT repeat", planner_calls[2])
         self.assertEqual(
             [name for _, name, _ in mgr.calls].count("capture_frame"), 1)
         capture_args = [args for _, name, args in mgr.calls

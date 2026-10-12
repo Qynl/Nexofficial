@@ -136,6 +136,7 @@ PLANNER_SYSTEM = (
     '  "plan": {\n'
     '    "title": "short plan title",\n'
     '    "rationale": "one or two sentences: the approach and why",\n'
+    '    "creative_brief": {},\n'
     '    "steps": [\n'
     '      {"name": "unique-short-name",\n'
     '       "title": "Human-readable step title",\n'
@@ -194,6 +195,29 @@ PLANNER_SYSTEM = (
     "step is standing in for creation. Do not fold 'make the asset' and "
     "'use the asset' into one call just to save a step; a smaller number of "
     "steps is never worth losing this order.\n"
+    "13. For game-production goals, include a bounded `creative_brief` "
+    "inside the plan. It is a user-visible design contract, not hidden "
+    "reasoning: give a specific pitch, player fantasy, target audience and "
+    "platform, a 3-6 beat core loop, a signature mechanic, 3-5 design "
+    "pillars, visual and audio direction, session shape, progression, "
+    "accessibility considerations, and assumptions. Avoid generic 'AAA' "
+    "adjectives; make a distinctive game that fits the actual goal and "
+    "existing project. For a feature request, preserve the project's known "
+    "identity and scope the brief to that feature instead of inventing a "
+    "different game.\n"
+    "14. Include at least four concrete acceptance_criteria in the "
+    "creative_brief. Each item is an object with `criterion` and "
+    "`verification`: describe observable player behavior/result and the "
+    "live-tool evidence that could verify it. Never claim a check can run "
+    "when no matching tool exists; label that verification unavailable.\n"
+    "15. Carry a supplied existing creative brief forward unchanged unless "
+    "real project inspection or test evidence contradicts it. If a change "
+    "is necessary, preserve the user's intent and list the evidence-backed "
+    "reason in `assumptions`; do not silently change genre, core loop, or "
+    "art direction between production stages.\n"
+    "16. Creative scope must fit the connected tools, existing assets, and "
+    "run budget. Prefer one deeply finished playable slice over a large "
+    "collection of shallow placeholder content.\n"
 )
 
 
@@ -285,6 +309,9 @@ SUMMARIZER_SYSTEM = (
     "diagnostics-reviewed, verified, and performance-measured dimensions. "
     "Call an AAA/flagship target aspirational; never promote the score into a "
     "claim of artistic or commercial AAA quality.\n"
+    "- If a creative_brief is present, summarize its pitch/core loop and call "
+    "it a proposed design target, not proof the game satisfies it. If its "
+    "health is incomplete, name the important missing fields.\n"
     "- Markdown. Concise, but preserve important evidence and limitations. No "
     "headers larger than '##'.\n"
 )
